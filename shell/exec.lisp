@@ -357,10 +357,16 @@ Applies alias substitution to the command name (first word)."
   (let ((argv '()) (declaration nil) (first t))
     (dolist (w (simple-command-words cmd))
       (let* ((raw (word-text w))
+             (as-assignment (and declaration (assignment-operand-p raw)))
              (fields (expand-word-to-fields
                       sh raw
-                      ;; operands of export/readonly expand like assignments
-                      :assignment (and declaration (assignment-operand-p raw)))))
+                      ;; Operands of export/readonly are expanded exactly like
+                      ;; a real assignment: tilde after = and :, and NO field
+                      ;; splitting or pathname expansion -- `export x=$v' with
+                      ;; v="a b" must export the whole value, not just "a".
+                      :assignment as-assignment
+                      :split (not as-assignment)
+                      :glob (not as-assignment))))
         (when first
           (setf declaration (and (member (first fields) +declaration-utilities+
                                          :test #'string=)
@@ -543,19 +549,33 @@ reusing NODE's assignments and redirections."
 (defun apply-assignments (sh assignments &key to-shell)
   "Evaluate NAME=VALUE assignments. When TO-SHELL, set in the shell (persist);
 otherwise return a list of temporary K=V for a command environment."
-  (let ((temp '()))
-    (dolist (a assignments)
-      (let* ((name (assignment-name a))
-             (vw (assignment-value a))
-             (val (if vw
-                      (first (expand-word-to-fields sh (word-text vw)
-                                                    :split nil :glob nil
-                                                    :assignment t))
-                      "")))
-        (setf val (or val ""))
-        (if to-shell
-            (set-var sh name val)
-            (push (cons name val) temp))))
+  (let ((temp '()) (saved '()))
+    (unwind-protect
+         (dolist (a assignments)
+           (let* ((name (assignment-name a))
+                  (vw (assignment-value a))
+                  (val (if vw
+                           (first (expand-word-to-fields sh (word-text vw)
+                                                         :split nil :glob nil
+                                                         :assignment t))
+                           "")))
+             (setf val (or val ""))
+             (cond
+               (to-shell (set-var sh name val))
+               (t
+                ;; POSIX evaluates these left to right, and an earlier one is
+                ;; visible to a later one: `a=1 b=$a cmd' must give b=1. Bind
+                ;; it in the shell for the duration of this list, then undo --
+                ;; the value reaches the command through its environment.
+                (push (cons name (multiple-value-list (get-var sh name))) saved)
+                (set-var sh name val)
+                (push (cons name val) temp)))))
+      (dolist (entry saved)
+        (destructuring-bind (name value found exported) (cons (car entry)
+                                                              (cdr entry))
+          (if found
+              (setf (gethash name (shell-vars sh)) (cons value exported))
+              (remhash name (shell-vars sh))))))
     (nreverse temp)))
 
 (defun run-builtin (sh name args node)

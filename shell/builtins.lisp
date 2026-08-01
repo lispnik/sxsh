@@ -642,25 +642,55 @@ be re-read to restore the current settings."
              (set-var sh "_OPTITER" "1"))))
 
 ;;; trap [action] condition... --------------------------------------------
+(defun trap-display-name (cond-name)
+  "How a condition is shown by `trap'. Signals get their full SIGxxx name;
+EXIT is not a signal and keeps its bare name."
+  (if (string= cond-name "EXIT") "EXIT" (concatenate 'string "SIG" cond-name)))
+
+(defun print-traps (sh out &optional conds)
+  (flet ((show (k v) (format out "trap -- '~A' ~A~%" v (trap-display-name k))))
+    (if conds
+        (dolist (c conds)
+          (let ((k (normalize-signal c)))
+            (multiple-value-bind (v found) (gethash k (shell-traps sh))
+              (when found (show k v)))))
+        (maphash #'show (shell-traps sh))))
+  0)
+
+(defun valid-condition-p (name)
+  "True if NAME designates a trappable condition (a signal or EXIT)."
+  (let ((norm (normalize-signal name)))
+    (or (string= norm "EXIT") (and (signal-number norm) t))))
+
 (define-builtin "trap" (sh args out)
+  ;; `--' is accepted and ignored, as for any POSIX utility.
+  (when (and args (string= (first args) "--")) (pop args))
   (cond
-    ((or (null args) (and (= 1 (length args)) (string= (first args) "-p")))
-     (maphash (lambda (k v) (format out "trap -- '~A' ~A~%" v k)) (shell-traps sh))
-     0)
-    ((string= (first args) "-p")
-     (dolist (cond (rest args))
-       (multiple-value-bind (v found) (gethash (normalize-signal cond) (shell-traps sh))
-         (when found (format out "trap -- '~A' ~A~%" v cond))))
+    ((null args) (print-traps sh out))
+    ((string= (first args) "-p") (print-traps sh out (rest args)))
+    ;; `trap EXIT' / `trap 0 2' -- operands only, no action. POSIX says a
+    ;; leading unsigned integer means every operand is a condition; shells
+    ;; extend that to names. Treating the first operand as an action here
+    ;; meant `trap EXIT' silently kept the handler it was meant to remove.
+    ((every #'valid-condition-p args)
+     (dolist (c args)
+       (let ((sig (normalize-signal c)))
+         (remhash sig (shell-traps sh))
+         (uninstall-signal-handler sig)))
      0)
     (t
-     ;; If the first arg is a signal spec itself (a number or known name) and
-     ;; NOT an action, POSIX treats a missing action as "reset". We follow the
-     ;; common rule: the first arg is the action; the rest are conditions.
      (let ((action (first args)) (conds (rest args)))
+       (when (null conds)
+         (format *error-output* "trap: usage: trap [action] condition ...~%")
+         (return-from builtin 2))
+       (dolist (c conds)
+         (unless (valid-condition-p c)
+           (format *error-output* "trap: ~A: bad signal specification~%" c)
+           (return-from builtin 1)))
        (dolist (c conds)
          (let ((sig (normalize-signal c)))
            (cond
-             ((or (string= action "-"))
+             ((string= action "-")
               (remhash sig (shell-traps sh))
               (uninstall-signal-handler sig))
              ((string= action "")
@@ -722,8 +752,9 @@ unknown names are not real signals -- nothing to install."
       ((string= u "0") "EXIT")
       ((string= u "EXIT") "EXIT")
       ((and (>= (length u) 3) (string= (subseq u 0 3) "SIG")) (subseq u 3))
-      ;; numeric signal designator
-      ((every #'digit-char-p u)
+      ;; numeric signal designator. The length test matters: EVERY is true of
+      ;; the empty string, so `trap "" INT' reached PARSE-INTEGER with "".
+      ((and (plusp (length u)) (every #'digit-char-p u))
        (let ((n (parse-integer u)))
          (or (car (rassoc n +signal-names+)) u)))
       (t u))))

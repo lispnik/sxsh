@@ -249,6 +249,29 @@ check read-escaped-delim '[a:b][]'   0 'printf "a\\\\:b\n" | { IFS=: read x y; e
 check read-continuation '[ab]'       0 'printf "a\\\\\nb\n" | { read x; echo "[$x]"; }'
 check read-while-no-nl  'got:l1'     0 'printf "l1\nl2" | { while read l; do echo "got:$l"; done; }'
 
+# --- trap forms (POSIX 2.14) ----------------------------------------------
+check trap-multi-signal "trap -- 'echo hi' SIGINT
+trap -- 'echo hi' SIGTERM" 0 'trap "echo hi" INT TERM; trap'
+check trap-full-names   "trap -- 'echo hi' SIGINT" 0 'trap "echo hi" INT; trap'
+check trap-reset-bare   'done'  0 'trap "echo e" EXIT; trap EXIT; echo done'
+check trap-reset-zero   'done'  0 'trap "echo e" EXIT; trap 0; echo done'
+check trap-zero-is-exit 'done
+e'                              0 'trap "echo e" 0; echo done'
+check trap-dash-removes ''      0 'trap "echo hi" INT; trap - INT; trap'
+check trap-p-one        "trap -- 'echo hi' SIGINT" 0 'trap "echo hi" INT; trap -p INT'
+check trap-double-dash  "trap -- 'echo hi' SIGINT" 0 'trap -- "echo hi" INT; trap'
+check trap-ignore-empty "trap -- '' SIGINT" 0 "trap '' INT; trap"
+check trap-ignore-works 'survived' 0 "trap '' INT; kill -INT \$\$; echo survived"
+check trap-bad-signal   ''      1 'trap "echo x" NOSUCHSIG 2>/dev/null'
+
+# --- temp assignments and declaration operands ----------------------------
+check tempenv-sees-prev '1'     0 'a=1 b=$a env 2>/dev/null | grep -c "^b=1"'
+check tempenv-no-leak   'outer' 0 'x=outer; x=inner env >/dev/null; echo $x'
+check export-no-split   '[a b]' 0 'v="a b"; export x=$v; echo "[$x]"'
+check readonly-no-split '[a b]' 0 'v="a b"; readonly x=$v; echo "[$x]"'
+check export-no-glob    '*.c'   0 'cd "$(mktemp -d)"; touch q.c; export x=*.c; echo "$x"'
+check noclobber-devnull '0'     0 'set -C; echo hi > /dev/null; echo $?'
+
 # --- arithmetic: increment/decrement and integer-only errors --------------
 check arith-postincr    '1
 2'                              0 'x=1; echo $((x++)); echo $x'

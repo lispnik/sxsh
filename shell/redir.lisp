@@ -17,14 +17,25 @@
 (defconstant +o-excl+   sb-posix:o-excl)
 (defconstant +mode+ #o666)
 
-(defun noclobber-flags (sh)
+(defun existing-non-regular-p (path)
+  "True if PATH exists and is not a regular file (a device, fifo, socket...)."
+  (handler-case
+      (let ((st (sb-posix:stat path)))
+        (not (sb-posix:s-isreg (sb-posix:stat-mode st))))
+    (error () nil)))
+
+(defun noclobber-flags (sh path)
   "Extra open(2) flags for a plain `>' redirection.
 
 With `set -C' POSIX forbids `>' from truncating an existing regular file, so
-the open must fail instead: O_EXCL turns that into EEXIST. `>|' bypasses it
-and always truncates. Accepting -C and then truncating anyway -- which is what
-happened before -- is worse than not having the option at all."
-  (if (opt sh :noclobber) +o-excl+ +o-trunc+))
+the open must fail instead: O_EXCL turns that into EEXIST. `>|' bypasses it.
+
+The restriction is specifically about REGULAR files -- `set -C; echo > /dev/null'
+must still work -- so a device or fifo keeps the ordinary flags. Applying
+O_EXCL unconditionally broke writing to /dev/null under -C."
+  (if (and (opt sh :noclobber) (not (existing-non-regular-p path)))
+      +o-excl+
+      +o-trunc+))
 
 (define-condition redirect-error (error)
   ((path :initarg :path :reader redirect-error-path)
@@ -81,7 +92,7 @@ parameter/command/arith expansion unless the delimiter was quoted."
             (values (list (fa-open fd path +o-rdonly+ 0)) nil)))
       (:> (let ((path (single-expand sh target-word)))
             (values (list (fa-open fd path (logior +o-wronly+ +o-creat+
-                                                   (noclobber-flags sh))
+                                                   (noclobber-flags sh path))
                                    +mode+)) nil)))
       (:>\| (let ((path (single-expand sh target-word)))
               (values (list (fa-open fd path (logior +o-wronly+ +o-creat+ +o-trunc+)
@@ -145,7 +156,7 @@ RESTORE-REDIRECTS. Also returns temp paths to delete."
                       (flags (ecase op
                                (:< +o-rdonly+)
                                (:> (logior +o-wronly+ +o-creat+
-                                           (noclobber-flags sh)))
+                                           (noclobber-flags sh path)))
                                (:>\| (logior +o-wronly+ +o-creat+ +o-trunc+))
                                (:>> (logior +o-wronly+ +o-creat+ +o-append+))
                                (:<> (logior +o-rdwr+ +o-creat+))))
