@@ -69,56 +69,243 @@
               (progn (write-char c o) (incf i))))))))
 
 (define-builtin "printf" (sh args out)
+  ;; `--' ends the options; the next word is the format even if it starts
+  ;; with a dash.
+  (when (and args (string= (first args) "--")) (pop args))
   (when args
     (let ((fmt (first args)) (rest (rest args)))
-      (write-string (posix-printf fmt rest) out)))
+      (multiple-value-bind (text status) (posix-printf fmt rest)
+        (write-string text out)
+        (return-from builtin status))))
   0)
 
-(defun posix-printf (fmt args)
-  "A small printf supporting %s %d %i %x %o %c %% and \\escapes, recycling the
-format over remaining args like the real printf."
-  (with-output-to-string (o)
-    (labels ((one-pass (args)
-               (let ((i 0) (n (length fmt)) (used nil))
-                 (loop while (< i n) do
-                   (let ((c (char fmt i)))
-                     (cond
-                       ((and (char= c #\\) (< (1+ i) n))
-                        (incf i)
-                        (case (char fmt i)
-                          (#\n (write-char #\Newline o)) (#\t (write-char #\Tab o))
-                          (#\r (write-char #\Return o)) (#\\ (write-char #\\ o))
-                          (t (write-char #\\ o) (write-char (char fmt i) o)))
-                        (incf i))
-                       ((char= c #\%)
-                        (incf i)
-                        (if (and (< i n) (char= (char fmt i) #\%))
-                            (progn (write-char #\% o) (incf i))
-                            (let ((spec-start i))
-                              (loop while (and (< i n)
-                                               (not (find (char fmt i) "sdioxXcefg")))
-                                    do (incf i))
-                              (when (< i n)
-                                (let ((conv (char fmt i))
-                                      (arg (if args (progn (setf used t) (pop args)) "")))
-                                  (declare (ignore spec-start))
-                                  (write-string (format-conv conv arg) o)
-                                  (incf i))))))
-                       (t (write-char c o) (incf i)))))
-                 (values args used))))
-      (multiple-value-bind (remaining used) (one-pass args)
-        (loop while (and remaining used) do
-          (multiple-value-setq (remaining used) (one-pass remaining)))))))
+(defun printf-escape-at (s i n &key (octal t))
+  "Decode the backslash escape starting at S[i] (which is a backslash).
+Returns (values string next-index). Sharing one decoder between the format
+scanner and %b is what keeps them consistent -- an earlier version tried to
+expand a fixed-size window of the format and miscounted how much it had
+consumed, silently swallowing the character after each escape."
+  (if (>= (1+ i) n)
+      (values "\\" (1+ i))
+      (let ((e (char s (1+ i))))
+        (case e
+          (#\n (values (string #\Newline) (+ i 2)))
+          (#\t (values (string #\Tab) (+ i 2)))
+          (#\r (values (string #\Return) (+ i 2)))
+          (#\\ (values "\\" (+ i 2)))
+          (#\a (values (string (code-char 7)) (+ i 2)))
+          (#\b (values (string (code-char 8)) (+ i 2)))
+          (#\f (values (string (code-char 12)) (+ i 2)))
+          (#\v (values (string (code-char 11)) (+ i 2)))
+          (#\e (values (string (code-char 27)) (+ i 2)))
+          (t
+           (if (and octal (digit-char-p e 8))
+               (let ((j (+ i 1)) (count 0))
+                 (when (char= e #\0) (incf j))    ; optional leading 0
+                 (let ((start j))
+                   (loop while (and (< j n) (< count 3)
+                                    (digit-char-p (char s j) 8))
+                         do (incf j) (incf count))
+                   (if (> j start)
+                       (values (string (code-char (parse-integer s :start start
+                                                                   :end j
+                                                                   :radix 8)))
+                               j)
+                       (values (string #\Nul) j))))
+               (values (concatenate 'string "\\" (string e)) (+ i 2))))))))
 
-(defun format-conv (conv arg)
-  (case conv
-    (#\s (princ-to-string arg))
-    ((#\d #\i) (princ-to-string (or (ignore-errors (parse-integer arg :junk-allowed t)) 0)))
-    (#\x (format nil "~(~X~)" (or (ignore-errors (parse-integer arg :junk-allowed t)) 0)))
-    (#\X (format nil "~:@(~X~)" (or (ignore-errors (parse-integer arg :junk-allowed t)) 0)))
-    (#\o (format nil "~O" (or (ignore-errors (parse-integer arg :junk-allowed t)) 0)))
-    (#\c (if (plusp (length arg)) (string (char arg 0)) ""))
-    (t (princ-to-string arg))))
+(defun printf-escapes (s &key (octal t))
+  "Process backslash escapes in a printf format string (and in %b arguments).
+OCTAL enables \\NNN / \\0NNN, which POSIX specifies for the format string."
+  (with-output-to-string (o)
+    (let ((i 0) (n (length s)))
+      (loop while (< i n) do
+        (let ((c (char s i)))
+          (if (char= c #\\)
+              (multiple-value-bind (str next) (printf-escape-at s i n :octal octal)
+                (write-string str o)
+                (setf i next))
+              (progn (write-char c o) (incf i)))))))) 
+
+(defun printf-pad (str width left-align zero-pad numericp)
+  "Apply a field WIDTH to STR."
+  (let ((w (or width 0)))
+    (if (<= w (length str))
+        str
+        (let ((fill (- w (length str))))
+          (cond
+            (left-align (concatenate 'string str
+                                     (make-string fill :initial-element #\Space)))
+            ((and zero-pad numericp)
+             ;; a sign stays in front of the zero padding
+             (if (and (plusp (length str)) (member (char str 0) '(#\- #\+)))
+                 (concatenate 'string (subseq str 0 1)
+                              (make-string fill :initial-element #\0)
+                              (subseq str 1))
+                 (concatenate 'string (make-string fill :initial-element #\0) str)))
+            (t (concatenate 'string (make-string fill :initial-element #\Space)
+                            str)))))))
+
+(defun printf-integer (arg)
+  "Convert a printf argument to an integer, returning (values int okp).
+POSIX: a value that is not a valid number is a diagnostic and a non-zero exit,
+but printf still emits something (0) and carries on with the remaining
+arguments."
+  (let* ((s (string-trim '(#\Space #\Tab) (princ-to-string arg))))
+    (cond
+      ((string= s "") (values 0 t))
+      ;; 'x or "x is the numeric value of the character
+      ((and (> (length s) 1) (member (char s 0) '(#\' #\")))
+       (values (char-code (char s 1)) t))
+      (t (multiple-value-bind (v end)
+             (ignore-errors (parse-integer s :junk-allowed t))
+           (if (and v (= end (length s)))
+               (values v t)
+               (progn
+                 (format *error-output* "printf: ~A: invalid number~%" s)
+                 (values (or v 0) nil))))))))
+
+(defun posix-printf (fmt args)
+  "A printf supporting %s %b %c %d %i %o %u %x %X %% with flags, field width
+and precision (including the `*' forms), recycling the format over remaining
+arguments. Returns (values text status)."
+  (let ((status 0))
+    (values
+     (with-output-to-string (o)
+       (labels
+           ((one-pass (args)
+              (let ((i 0) (n (length fmt)) (used nil))
+                (flet ((next-arg ()
+                         (if args (progn (setf used t) (pop args)) "")))
+                  (loop while (< i n) do
+                    (let ((c (char fmt i)))
+                      (cond
+                        ((char= c #\\)
+                         (multiple-value-bind (str next)
+                             (printf-escape-at fmt i n)
+                           (write-string str o)
+                           (setf i next)))
+                        ((char= c #\%)
+                         (incf i)
+                         (cond
+                           ((and (< i n) (char= (char fmt i) #\%))
+                            (write-char #\% o) (incf i))
+                           (t
+                            (let ((left nil) (zero nil) (plus nil) (space nil)
+                                  (width nil) (precision nil))
+                              ;; flags
+                              (loop while (and (< i n)
+                                               (member (char fmt i)
+                                                       '(#\- #\0 #\+ #\Space #\#)))
+                                    do (case (char fmt i)
+                                         (#\- (setf left t))
+                                         (#\0 (setf zero t))
+                                         (#\+ (setf plus t))
+                                         (#\Space (setf space t)))
+                                       (incf i))
+                              ;; width
+                              (cond
+                                ((and (< i n) (char= (char fmt i) #\*))
+                                 (setf width (printf-integer (next-arg)))
+                                 (when (and width (minusp width))
+                                   (setf left t width (abs width)))
+                                 (incf i))
+                                (t (let ((start i))
+                                     (loop while (and (< i n)
+                                                      (digit-char-p (char fmt i)))
+                                           do (incf i))
+                                     (when (> i start)
+                                       (setf width (parse-integer fmt :start start
+                                                                      :end i))))))
+                              ;; precision
+                              (when (and (< i n) (char= (char fmt i) #\.))
+                                (incf i)
+                                (cond
+                                  ((and (< i n) (char= (char fmt i) #\*))
+                                   (setf precision (printf-integer (next-arg)))
+                                   (incf i))
+                                  (t (let ((start i))
+                                       (loop while (and (< i n)
+                                                        (digit-char-p (char fmt i)))
+                                             do (incf i))
+                                       (setf precision
+                                             (if (> i start)
+                                                 (parse-integer fmt :start start
+                                                                    :end i)
+                                                 0))))))
+                              (when (< i n)
+                                (let* ((conv (char fmt i))
+                                       (arg (if (char= conv #\%) "" (next-arg))))
+                                  (incf i)
+                                  (multiple-value-bind (body numericp)
+                                      (printf-convert conv arg precision plus
+                                                      space (lambda ()
+                                                              (setf status 1)))
+                                    (write-string
+                                     (printf-pad body width left zero numericp)
+                                     o))))))))
+                        (t (write-char c o) (incf i)))))
+                  (values args used)))))
+         (multiple-value-bind (remaining used) (one-pass args)
+           (loop while (and remaining used) do
+             (multiple-value-setq (remaining used) (one-pass remaining)))))) 
+     status)))
+
+(defun printf-float (arg fail)
+  "Parse a printf argument as a float, diagnosing junk like the integer path."
+  (let ((s (string-trim '(#\Space #\Tab) (princ-to-string arg))))
+    (if (string= s "")
+        0.0d0
+        (let ((v (ignore-errors
+                  (let ((*read-default-float-format* 'double-float))
+                    (with-standard-io-syntax
+                      (let ((*read-default-float-format* 'double-float))
+                        (read-from-string s)))))))
+          (if (numberp v)
+              (coerce v 'double-float)
+              (progn (format *error-output* "printf: ~A: invalid number~%" s)
+                     (funcall fail)
+                     0.0d0))))))
+
+(defun printf-convert (conv arg precision plus space fail)
+  "Render one conversion. Returns (values string numericp)."
+  (flet ((int ()
+           (multiple-value-bind (v ok) (printf-integer arg)
+             (unless ok (funcall fail))
+             v)))
+    (case conv
+      (#\s (let ((s (princ-to-string arg)))
+             (values (if precision (subseq s 0 (min precision (length s))) s) nil)))
+      (#\b (let ((s (printf-escapes (princ-to-string arg))))
+             (values (if precision (subseq s 0 (min precision (length s))) s) nil)))
+      (#\c (let ((s (princ-to-string arg)))
+             (values (if (plusp (length s)) (string (char s 0)) "") nil)))
+      ((#\d #\i) (let ((v (int)))
+                   (values (format nil "~:[~;+~]~A"
+                                   (and plus (>= v 0))
+                                   (if (and space (not plus) (>= v 0))
+                                       (format nil " ~D" v)
+                                       (princ-to-string v)))
+                           t)))
+      (#\u (values (princ-to-string (abs (int))) t))
+      ((#\f #\F)
+       (values (format nil "~,vF" (or precision 6) (printf-float arg fail)) t))
+      ((#\e #\E)
+       (let ((str (format nil "~,v,2,,,,'eE" (or precision 6)
+                          (printf-float arg fail))))
+         (values (if (char= conv #\E) (string-upcase str) str) t)))
+      ((#\g #\G)
+       ;; %g drops trailing zeros; approximate with the shortest sensible form
+       (let* ((v (printf-float arg fail))
+              (str (if (= v (truncate v))
+                       (princ-to-string (truncate v))
+                       (string-right-trim "0" (format nil "~,vF"
+                                                      (or precision 6) v)))))
+         (values str t)))
+      (#\o (values (format nil "~O" (int)) t))
+      (#\x (values (format nil "~(~X~)" (int)) t))
+      (#\X (values (format nil "~:@(~X~)" (int)) t))
+      (t (values (princ-to-string arg) nil)))))
 
 (define-builtin "pwd" (sh args out)
   ;; -L (default) prints the logical path, preserving symlinks; -P prints the
@@ -606,6 +793,10 @@ be re-read to restore the current settings."
                   (zerop (length arg))
                   (char/= (char arg 0) #\-)
                   (string= arg "-"))
+          ;; POSIX: when option parsing ends, getopts returns > 0 AND sets the
+          ;; name to `?'. Leaving it unchanged made `while getopts ...' loops
+          ;; that inspect the variable afterwards see a stale option letter.
+          (set-var sh name "?")
           (set-var sh "OPTIND" (princ-to-string optind))
           (return-from builtin 1))
         (when (string= arg "--")
@@ -1010,17 +1201,46 @@ as its 1st value and system microseconds as its 3rd."
 
 ;;; test / [ --------------------------------------------------------------
 
-(define-builtin "test" (sh args out) (if (eval-test args) 0 1))
+(define-builtin "test" (sh args out)
+  (handler-case (if (eval-test args) 0 1)
+    (test-usage-error (e)
+      (format *error-output* "test: ~A~%" e)
+      2)))
 (define-builtin "[" (sh args out)
   (let ((a args))
     (unless (and a (string= (car (last a)) "]"))
       (format *error-output* "[: missing ]~%") (return-from builtin 2))
-    (if (eval-test (butlast a)) 0 1)))
+    (handler-case (if (eval-test (butlast a)) 0 1)
+      (test-usage-error (e)
+        (format *error-output* "[: ~A~%" e)
+        2))))
+
+(define-condition test-usage-error (error)
+  ((detail :initarg :detail :reader test-usage-detail))
+  (:report (lambda (c s) (format s "~A" (test-usage-detail c)))))
+
+(defun test-access (path mode)
+  (handler-case (progn (sb-posix:access path mode) t)
+    (error () nil)))
+
+(defun test-symlink-p (path)
+  (handler-case (sb-posix:s-islnk (sb-posix:stat-mode (sb-posix:lstat path)))
+    (error () nil)))
 
 (defun eval-test (args)
   "Evaluate a test expression (subset of POSIX test)."
   (labels ((str-nonempty (s) (and s (plusp (length s))))
-           (num (s) (or (ignore-errors (parse-integer s)) 0)))
+           (num (s)
+             ;; POSIX: a non-integer operand to -eq and friends is a usage
+             ;; error (status 2), not the integer 0. Silently coercing meant
+             ;; `[ $x -eq 1 ]' with x unset or textual quietly compared 0.
+             (let ((v (ignore-errors
+                       (multiple-value-bind (v end)
+                           (parse-integer (string-trim " " s) :junk-allowed t)
+                         (and v (= end (length (string-trim " " s))) v)))))
+               (or v (error 'test-usage-error
+                            :detail (format nil "~A: integer expression expected"
+                                            s))))))
     (case (length args)
       (0 nil)
       (1 (str-nonempty (first args)))
@@ -1032,9 +1252,13 @@ as its 1st value and system microseconds as its 3rd."
                  ((string= op "-f") (and (probe-file a)
                                          (not (directoryp a))))
                  ((string= op "-d") (directoryp a))
-                 ((string= op "-r") (and (probe-file a) t))
-                 ((string= op "-w") (and (probe-file a) t))
-                 ((string= op "-x") (and (probe-file a) t))
+                 ((string= op "-r") (test-access a sb-posix:r-ok))
+                 ((string= op "-w") (test-access a sb-posix:w-ok))
+                 ((string= op "-x") (test-access a sb-posix:x-ok))
+                 ((or (string= op "-L") (string= op "-h")) (test-symlink-p a))
+                 ((string= op "-t")
+                  (let ((fd (ignore-errors (parse-integer a))))
+                    (and fd (plusp (sb-unix:unix-isatty fd)))))
                  ((string= op "-s") (let ((f (probe-file a)))
                                       (and f (plusp (with-open-file (s f) (file-length s))))))
                  (t (str-nonempty (second args))))))

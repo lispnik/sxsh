@@ -168,6 +168,43 @@ probe dollar-zero-c   'echo $0' dollar-zero
 # expand_aliases), so it cannot serve as a reference for POSIX alias
 # behaviour. posh's alias handling is asserted in smoke.sh instead.
 
+# --- printf: flags, width, precision, escapes (POSIX 2.14) ----------------
+probe printf-width      'printf "%5d|\\n" 42'
+probe printf-left       'printf "%-5d|\\n" 42'
+probe printf-zeropad    'printf "%05d\\n" 42'
+probe printf-precision  'printf "%.2s\\n" abcdef'
+probe printf-star-width 'printf "%*d|\\n" 5 42'
+probe printf-b-escapes  'printf "%b\\n" "a\\tb"'
+probe printf-octal      'printf "\\101\\n"'
+probe printf-dashdash   'printf -- "%s\\n" x'
+probe printf-recycle    'printf "%s\\n" a b c'
+probe printf-bases      'printf "%x %X %o\\n" 255 255 8'
+probe printf-char       'printf "%c" abc; echo'
+probe printf-missing    'printf "%s %s\\n" a'
+probe printf-float      'printf "%.2f\\n" 3.14159'
+probe printf-float-pad  'printf "%05.2f\\n" 1'
+probe printf-badnum     'printf "%d\\n" abc' diag-text
+probe printf-escapes    'printf "a\\tb\\n"'
+
+# --- test / [ -------------------------------------------------------------
+probe test-isatty       '[ -t 0 ]; echo $?'
+probe test-noninteger   '[ abc -eq 1 ] 2>/dev/null; echo $?'
+probe test-readable     '[ -r /etc/hosts ]; echo $?'
+probe test-writable     '[ -w /etc/hosts ]; echo $?'
+probe test-executable   '[ -x /bin/sh ]; echo $?'
+probe test-not-exec     '[ -x /etc/hosts ]; echo $?'
+probe test-symlink      '[ -L /etc ]; echo $?'
+probe test-empty-int    '[ "" -eq 1 ] 2>/dev/null; echo $?'
+probe test-string-ops   '[ a = a ] && [ a != b ] && [ -n x ] && [ -z "" ]; echo $?'
+probe test-numeric      '[ 1 -ne 2 ] && [ 2 -gt 1 ] && [ 1 -le 1 ]; echo $?'
+
+# --- getopts --------------------------------------------------------------
+probe getopts-loop      'set -- -a -b arg x; while getopts "ab:" o; do echo "$o=$OPTARG"; done; echo "ind=$OPTIND"'
+probe getopts-clustered 'set -- -ab arg; while getopts "ab:" o; do echo "$o=$OPTARG"; done'
+probe getopts-end       'set -- x -a; getopts "a" o; echo "st=$? o=$o"'
+probe getopts-silent    'set -- -z; getopts ":ab" o; echo "o=$o arg=$OPTARG"'
+probe getopts-ddash     'set -- -a -- -b; while getopts "ab" o; do echo "$o"; done; echo "ind=$OPTIND"'
+
 printf '\nposix-diff: %d passed, %d failed, %d known divergences (ref: %s)\n' \
   "$pass" "$fail" "$skipped" "$REF"
 [ "$fail" -eq 0 ]
