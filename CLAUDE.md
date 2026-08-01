@@ -33,8 +33,14 @@ executor's dispatch keywords — it is not just a `defpackage`.
 
 ## Building and testing
 
-`~/.config/common-lisp/source-registry.conf.d/50-local-projects.conf` registers
-`(:tree #p"/Users/mkennedy/Projects/common-lisp/")`, so ASDF finds `sxsh` from any directory.
+The toolchain is **ocicl**. `ocicl setup` writes a runtime that `~/.sbclrc`
+loads, which supplies ASDF and points the source registry at the current
+directory -- so `make` works from the repo root with no registry configuration.
+CI installs and configures it the same way.
+
+Without ocicl a stock SBCL has no ASDF at all, and `(asdf:test-system ...)`
+fails at READ time with `Package ASDF does not exist`; the Makefile passes
+`(require :asdf)` so the suites still run in that case.
 
 ```bash
 make check          # everything (the one to run before calling it done)
@@ -52,8 +58,8 @@ make clean          # remove bin/ and this project's fasls
 The equivalent raw invocations, if you need them:
 
 ```bash
-sbcl --non-interactive --eval '(asdf:test-system "sxsh")'
-sbcl --non-interactive --eval '(asdf:test-system "sxsh/shell")'
+sbcl --non-interactive --eval '(require :asdf)' --eval '(asdf:test-system "sxsh")'
+sbcl --non-interactive --eval '(require :asdf)' --eval '(asdf:test-system "sxsh/shell")'
 ```
 
 Both `test-op`s **error on any failure**, so a non-zero exit is meaningful — the suites

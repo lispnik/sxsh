@@ -36,21 +36,47 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install sbcl
 
+      # ocicl is this project's Lisp toolchain. Its runtime supplies ASDF and
+      # points the source registry at the current directory, which is how the
+      # systems are found -- a stock SBCL has neither, and `asdf:test-system'
+      # fails at READ time with "Package ASDF does not exist".
+      - name: Install ocicl (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -eux
+          ver=2.17.0
+          curl -fsSL -o /tmp/ocicl.tar.gz \
+            "https://github.com/ocicl/ocicl/releases/download/v${ver}/ocicl-${ver}-linux-amd64.tar.gz"
+          tar -xzf /tmp/ocicl.tar.gz -C /tmp
+          bin=$(find /tmp -maxdepth 3 -type f -name ocicl -perm -u+x | head -1)
+          sudo install -m 0755 "$bin" /usr/local/bin/ocicl
+
+      - name: Install ocicl (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ocicl
+
+      # `ocicl setup` writes the runtime; loading it from ~/.sbclrc is what
+      # makes a plain `sbcl` invocation work, exactly as on a developer machine.
+      - name: Configure ocicl
+        run: |
+          set -eux
+          ocicl version
+          ocicl setup
+          mkdir -p "$HOME"
+          cat >> "$HOME/.sbclrc" <<'EOF'
+          #-ocicl
+          (when (probe-file #P"~/.local/share/ocicl/ocicl-runtime.lisp")
+            (load #P"~/.local/share/ocicl/ocicl-runtime.lisp"))
+          EOF
+          sbcl --non-interactive --eval '(format t "~&asdf ~A~%" (asdf:asdf-version))'
+
       - name: Report toolchain
         run: |
           sbcl --version
+          ocicl version | head -1
           python3 --version
           bash --version | head -1
           uname -a
-
-      # ASDF must be able to find sxsh.asd. The repo is checked out outside any
-      # registered tree, so point the source registry at the workspace.
-      - name: Configure ASDF source registry
-        run: |
-          mkdir -p ~/.config/common-lisp/source-registry.conf.d
-          printf '(:tree #p"%s/")\n' "$GITHUB_WORKSPACE" \
-            > ~/.config/common-lisp/source-registry.conf.d/50-ci.conf
-          cat ~/.config/common-lisp/source-registry.conf.d/50-ci.conf
 
       - name: Parser suite
         run: make test-parser

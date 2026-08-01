@@ -1,7 +1,13 @@
 # sxsh --- POSIX shell parser + executor in Common Lisp (SBCL only)
 
 LISP    ?= sbcl
-SBCL    := $(LISP) --non-interactive
+# ocicl is the expected toolchain: its runtime (loaded from ~/.sbclrc by
+# `ocicl setup') supplies ASDF and points the source registry at the current
+# directory. The explicit (require :asdf) is a fallback so the suites still run
+# on a stock SBCL, where `(asdf:test-system ...)' would otherwise fail at READ
+# time with "Package ASDF does not exist" -- which is what CI hit on its first
+# run, because only this developer machine had ocicl configured.
+SBCL    := $(LISP) --non-interactive --eval '(require :asdf)'
 BINDIR  := bin
 BIN     := $(BINDIR)/sxsh
 CACHE   := $(HOME)/.cache/common-lisp
