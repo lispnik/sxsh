@@ -47,8 +47,12 @@ jobs:
           ver=2.17.0
           curl -fsSL -o /tmp/ocicl.tar.gz \
             "https://github.com/ocicl/ocicl/releases/download/v${ver}/ocicl-${ver}-linux-amd64.tar.gz"
-          tar -xzf /tmp/ocicl.tar.gz -C /tmp
-          bin=$(find /tmp -maxdepth 3 -type f -name ocicl -perm -u+x | head -1)
+          # into its own directory: the archive is rooted at ./, so unpacking
+          # straight into /tmp makes tar try to chmod /tmp and fail
+          mkdir -p /tmp/ocicl-dist
+          tar -xzf /tmp/ocicl.tar.gz -C /tmp/ocicl-dist
+          bin=$(find /tmp/ocicl-dist -type f -name ocicl -perm -u+x | head -1)
+          test -n "$bin"
           sudo install -m 0755 "$bin" /usr/local/bin/ocicl
 
       - name: Install ocicl (macOS)
@@ -62,12 +66,14 @@ jobs:
           set -eux
           ocicl version
           ocicl setup
-          mkdir -p "$HOME"
-          cat >> "$HOME/.sbclrc" <<'EOF'
-          #-ocicl
-          (when (probe-file #P"~/.local/share/ocicl/ocicl-runtime.lisp")
-            (load #P"~/.local/share/ocicl/ocicl-runtime.lisp"))
-          EOF
+          # printf, not a heredoc: a heredoc terminator indented to match the
+          # YAML block never closes, which silently swallows the rest of the step
+          printf '%s\n' \
+            '#-ocicl' \
+            '(when (probe-file #P"~/.local/share/ocicl/ocicl-runtime.lisp")' \
+            '  (load #P"~/.local/share/ocicl/ocicl-runtime.lisp"))' \
+            >> "$HOME/.sbclrc"
+          cat "$HOME/.sbclrc"
           sbcl --non-interactive --eval '(format t "~&asdf ~A~%" (asdf:asdf-version))'
 
       - name: Report toolchain
