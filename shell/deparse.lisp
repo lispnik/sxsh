@@ -2,11 +2,11 @@
 ;;;;
 ;;;; Used for job control: to run a compound command (brace group, subshell,
 ;;;; loop, ...) as a genuine asynchronous job in its own process, we re-exec
-;;;; the posh binary with `-c <source>`. Words retain their raw source text
+;;;; the sxsh binary with `-c <source>`. Words retain their raw source text
 ;;;; from parsing, so the reconstruction is exact for the parts that matter
 ;;;; (quoting, expansions); only structural tokens are re-synthesized.
 
-(in-package #:posh-shell)
+(in-package #:sxsh-shell)
 
 (defun deparse (node)
   "Return shell source text equivalent to NODE."

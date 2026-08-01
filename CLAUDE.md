@@ -6,23 +6,23 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Two ASDF systems in one tree, both SBCL-only:
 
-- **`posh`** — a parser for the POSIX shell command language (IEEE Std 1003.1 §2.3 token
-  recognition + §2.10 grammar). Produces an AST. Package `#:posh`. Deliberately performs
+- **`sxsh`** — a parser for the POSIX shell command language (IEEE Std 1003.1 §2.3 token
+  recognition + §2.10 grammar). Produces an AST. Package `#:sxsh`. Deliberately performs
   **no expansion** — words retain raw source text.
-- **`posh/shell`** — a tree-walking executor over that AST, implementing expansion, builtins,
-  redirection, pipelines, and job control. Package `#:posh-shell` (nickname `#:psh`).
+- **`sxsh/shell`** — a tree-walking executor over that AST, implementing expansion, builtins,
+  redirection, pipelines, and job control. Package `#:sxsh-shell` (nickname `#:sxs`).
   Every external command is launched with **`posix_spawnp(3)`** via `sb-alien` — there is no
   `fork`/`exec` and no `sb-ext:run-program`.
 
 ## Layout
 
 ```
-package.lisp ast.lisp conditions.lisp lexer.lisp parser.lisp   -> system "posh"
+package.lisp ast.lisp conditions.lisp lexer.lisp parser.lisp   -> system "sxsh"
 shell/       package state spawn arith expand redir deparse
-             jobs builtins exec driver                          -> system "posh/shell"
-test/tests.lisp            -> "posh/test"        (48 cases)
-shell/test-shell.lisp      -> "posh/shell/test"  (84 cases)
-build.lisp        -> saves the ./posh executable
+             jobs builtins exec driver                          -> system "sxsh/shell"
+test/tests.lisp            -> "sxsh/test"        (48 cases)
+shell/test-shell.lisp      -> "sxsh/shell/test"  (84 cases)
+build.lisp        -> saves the ./sxsh executable
 smoke.sh           -> end-to-end checks against that executable (98 cases)
 test/jobs-pty.py   -> job control, driven through a real pty (14 cases)
 test/posix-diff.sh -> differential conformance vs a reference shell (76 cases)
@@ -34,26 +34,26 @@ executor's dispatch keywords — it is not just a `defpackage`.
 ## Building and testing
 
 `~/.config/common-lisp/source-registry.conf.d/50-local-projects.conf` registers
-`(:tree #p"/Users/mkennedy/Projects/common-lisp/")`, so ASDF finds `posh` from any directory.
+`(:tree #p"/Users/mkennedy/Projects/common-lisp/")`, so ASDF finds `sxsh` from any directory.
 
 ```bash
 make check          # everything (the one to run before calling it done)
 make test           # in-image ASDF suites only
 make test-parser    # 48 parser cases
 make test-shell     # 84 executor cases
-make build          # save ./posh (~40MB SBCL image)
-make smoke          # build, then drive ./posh end-to-end (98 cases)
+make build          # save ./sxsh (~40MB SBCL image)
+make smoke          # build, then drive ./sxsh end-to-end (98 cases)
 make jobs           # job control through a real pty (14 cases)
 make posix          # differential conformance vs bash (76 cases)
 make posix REF_SHELL=/bin/dash    # stricter reference
-make clean          # remove ./posh and this project's fasls
+make clean          # remove ./sxsh and this project's fasls
 ```
 
 The equivalent raw invocations, if you need them:
 
 ```bash
-sbcl --non-interactive --eval '(asdf:test-system "posh")'
-sbcl --non-interactive --eval '(asdf:test-system "posh/shell")'
+sbcl --non-interactive --eval '(asdf:test-system "sxsh")'
+sbcl --non-interactive --eval '(asdf:test-system "sxsh/shell")'
 ```
 
 Both `test-op`s **error on any failure**, so a non-zero exit is meaningful — the suites
@@ -62,10 +62,10 @@ themselves only print `N passed, M failed` and would otherwise exit 0 on a red r
 The layers test different things and all of them matter. The ASDF suites run in-image and never
 touch `main`, argv parsing, or process exit status; `smoke.sh` runs the saved executable and
 covers exactly that (plus script mode and stdin mode); `test/jobs-pty.py` allocates a real pty
-and puts posh in its own session, which is the only way to reach the job-control code paths at
+and puts sxsh in its own session, which is the only way to reach the job-control code paths at
 all — without a controlling terminal `have-tty-p` is false, `shell-job-control` stays nil, and
 foreground commands never get their own process group. `test/posix-diff.sh` runs the same
-source through posh and a reference shell and compares output+status, so the expectation comes
+source through sxsh and a reference shell and compares output+status, so the expectation comes
 from a conforming implementation instead of our own assumptions — it is the cheapest way to
 find divergence, and found `set -e`, `read`/IFS and the EXIT-trap bugs in a single pass. None
 is hermetic: they spawn real programs (`sort`, `head`, `sleep`, …) and write temp files.
@@ -74,14 +74,14 @@ Adding a case to `posix-diff.sh` costs one line. Prefer it over hand-written exp
 anything the standard specifies. Its third argument marks a case where only the *wording* may
 differ (POSIX does not specify diagnostic text) — the exit status must still match, so the case
 stays meaningful. If bash itself deviates from POSIX (it disables aliases non-interactively),
-it is not a valid reference: assert posh's behaviour in `smoke.sh` instead.
+it is not a valid reference: assert sxsh's behaviour in `smoke.sh` instead.
 
 When adding a job-control test, assert on *observable process behaviour*, not on what `jobs`
 prints. The `bg` builtin sets the job state to `:running` unconditionally, so the table reports
 Running even when SIGCONT never arrived — an assertion on that string passes against a job that
 is still stopped. Give the job a deadline and check that it actually completed instead.
 
-`posh/shell` declares `(:require :sb-posix)`. Without it the first file fails to compile with
+`sxsh/shell` declares `(:require :sb-posix)`. Without it the first file fails to compile with
 `Package SB-POSIX does not exist`; don't drop it when editing `:depends-on`.
 
 ### Running a single test
@@ -90,8 +90,8 @@ Neither harness supports selecting a case by name — `run-all` is a flat sequen
 macro calls. To exercise one input, call the underlying helper in a REPL:
 
 ```lisp
-(posh/test::p1 "if a; then b; fi")          ; => the sx s-expression the parser test compares
-(posh-shell/test::capture "echo $((1+1))")  ; => (values stdout-string exit-status)
+(sxsh/test::p1 "if a; then b; fi")          ; => the sx s-expression the parser test compares
+(sxsh-shell/test::capture "echo $((1+1))")  ; => (values stdout-string exit-status)
 ```
 
 Add a case by inserting a `(check "name" "shell source" expected)` into the relevant
@@ -170,12 +170,12 @@ Key structural decisions:
   and `%n` / bare-number / `%prefix` job specs. `set -m` toggles it (`set-monitor`), defaulting
   on for interactive shells and off otherwise.
 - **Backgrounding a compound re-execs this binary.** We cannot fork, so `{ ...; } &`, `f &`,
-  and any builtin `&` run as a real second process via `posh -c <source>` (`async-compound`).
+  and any builtin `&` run as a real second process via `sxsh -c <source>` (`async-compound`).
   The source is `async-prelude` + `deparse` of the node: cwd, non-exported variables, function
   definitions and positional parameters are replayed as shell assignments, while exported
   variables travel in the environment. `self-exec-path` returns NIL when we are not a saved
   image (`*runtime-pathname*` ≠ `*core-pathname*`), and then it falls back to running
-  synchronously in-process — so the async tests only mean anything against a built `./posh`.
+  synchronously in-process — so the async tests only mean anything against a built `./sxsh`.
 
 ### Two job-control invariants that are easy to break
 
@@ -275,7 +275,7 @@ inspects the internals. Wait-status decoding uses portable bit arithmetic instea
 table, no process-group/terminal control" and that a backgrounded pipeline runs synchronously —
 all three are now implemented (jobs.lisp, `async-pipeline`). Its architecture table omits
 `jobs.lisp` and `deparse.lisp`; its test counts (48 + 73 = 121) are stale; and its invocation
-snippets predate the Makefile and the `posh/shell/test` system. `deparse.lisp`'s header comment
+snippets predate the Makefile and the `sxsh/shell/test` system. `deparse.lisp`'s header comment
 claims deparsed source is used to re-exec the binary with `-c`; in the current code `deparse` is
 only used to record a job's display text. Prefer the source over the README, and update the
 README when you touch these areas.
@@ -283,13 +283,13 @@ README when you touch these areas.
 ## Entry points
 
 ```lisp
-(posh:parse-string "if true; then echo hi; fi")   ; => list of COMPLETE-COMMAND nodes
-(posh:tokenize "echo $(date) | wc -l")            ; raw token stream
+(sxsh:parse-string "if true; then echo hi; fi")   ; => list of COMPLETE-COMMAND nodes
+(sxsh:tokenize "echo $(date) | wc -l")            ; raw token stream
 
-(let ((sh (posh-shell:make-shell)))
-  (posh-shell:run-string sh "for i in 1 2 3; do echo $i; done"))
-(posh-shell:repl (posh-shell:make-shell))
-(posh-shell:main)                                 ; script / -c / interactive dispatch
+(let ((sh (sxsh-shell:make-shell)))
+  (sxsh-shell:run-string sh "for i in 1 2 3; do echo $i; done"))
+(sxsh-shell:repl (sxsh-shell:make-shell))
+(sxsh-shell:main)                                 ; script / -c / interactive dispatch
 ```
 
 `main` reads `(rest sb-ext:*posix-argv*)`: no args → interactive REPL, `-c cmd [args]` →

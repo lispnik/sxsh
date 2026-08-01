@@ -3,7 +3,7 @@
 ;;;; Node hierarchy mirrors the POSIX shell grammar nonterminals fairly
 ;;;; closely, collapsed where the distinctions are purely syntactic.
 
-(in-package #:posh)
+(in-package #:sxsh)
 
 (defstruct (node (:constructor nil))
   ;; Source line this node started on, stamped by the parser. Every

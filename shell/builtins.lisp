@@ -6,7 +6,7 @@
 ;;;; a stream over it, but for capture (command substitution) we pass a string
 ;;;; stream.
 
-(in-package #:posh-shell)
+(in-package #:sxsh-shell)
 
 (defvar *builtins* (make-hash-table :test 'equal))
 
@@ -803,7 +803,7 @@ be re-read to restore the current settings."
           (set-var sh "OPTIND" (princ-to-string (1+ optind)))
           (return-from builtin 1))
         ;; process the first option char after '-'. We track sub-position in
-        ;; OPTITER (posh-internal) for bundled options like -abc.
+        ;; OPTITER (sxsh-internal) for bundled options like -abc.
         (let* ((subpos (or (ignore-errors
                             (parse-integer (or (nth-value 0 (get-var sh "_OPTITER"))
                                                "1")))
@@ -1006,7 +1006,7 @@ unknown names are not real signals -- nothing to install."
                      (let ((j (find-if (lambda (jj) (member pid (job-pids jj)))
                                        (shell-jobs sh))))
                        (if j (setf status (wait-for-job sh j))
-                           (setf status (posh-shell::wait-and-decode pid))))
+                           (setf status (sxsh-shell::wait-and-decode pid))))
                      (setf (shell-bg-pids sh) (remove pid (shell-bg-pids sh)))))))))
         ;; no args: wait for all jobs and loose bg pids
         (progn
@@ -1014,7 +1014,7 @@ unknown names are not real signals -- nothing to install."
             (when (eq (job-state job) :running)
               (setf status (wait-for-job sh job))))
           (dolist (pid (shell-bg-pids sh))
-            (setf status (posh-shell::wait-and-decode pid)))
+            (setf status (sxsh-shell::wait-and-decode pid)))
           (setf (shell-bg-pids sh) '())))
     status))
 

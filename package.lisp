@@ -1,6 +1,6 @@
 ;;;; package.lisp
 
-(defpackage #:posh
+(defpackage #:sxsh
   (:use #:cl)
   (:export
    ;; entry points

@@ -1,25 +1,25 @@
 #!/usr/bin/env bash
-# smoke.sh --- end-to-end check of the built `posh` binary.
+# smoke.sh --- end-to-end check of the built `sxsh` binary.
 #
-# The ASDF suites (asdf:test-system "posh" / "posh/shell") exercise the parser
+# The ASDF suites (asdf:test-system "sxsh" / "sxsh/shell") exercise the parser
 # and executor in-image. This script exercises what they cannot: the saved
 # executable, argv handling in main, real process exit status, script mode, and
 # stdin-driven interactive mode.
 #
-#   ./smoke.sh [path-to-posh]        (default: ./posh)
+#   ./smoke.sh [path-to-sxsh]        (default: ./sxsh)
 
 set -u
 
-POSH=${1:-./posh}
+SXSH=${1:-./sxsh}
 pass=0
 fail=0
-tmp=$(mktemp -d "${TMPDIR:-/tmp}/posh-smoke.XXXXXX")
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/sxsh-smoke.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
 
 # check <name> <expected-stdout> <expected-status> <shell-source>
 check() {
   local name=$1 want=$2 want_st=$3 src=$4 got got_st
-  got=$("$POSH" -c "$src" 2>"$tmp/err")
+  got=$("$SXSH" -c "$src" 2>"$tmp/err")
   got_st=$?
   if [ "$got" = "$want" ] && [ "$got_st" -eq "$want_st" ]; then
     pass=$((pass + 1))
@@ -37,7 +37,7 @@ check() {
 # from inside the script under test -- we read the process's stderr instead.
 check_err() {
   local name=$1 want=$2 want_st=$3 src=$4 err err_st
-  err=$("$POSH" -c "$src" 2>&1 >/dev/null)
+  err=$("$SXSH" -c "$src" 2>&1 >/dev/null)
   err_st=$?
   case "$err" in
     *"$want"*)
@@ -57,8 +57,8 @@ check_err() {
   esac
 }
 
-if [ ! -x "$POSH" ]; then
-  echo "smoke: no executable at $POSH (run: make build)" >&2
+if [ ! -x "$SXSH" ]; then
+  echo "smoke: no executable at $SXSH (run: make build)" >&2
   exit 1
 fi
 
@@ -445,8 +445,8 @@ check cd-subshell-scope '/usr'      0 'cd /usr; (cd /etc); pwd'
 check cd-external-agrees 'same'     0 'cd /usr; [ "$(pwd)" = "$(/bin/pwd)" ] && echo same'
 
 # --- script mode (not -c) -------------------------------------------------
-printf '#!/usr/bin/env posh\necho script-mode\necho "$1"\n' > "$tmp/s.sh"
-got=$("$POSH" "$tmp/s.sh" firstarg 2>&1); got_st=$?
+printf '#!/usr/bin/env sxsh\necho script-mode\necho "$1"\n' > "$tmp/s.sh"
+got=$("$SXSH" "$tmp/s.sh" firstarg 2>&1); got_st=$?
 if [ "$got" = "script-mode
 firstarg" ] && [ "$got_st" -eq 0 ]; then
   pass=$((pass + 1))
@@ -458,7 +458,7 @@ firstarg" "$got" "$got_st"
 fi
 
 # --- stdin / REPL mode ----------------------------------------------------
-got=$(printf 'echo from-stdin\nexit 0\n' | "$POSH" 2>/dev/null)
+got=$(printf 'echo from-stdin\nexit 0\n' | "$SXSH" 2>/dev/null)
 if printf '%s' "$got" | grep -q 'from-stdin'; then
   pass=$((pass + 1))
 else

@@ -6,7 +6,7 @@
 ;;;; via posix_spawn's SETPGROUP attribute, so signals and terminal control
 ;;;; apply to the whole job at once.
 
-(in-package #:posh-shell)
+(in-package #:sxsh-shell)
 
 (defstruct job
   id                                    ; %n job number

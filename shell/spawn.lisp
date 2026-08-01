@@ -6,7 +6,7 @@
 ;;;; byte blocks sized generously for glibc; their internals are only touched
 ;;;; through the libc accessor functions.
 
-(in-package #:posh-shell)
+(in-package #:sxsh-shell)
 
 ;;; The spawn objects are opaque. Their representation differs by platform:
 ;;;   * Linux/glibc: the object IS the struct, stored inline

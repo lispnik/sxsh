@@ -15,7 +15,7 @@
 ;;;;     :lparen :rparen :lbrace :rbrace
 ;;;;   :eof
 
-(in-package #:posh)
+(in-package #:sxsh)
 
 (defstruct (token (:constructor make-token (type text line column)))
   type

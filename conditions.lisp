@@ -1,6 +1,6 @@
 ;;;; conditions.lisp
 
-(in-package #:posh)
+(in-package #:sxsh)
 
 (define-condition shell-parse-error (error)
   ((message :initarg :message :reader shell-parse-error-message)

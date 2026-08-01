@@ -18,7 +18,7 @@
 ;;;; { } ! in) are recognized only in command position -- the parser checks
 ;;;; word text against the reserved set exactly where the grammar allows it.
 
-(in-package #:posh)
+(in-package #:sxsh)
 
 (defstruct (parser (:constructor %make-parser))
   lexer

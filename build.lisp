@@ -1,4 +1,4 @@
-;;;; build.lisp --- produce a standalone `posh` executable.
+;;;; build.lisp --- produce a standalone `sxsh` executable.
 ;;;;
 ;;;;   sbcl --non-interactive --load build.lisp
 ;;;;
@@ -7,15 +7,15 @@
 ;;;; runtime-options` before main ever sees them.
 
 (require :asdf)
-(asdf:load-system "posh/shell")
+(asdf:load-system "sxsh/shell")
 
-(defun posh-toplevel ()
-  (sb-ext:exit :code (handler-case (posh-shell:main)
+(defun sxsh-toplevel ()
+  (sb-ext:exit :code (handler-case (sxsh-shell:main)
                        (sb-sys:interactive-interrupt () 130))
                :abort t))
 
 (sb-ext:save-lisp-and-die
- "posh"
+ "sxsh"
  :executable t
  :save-runtime-options t
- :toplevel #'posh-toplevel)
+ :toplevel #'sxsh-toplevel)

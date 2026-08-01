@@ -4,7 +4,7 @@
 ;;;; fork/exec. Builtins, functions, and compound commands run in-process.
 ;;;; Pipelines wire children together with pipe(2) and per-stage file actions.
 
-(in-package #:posh-shell)
+(in-package #:sxsh-shell)
 
 ;;; ---------------------------------------------------------------------------
 ;;; PATH search
@@ -118,7 +118,7 @@ because the trap's own `echo' overwrote the 3."
     (return-from exec-node 0))
   ;; $LINENO is the line of the command currently executing. Nodes the parser
   ;; did not stamp keep line 0, so only update when we have a real line.
-  (let ((line (posh::node-line node)))
+  (let ((line (sxsh::node-line node)))
     (when (plusp line)
       (setf (gethash "LINENO" (shell-vars sh))
             (cons (princ-to-string line) nil))))
@@ -138,13 +138,13 @@ because the trap's own `echo' overwrote the 3."
                 (:case     (exec-case sh node))
                 (:func     (exec-func-def sh node)))
             (shell-unset-var (e)
-              (format *error-output* "posh: ~A~%" e)
+              (format *error-output* "sxsh: ~A~%" e)
               ;; set -u in a non-interactive shell is fatal
               (unless (shell-interactive sh)
                 (signal 'shell-exit :code 1))
               1)
             (readonly-violation (e)
-              (format *error-output* "posh: ~A~%" e)
+              (format *error-output* "sxsh: ~A~%" e)
               1))))
     (setf (shell-last-status sh) status)
     (maybe-errexit sh status node)
@@ -667,7 +667,7 @@ otherwise return a list of temporary K=V for a command environment."
       ;; A redirection we cannot set up fails this command with status 1
       ;; rather than aborting the shell.
       (redirect-error (e)
-        (format *error-output* "posh: ~A~%" e)
+        (format *error-output* "sxsh: ~A~%" e)
         (return-from run-builtin 1)))
     (unwind-protect
          (handler-case
@@ -712,7 +712,7 @@ a second time re-runs any command substitution in the words."
         (handler-case (build-spawn-file-actions sh (simple-command-redirects node))
           ;; A redirection we cannot set up fails this command, not the shell.
           (redirect-error (e)
-            (format *error-output* "posh: ~A~%" e)
+            (format *error-output* "sxsh: ~A~%" e)
             (setf (shell-last-status sh) 1)
             ;; distinct from a failed PATH lookup: that is 127, a redirection
             ;; that could not be set up is 1
@@ -792,7 +792,7 @@ around it."
             (multiple-value-setq (saved temps)
               (apply-redirects-in-process sh redirects))
           (redirect-error (e)
-            (format *error-output* "posh: ~A~%" e)
+            (format *error-output* "sxsh: ~A~%" e)
             (setf ok nil)))
         (if (not ok)
             1
@@ -937,7 +937,7 @@ and run it in-process. State changes (cd, var sets) are rolled back."
 
 External simple commands and pipelines are spawned directly into their own
 process group. Everything else -- builtins, functions, and compound commands --
-becomes a genuine asynchronous job by re-executing this posh binary with `-c`
+becomes a genuine asynchronous job by re-executing this sxsh binary with `-c`
 on the deparsed source (see ASYNC-COMPOUND); we cannot fork, so re-exec is the
 only way to get a second process. If no re-exec is possible the command falls
 back to running in-process, synchronously."
@@ -974,7 +974,7 @@ shell with a very large variable table could otherwise overflow it; past this
 we run synchronously instead of failing to spawn.")
 
 (defun self-exec-path ()
-  "Path to this posh executable, or NIL if we are not a saved image.
+  "Path to this sxsh executable, or NIL if we are not a saved image.
 
 Under `sbcl --load` the runtime is plain sbcl, which knows nothing about `-c`;
 re-executing it would run the wrong program entirely. In a saved executable
@@ -993,7 +993,7 @@ the environment's odd 'BASH_FUNC_x%%' cannot produce unparseable source."
        (every (lambda (c) (or (alphanumericp c) (char= c #\_))) name)))
 
 (defun async-prelude (sh)
-  "Shell source reproducing enough of SH's state for a fresh posh to run a
+  "Shell source reproducing enough of SH's state for a fresh sxsh to run a
 background command faithfully: cwd, shell (non-exported) variables, function
 definitions, and positional parameters. Exported variables need no prelude --
 they travel in the child's environment."
@@ -1024,7 +1024,7 @@ in-process execution when that is not possible."
     (if (or (null src) (> (length src) +max-async-source+))
         (async-compound-inline sh node cmd-text)
         (handler-case
-            (let ((pid (spawn self (list "posh" "-c" src)
+            (let ((pid (spawn self (list "sxsh" "-c" src)
                               :env (exported-environ sh)
                               :setpgroup t :pgroup 0
                               :sigdefault (child-sigdefaults sh))))
@@ -1123,7 +1123,7 @@ Encoding:
 temp file so large output can't deadlock on a bounded pipe buffer."
   (let ((ast (handler-case (parse-string src)
                (error () (return-from command-substitute "")))))
-    (let* ((path (format nil "/tmp/posh-cmdsub-~A-~A"
+    (let* ((path (format nil "/tmp/sxsh-cmdsub-~A-~A"
                          (sb-posix:getpid) (random 1000000)))
            (fd (sb-posix:open path (logior +o-wronly+ +o-creat+ +o-trunc+) #o600))
            (saved-out (sb-posix:dup 1)))

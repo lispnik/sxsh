@@ -5,7 +5,7 @@
 ;;;; assignment (= += -= *= /= %= etc.), ternary ?:, and variable references
 ;;;; (a bare name is looked up; parameter expansion already ran on the text).
 
-(in-package #:posh-shell)
+(in-package #:sxsh-shell)
 
 (defun nonzero (divisor)
   "Guard a divisor. Letting the Lisp DIVISION-BY-ZERO escape printed the raw

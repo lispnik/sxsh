@@ -1,31 +1,31 @@
-# posh — a POSIX shell in Common Lisp
+# sxsh — a POSIX shell in Common Lisp
 
 Two ASDF systems: a parser for the POSIX shell command language, and an
 executor built on it that runs as a working shell. SBCL only; Linux and macOS.
 
 ```
-make check     # build and run every suite (320 checks)
-make build     # save a standalone ./posh
-./posh -c 'for i in 1 2 3; do echo $i; done'
-./posh script.sh args...
-./posh                     # interactive, with job control
+make check     # build and run every suite (540 checks)
+make build     # save a standalone ./sxsh
+./sxsh -c 'for i in 1 2 3; do echo $i; done'
+./sxsh script.sh args...
+./sxsh                     # interactive, with job control
 ```
 
 ---
 
-# posh — the parser
+# sxsh — the parser
 
 Parses the POSIX shell command language (IEEE Std 1003.1, §2.10) into an AST,
 implementing the token recognizer of §2.3 and a recursive-descent parser,
 including the lexer/parser coupling the standard requires.
 
 ```lisp
-(asdf:load-system "posh")
+(asdf:load-system "sxsh")
 
-(posh:parse-string "if true; then echo hi; fi")
+(sxsh:parse-string "if true; then echo hi; fi")
 ;; => list of COMPLETE-COMMAND AST nodes
 
-(posh:tokenize "echo $(date) | wc -l")   ; raw token stream
+(sxsh:tokenize "echo $(date) | wc -l")   ; raw token stream
 ```
 
 ## What it handles
@@ -59,20 +59,20 @@ words retain their raw source text. That is also what lets the executor
 
 ---
 
-# posh/shell — the executor
+# sxsh/shell — the executor
 
 Executes the AST as a working shell. Every external command is launched with
 **`posix_spawnp(3)`** via SBCL's alien FFI — there is no `fork`/`exec` and no
 use of `sb-ext:run-program`.
 
 ```lisp
-(asdf:load-system "posh/shell")
+(asdf:load-system "sxsh/shell")
 
-(let ((sh (posh-shell:make-shell)))
-  (posh-shell:run-string sh "for i in 1 2 3; do echo $i; done"))
+(let ((sh (sxsh-shell:make-shell)))
+  (sxsh-shell:run-string sh "for i in 1 2 3; do echo $i; done"))
 
-(posh-shell:repl (posh-shell:make-shell))
-(posh-shell:main)          ; script / -c / interactive
+(sxsh-shell:repl (sxsh-shell:make-shell))
+(sxsh-shell:main)          ; script / -c / interactive
 ```
 
 ## Architecture
@@ -104,7 +104,7 @@ use of `sb-ext:run-program`.
 - **Subshell** `( … )` → in-process with a snapshot/restore of variables,
   functions, positional params, and cwd.
 - **Background compound** `{ …; } &`, `f &` → since we cannot fork, the shell
-  re-execs itself as `posh -c <source>`, replaying cwd, shell variables,
+  re-execs itself as `sxsh -c <source>`, replaying cwd, shell variables,
   functions and positional parameters as a generated prelude. Exported
   variables travel in the environment.
 
@@ -182,7 +182,7 @@ falls back to running synchronously.
 make check          # everything below
 make test-parser    # 48   parser unit tests           (in-image)
 make test-shell     # 84   executor unit tests         (in-image)
-make smoke          # 98   end-to-end vs ./posh
+make smoke          # 98   end-to-end vs ./sxsh
 make jobs           # 14   job control through a real pty
 make posix          # 76   differential vs a reference shell
 ```
@@ -190,9 +190,9 @@ make posix          # 76   differential vs a reference shell
 The layers deliberately overlap, because each reaches something the others
 cannot. The in-image suites never touch `main`, argv handling or process exit
 status. `smoke.sh` drives the saved executable and covers exactly that.
-`test/jobs-pty.py` allocates a pty and puts posh in its own session — without a
+`test/jobs-pty.py` allocates a pty and puts sxsh in its own session — without a
 controlling terminal the job-control paths are never entered at all.
-`test/posix-diff.sh` runs the same source through posh and a reference shell
+`test/posix-diff.sh` runs the same source through sxsh and a reference shell
 and compares output and status, so the expected answer comes from a conforming
 implementation rather than from our own assumptions; the handful of cases where
 shells legitimately differ are annotated in that file with the reason.

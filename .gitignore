@@ -1,7 +1,7 @@
-# saved executables (~40MB SBCL images). The glob matters: a stray `posh2'
-# from a side-by-side build was committed once because only /posh was listed.
-/posh
-/posh[0-9]*
+# saved executables (~40MB SBCL images). The glob matters: a stray `sxsh2'
+# from a side-by-side build was committed once because only /sxsh was listed.
+/sxsh
+/sxsh[0-9]*
 /*.image
 
 # ASDF/SBCL build output

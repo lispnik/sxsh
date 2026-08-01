@@ -1,6 +1,6 @@
 name: CI
 
-# Both platforms matter more here than in most projects. posh binds
+# Both platforms matter more here than in most projects. sxsh binds
 # posix_spawn, waitpid and the job-control signals directly, and Linux and
 # macOS disagree on several of the constants involved (SIGCONT is 18 vs 19,
 # SIGTSTP 20 vs 18, SIGCHLD 17 vs 20, WCONTINUED 8 vs 16, and the opaque
@@ -43,7 +43,7 @@ jobs:
           bash --version | head -1
           uname -a
 
-      # ASDF must be able to find posh.asd. The repo is checked out outside any
+      # ASDF must be able to find sxsh.asd. The repo is checked out outside any
       # registered tree, so point the source registry at the workspace.
       - name: Configure ASDF source registry
         run: |

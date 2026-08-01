@@ -1,10 +1,10 @@
 ;;;; test/tests.lisp
 
-(defpackage #:posh/test
-  (:use #:cl #:posh)
+(defpackage #:sxsh/test
+  (:use #:cl #:sxsh)
   (:export #:run-all #:sx))
 
-(in-package #:posh/test)
+(in-package #:sxsh/test)
 
 ;;; Render an AST node as a compact s-expression for structural comparison.
 (defgeneric sx (node))
@@ -13,76 +13,76 @@
 
 (defmethod sx ((n list)) (mapcar #'sx n))
 
-(defmethod sx ((n posh::word)) (list :w (posh::word-text n)))
+(defmethod sx ((n sxsh::word)) (list :w (sxsh::word-text n)))
 
-(defmethod sx ((n posh::assignment))
-  (list :assign (posh::assignment-name n) (sx (posh::assignment-value n))))
+(defmethod sx ((n sxsh::assignment))
+  (list :assign (sxsh::assignment-name n) (sx (sxsh::assignment-value n))))
 
-(defmethod sx ((n posh::redirect))
-  (append (list :redir (posh::redirect-op n))
-          (when (posh::redirect-fd n) (list :fd (posh::redirect-fd n)))
-          (list (sx (posh::redirect-target n)))
-          (when (posh::redirect-heredoc n)
-            (list :heredoc (second (posh::redirect-heredoc n))))))
+(defmethod sx ((n sxsh::redirect))
+  (append (list :redir (sxsh::redirect-op n))
+          (when (sxsh::redirect-fd n) (list :fd (sxsh::redirect-fd n)))
+          (list (sx (sxsh::redirect-target n)))
+          (when (sxsh::redirect-heredoc n)
+            (list :heredoc (second (sxsh::redirect-heredoc n))))))
 
-(defmethod sx ((n posh::simple-command))
+(defmethod sx ((n sxsh::simple-command))
   (list* :cmd
          (append
-          (when (posh::simple-command-assignments n)
-            (list (cons :assigns (sx (posh::simple-command-assignments n)))))
-          (when (posh::simple-command-words n)
-            (list (cons :words (sx (posh::simple-command-words n)))))
-          (when (posh::simple-command-redirects n)
-            (list (cons :redirs (sx (posh::simple-command-redirects n))))))))
+          (when (sxsh::simple-command-assignments n)
+            (list (cons :assigns (sx (sxsh::simple-command-assignments n)))))
+          (when (sxsh::simple-command-words n)
+            (list (cons :words (sx (sxsh::simple-command-words n)))))
+          (when (sxsh::simple-command-redirects n)
+            (list (cons :redirs (sx (sxsh::simple-command-redirects n))))))))
 
-(defmethod sx ((n posh::pipeline))
-  (list* :pipe (if (posh::pipeline-bang n) '(:!) nil)
-         (mapcar #'sx (posh::pipeline-commands n))))
+(defmethod sx ((n sxsh::pipeline))
+  (list* :pipe (if (sxsh::pipeline-bang n) '(:!) nil)
+         (mapcar #'sx (sxsh::pipeline-commands n))))
 
-(defmethod sx ((n posh::and-or))
-  (list (posh::and-or-op n) (sx (posh::and-or-left n)) (sx (posh::and-or-right n))))
+(defmethod sx ((n sxsh::and-or))
+  (list (sxsh::and-or-op n) (sx (sxsh::and-or-left n)) (sx (sxsh::and-or-right n))))
 
-(defmethod sx ((n posh::complete-command))
+(defmethod sx ((n sxsh::complete-command))
   (list* :list
          (mapcar (lambda (e) (if (cdr e) (list (sx (car e)) (cdr e)) (sx (car e))))
-                 (posh::complete-command-entries n))))
+                 (sxsh::complete-command-entries n))))
 
-(defmethod sx ((n posh::subshell))
-  (list :subshell (sx (posh::subshell-body n))
-        (sx (posh::subshell-redirects n))))
+(defmethod sx ((n sxsh::subshell))
+  (list :subshell (sx (sxsh::subshell-body n))
+        (sx (sxsh::subshell-redirects n))))
 
-(defmethod sx ((n posh::brace-group))
-  (list :brace (sx (posh::brace-group-body n))
-        (sx (posh::brace-group-redirects n))))
+(defmethod sx ((n sxsh::brace-group))
+  (list :brace (sx (sxsh::brace-group-body n))
+        (sx (sxsh::brace-group-redirects n))))
 
-(defmethod sx ((n posh::if-clause))
-  (list :if (sx (posh::if-clause-condition n))
-        (sx (posh::if-clause-then n))
-        (sx (posh::if-clause-else n))))
+(defmethod sx ((n sxsh::if-clause))
+  (list :if (sx (sxsh::if-clause-condition n))
+        (sx (sxsh::if-clause-then n))
+        (sx (sxsh::if-clause-else n))))
 
-(defmethod sx ((n posh::for-clause))
-  (list :for (posh::for-clause-name n)
-        (if (eq (posh::for-clause-words n) :default)
-            :default (sx (posh::for-clause-words n)))
-        (sx (posh::for-clause-body n))))
+(defmethod sx ((n sxsh::for-clause))
+  (list :for (sxsh::for-clause-name n)
+        (if (eq (sxsh::for-clause-words n) :default)
+            :default (sx (sxsh::for-clause-words n)))
+        (sx (sxsh::for-clause-body n))))
 
-(defmethod sx ((n posh::while-clause))
-  (list :while (sx (posh::while-clause-condition n)) (sx (posh::while-clause-body n))))
+(defmethod sx ((n sxsh::while-clause))
+  (list :while (sx (sxsh::while-clause-condition n)) (sx (sxsh::while-clause-body n))))
 
-(defmethod sx ((n posh::until-clause))
-  (list :until (sx (posh::until-clause-condition n)) (sx (posh::until-clause-body n))))
+(defmethod sx ((n sxsh::until-clause))
+  (list :until (sx (sxsh::until-clause-condition n)) (sx (sxsh::until-clause-body n))))
 
-(defmethod sx ((n posh::case-clause))
-  (list :case (sx (posh::case-clause-word n))
-        (mapcar #'sx (posh::case-clause-items n))))
+(defmethod sx ((n sxsh::case-clause))
+  (list :case (sx (sxsh::case-clause-word n))
+        (mapcar #'sx (sxsh::case-clause-items n))))
 
-(defmethod sx ((n posh::case-item))
-  (list :item (sx (posh::case-item-patterns n))
-        (sx (posh::case-item-body n))
-        (posh::case-item-terminator n)))
+(defmethod sx ((n sxsh::case-item))
+  (list :item (sx (sxsh::case-item-patterns n))
+        (sx (sxsh::case-item-body n))
+        (sxsh::case-item-terminator n)))
 
-(defmethod sx ((n posh::function-def))
-  (list :func (posh::function-def-name n) (sx (posh::function-def-body n))))
+(defmethod sx ((n sxsh::function-def))
+  (list :func (sxsh::function-def-name n) (sx (sxsh::function-def-body n))))
 
 ;;; ---------------------------------------------------------------------------
 

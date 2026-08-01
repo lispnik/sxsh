@@ -1,6 +1,6 @@
 ;;;; shell/driver.lisp --- top-level drivers and REPL.
 
-(in-package #:posh-shell)
+(in-package #:sxsh-shell)
 
 (defun run-string-capturing (sh src out)
   "Parse and run SRC, sending command output to the current fd 1 (already set
@@ -9,8 +9,8 @@ with child output is sane. Returns the last status."
   (declare (ignore out))
   (handler-case
       (run sh (parse-string src))
-    (posh:shell-parse-error (e)
-      (format *error-output* "posh: ~A~%" e)
+    (sxsh:shell-parse-error (e)
+      (format *error-output* "sxsh: ~A~%" e)
       2)))
 
 (defun slurp-file (path)
@@ -32,7 +32,7 @@ with child output is sane. Returns the last status."
 standard input and standard error are attached to a terminal.
 
 Deciding this from `no arguments' alone -- as this used to -- makes
-`posh < script' and `cmd | posh' print PS1 prompts into their own output and
+`sxsh < script' and `cmd | sxsh' print PS1 prompts into their own output and
 switch on job control. Every such invocation produced `$ ' noise interleaved
 with the script's real output."
   (and (plusp (sb-unix:unix-isatty 0))
@@ -58,12 +58,12 @@ this is simply the reader for a script arriving on standard input."
       (unless (string= (string-trim '(#\Space #\Tab #\Newline) line) "")
         (handler-case
             (run-string sh line)
-          (posh:shell-parse-error (e)
-            (format *error-output* "posh: ~A~%" e))
+          (sxsh:shell-parse-error (e)
+            (format *error-output* "sxsh: ~A~%" e))
           (shell-exit (e)
             (return (or (shell-exit-code e) 0)))
           (error (e)
-            (format *error-output* "posh: ~A~%" e)))))))
+            (format *error-output* "sxsh: ~A~%" e)))))))
 
 (defun init-job-control (sh)
   "Apply the startup default for monitor mode: on for an interactive shell with
@@ -92,21 +92,21 @@ when a parse error is 'unexpected EOF'-like). Returns NIL on EOF."
                 (if incomplete
                     (write-string src buffer)
                     (return src)))
-            (posh:shell-parse-error ()
+            (sxsh:shell-parse-error ()
               ;; incomplete -> keep buffering
               (write-string src buffer))
             (error () (return src)))))))) ; other errors: let run report
 
 (defun supported-platform-p ()
-  "posh/shell relies on POSIX (posix_spawn, dup2, pipe, waitpid). It runs on
+  "sxsh/shell relies on POSIX (posix_spawn, dup2, pipe, waitpid). It runs on
 Linux and macOS; anything else (notably Windows) is unsupported."
   (and (member :unix *features*) t))
 
 (defun main (&optional (argv (rest sb-ext:*posix-argv*)))
-  "Entry point. Supports: posh script.sh [args], posh -c 'cmd', or interactive."
+  "Entry point. Supports: sxsh script.sh [args], sxsh -c 'cmd', or interactive."
   (unless (supported-platform-p)
     (format *error-output*
-            "posh: unsupported platform; requires a POSIX system (Linux or macOS)~%")
+            "sxsh: unsupported platform; requires a POSIX system (Linux or macOS)~%")
     (return-from main 1))
   (let ((sh (make-shell :interactive (and (null argv)
                                           (stdin-is-interactive-p)))))
@@ -130,11 +130,11 @@ Linux and macOS; anything else (notably Windows) is unsupported."
                 (set-positional sh (rest argv))
                 (run-string sh (slurp-file (first argv)))))
            (shell-exit (e) (setf (shell-last-status sh) (or (shell-exit-code e) 0)))
-           (posh:shell-parse-error (e)
-             (format *error-output* "posh: ~A~%" e)
+           (sxsh:shell-parse-error (e)
+             (format *error-output* "sxsh: ~A~%" e)
              (setf (shell-last-status sh) 2))
            (error (e)
-             (format *error-output* "posh: ~A~%" e)
+             (format *error-output* "sxsh: ~A~%" e)
              (setf (shell-last-status sh) 1)))
       ;; POSIX: the EXIT trap runs when the shell terminates, whatever the cause
       (run-exit-traps sh))

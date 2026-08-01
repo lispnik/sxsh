@@ -1,9 +1,9 @@
 ;;;; shell/package.lisp
 
-(defpackage #:posh-shell
+(defpackage #:sxsh-shell
   (:use #:cl)
-  (:nicknames #:psh)
-  (:import-from #:posh
+  (:nicknames #:sxs)
+  (:import-from #:sxsh
                 #:parse-string
                 ;; ast accessors
                 #:complete-command #:complete-command-entries
@@ -34,7 +34,7 @@
   (:export #:make-shell #:shell #:run #:run-string #:repl #:main
            #:shell-last-status #:spawn))
 
-(in-package #:posh-shell)
+(in-package #:sxsh-shell)
 
 ;; struct predicate helpers used by the executor dispatch
 (defun ast-type (node)

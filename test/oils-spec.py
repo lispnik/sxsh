@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the Oils spec tests with posh as the shell under test.
+"""Run the Oils spec tests with sxsh as the shell under test.
 
 Oils' `test/sh_spec.py` drives the largest cross-shell conformance corpus that
 exists (222 .test.sh files here). Each case is a shell snippet plus expected
@@ -25,7 +25,7 @@ byte-exact comparison. Several spec cases deliberately emit invalid UTF-8.
 A shim there would quietly corrupt the very cases most worth trusting.
 
 Get an interpreter with:  pyenv install 2.7.18
-or point POSH_PY2 at one yourself.
+or point SXSH_PY2 at one yourself.
 """
 
 import os
@@ -38,13 +38,13 @@ OILS = os.path.join(ROOT, 'third_party', 'oils')
 SPEC_DIR = os.path.join(OILS, 'spec')
 SPEC_BIN = os.path.join(OILS, 'spec', 'bin')
 SH_SPEC = os.path.join(OILS, 'test', 'sh_spec.py')
-POSH = os.path.join(ROOT, 'posh')
-TMP = os.path.join(os.environ.get('TMPDIR', '/tmp'), 'posh-oils-spec')
+SXSH = os.path.join(ROOT, 'sxsh')
+TMP = os.path.join(os.environ.get('TMPDIR', '/tmp'), 'sxsh-oils-spec')
 
 
 def find_python2():
     """Locate a Python 2 interpreter, or return None."""
-    explicit = os.environ.get('POSH_PY2')
+    explicit = os.environ.get('SXSH_PY2')
     if explicit:
         return explicit if os.access(explicit, os.X_OK) else None
 
@@ -103,8 +103,8 @@ def run_one(py2, name, extra_argv, quiet):
     argv = [py2, SH_SPEC,
             '--tmp-env', tmp_env,
             '--path-env', path_env,
-            '--timeout', os.environ.get('POSH_SPEC_TIMEOUT', '10'),
-            path, POSH] + extra_argv
+            '--timeout', os.environ.get('SXSH_SPEC_TIMEOUT', '10'),
+            path, SXSH] + extra_argv
 
     env = dict(os.environ)
     env['PYTHONPATH'] = OILS      # sh_spec.py does `from test import spec_lib`
@@ -180,10 +180,10 @@ def main(argv):
     if not py2:
         sys.exit("oils-spec: no Python 2 found (sh_spec.py is Python 2 source).\n"
                  "  pyenv install 2.7.18\n"
-                 "  or set POSH_PY2=/path/to/python2")
+                 "  or set SXSH_PY2=/path/to/python2")
 
-    if not os.access(POSH, os.X_OK):
-        sys.exit('oils-spec: no executable at %s (run: make build)' % POSH)
+    if not os.access(SXSH, os.X_OK):
+        sys.exit('oils-spec: no executable at %s (run: make build)' % SXSH)
 
     tot_pass = tot_fail = 0
     for name in names:

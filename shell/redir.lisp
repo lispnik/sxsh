@@ -6,7 +6,7 @@
 ;;;;   * builtins / compound commands running in-process: we apply the
 ;;;;     redirections to real fds with dup2, remembering saved fds to restore.
 
-(in-package #:posh-shell)
+(in-package #:sxsh-shell)
 
 (defconstant +o-rdonly+ sb-posix:o-rdonly)
 (defconstant +o-wronly+ sb-posix:o-wronly)
@@ -81,7 +81,7 @@ parameter/command/arith expansion unless the delimiter was quoted."
     (declare (ignore delim strip))
     (let ((text (if quoted body
                     (xchars->string (expand-heredoc-body sh body))))
-          (path (format nil "/tmp/posh-heredoc-~A-~A"
+          (path (format nil "/tmp/sxsh-heredoc-~A-~A"
                         (sb-posix:getpid) (random 1000000))))
       (with-open-file (s path :direction :output :if-exists :supersede
                               :if-does-not-exist :create)

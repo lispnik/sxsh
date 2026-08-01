@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # posix-diff.sh --- differential conformance suite.
 #
-# Runs the same source through posh and a reference POSIX shell and compares
+# Runs the same source through sxsh and a reference POSIX shell and compares
 # (stdout+stderr, exit status). This catches whole classes of divergence that
 # hand-written expectations miss, because the reference supplies the expected
 # answer instead of us guessing it.
 #
-#   ./test/posix-diff.sh [path-to-posh] [reference-shell]
+#   ./test/posix-diff.sh [path-to-sxsh] [reference-shell]
 #
 # Reference defaults to bash; anything POSIX-conforming works (dash, ksh).
 # Cases where shells legitimately disagree are listed in KNOWN_DIVERGENCE
@@ -14,7 +14,7 @@
 
 set -u
 
-POSH=${1:-./posh}
+SXSH=${1:-./sxsh}
 
 # Pick a modern bash by preference. macOS still ships 3.2.57 (2007) as
 # /bin/bash, which predates features the standard has since adopted -- $'\u'
@@ -48,7 +48,7 @@ run() { # run <shell> <src> -> prints "status<US>output"
 #   dollar-zero $0 for -c is implementation-defined.
 probe() {
   local name=$1 src=$2 why=${3:-} a b
-  a=$(run "$POSH" "$src")
+  a=$(run "$SXSH" "$src")
   b=$(run "$REF" "$src")
   if [ "$a" = "$b" ]; then
     pass=$((pass + 1))
@@ -59,13 +59,13 @@ probe() {
     return
   fi
   fail=$((fail + 1))
-  printf 'FAIL %s%s\n  src:  %s\n  posh: %s\n  ref:  %s\n' \
+  printf 'FAIL %s%s\n  src:  %s\n  sxsh: %s\n  ref:  %s\n' \
     "$name" "${why:+ (expected only $why to differ)}" "$src" \
     "$(printf '%s' "$a" | tr '\037\n' '|/')" \
     "$(printf '%s' "$b" | tr '\037\n' '|/')"
 }
 
-[ -x "$POSH" ] || { echo "posix-diff: no executable at $POSH" >&2; exit 1; }
+[ -x "$SXSH" ] || { echo "posix-diff: no executable at $SXSH" >&2; exit 1; }
 [ -x "$REF" ]  || { echo "posix-diff: no reference shell at $REF" >&2; exit 1; }
 
 # --- set -e scoping (POSIX 2.14) -------------------------------------------
@@ -178,7 +178,7 @@ probe dollar-zero-c   'echo $0' dollar-zero
 # NOTE: no alias probe here. bash disables alias expansion in
 # non-interactive shells (its own documented deviation, see shopt
 # expand_aliases), so it cannot serve as a reference for POSIX alias
-# behaviour. posh's alias handling is asserted in smoke.sh instead.
+# behaviour. sxsh's alias handling is asserted in smoke.sh instead.
 
 # --- printf: flags, width, precision, escapes (POSIX 2.14) ----------------
 probe printf-width      'printf "%5d|\\n" 42'

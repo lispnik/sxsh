@@ -1,8 +1,8 @@
-# posh --- POSIX shell parser + executor in Common Lisp (SBCL only)
+# sxsh --- POSIX shell parser + executor in Common Lisp (SBCL only)
 
 LISP    ?= sbcl
 SBCL    := $(LISP) --non-interactive
-BIN     := posh
+BIN     := sxsh
 CACHE   := $(HOME)/.cache/common-lisp
 
 PYTHON  ?= python3
@@ -18,10 +18,10 @@ OILS_SPECS ?= smoke posix quote word-split var-sub exit-status pipeline \
 
 all: build
 
-## build: save a standalone ./posh executable
+## build: save a standalone ./sxsh executable
 build: $(BIN)
 
-$(BIN): posh.asd build.lisp $(wildcard *.lisp) $(wildcard shell/*.lisp)
+$(BIN): sxsh.asd build.lisp $(wildcard *.lisp) $(wildcard shell/*.lisp)
 	$(SBCL) --load build.lisp
 
 ## test: run both in-image ASDF suites (parser + executor)
@@ -29,11 +29,11 @@ test: test-parser test-shell
 
 ## test-parser: parser suite only (48 cases)
 test-parser:
-	$(SBCL) --eval '(asdf:test-system "posh")'
+	$(SBCL) --eval '(asdf:test-system "sxsh")'
 
 ## test-shell: executor suite only (84 cases)
 test-shell:
-	$(SBCL) --eval '(asdf:test-system "posh/shell")'
+	$(SBCL) --eval '(asdf:test-system "sxsh/shell")'
 
 ## smoke: build the binary and drive it end-to-end
 smoke: $(BIN)

@@ -2,11 +2,11 @@
 ;;;;
 ;;;; These run real programs via posix_spawn and check captured stdout.
 
-(defpackage #:posh-shell/test
-  (:use #:cl #:posh-shell)
+(defpackage #:sxsh-shell/test
+  (:use #:cl #:sxsh-shell)
   (:export #:run-all))
 
-(in-package #:posh-shell/test)
+(in-package #:sxsh-shell/test)
 
 (defvar *pass* 0)
 (defvar *fail* 0)
@@ -14,7 +14,7 @@
 (defun capture (src)
   "Run SRC in a fresh shell, return (values stdout-string status)."
   (let* ((sh (make-shell))
-         (path (format nil "/tmp/posh-cap-~A" (random 1000000)))
+         (path (format nil "/tmp/sxsh-cap-~A" (random 1000000)))
          (fd (sb-posix:open path (logior sb-posix:o-wronly sb-posix:o-creat
                                          sb-posix:o-trunc) #o600))
          (saved (sb-posix:dup 1)))
@@ -24,9 +24,9 @@
            (let ((*standard-output* (sb-sys:make-fd-stream 1 :output t :buffering :full)))
              (handler-case
                  (unwind-protect
-                      (handler-case (posh-shell::run-string sh src)
-                        (posh-shell::shell-exit () nil))
-                   (posh-shell::run-exit-traps sh))
+                      (handler-case (sxsh-shell::run-string sh src)
+                        (sxsh-shell::shell-exit () nil))
+                   (sxsh-shell::run-exit-traps sh))
                (error () nil))
              (finish-output *standard-output*)))
       (sb-posix:dup2 saved 1) (sb-posix:close saved))
@@ -36,7 +36,7 @@
                    (let ((b (make-string (file-length s))))
                      (subseq b 0 (read-sequence b s))))
               (ignore-errors (delete-file path)))))
-      (values output (posh-shell::shell-last-status sh)))))
+      (values output (sxsh-shell::shell-last-status sh)))))
 
 (defmacro check (name src expected)
   `(let ((got (capture ,src)))

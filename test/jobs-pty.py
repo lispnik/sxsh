@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Job-control tests for posh, driven through a real pty.
+"""Job-control tests for sxsh, driven through a real pty.
 
 Job control is the one subsystem that cannot be tested in-image or with a
 plain pipe: it needs a controlling terminal so that tcsetpgrp() succeeds, the
 shell takes the job-control path, and Ctrl-Z reaches the foreground process
-group. This harness allocates a pty, puts posh in its own session with that
+group. This harness allocates a pty, puts sxsh in its own session with that
 pty as the controlling terminal, and drives it like a user would.
 
-    ./test/jobs-pty.py [path-to-posh]        (default: ./posh)
+    ./test/jobs-pty.py [path-to-sxsh]        (default: ./sxsh)
 """
 
 import os
@@ -19,7 +19,7 @@ import sys
 import termios
 import time
 
-POSH = sys.argv[1] if len(sys.argv) > 1 else "./posh"
+SXSH = sys.argv[1] if len(sys.argv) > 1 else "./sxsh"
 PROMPT = "$ "
 
 passed = 0
@@ -38,7 +38,7 @@ def ok(name):
 
 
 class Shell:
-    """An interactive posh on the far end of a pty."""
+    """An interactive sxsh on the far end of a pty."""
 
     def __init__(self, path):
         self.pid, self.fd = pty.fork()
@@ -128,11 +128,11 @@ def has_tty_job_control(sh):
 def main():
     global passed, failed
 
-    if not os.access(POSH, os.X_OK):
-        print(f"jobs-pty: no executable at {POSH} (run: make build)", file=sys.stderr)
+    if not os.access(SXSH, os.X_OK):
+        print(f"jobs-pty: no executable at {SXSH} (run: make build)", file=sys.stderr)
         return 1
 
-    sh = Shell(POSH)
+    sh = Shell(SXSH)
     try:
         if not has_tty_job_control(sh):
             print("jobs-pty: shell did not report a background job; "

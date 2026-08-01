@@ -11,7 +11,7 @@
 ;;;; splitting only applies there. This is done by building, alongside the
 ;;;; expanded string, a parallel "split-here" mask.
 
-(in-package #:posh-shell)
+(in-package #:sxsh-shell)
 
 ;;; A field-builder accumulates characters plus per-character metadata:
 ;;;   :lit    ordinary literal (from source, unquoted) -- eligible for globbing

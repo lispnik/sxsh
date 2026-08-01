@@ -1,6 +1,6 @@
 ;;;; shell/state.lisp --- shell runtime state.
 
-(in-package #:posh-shell)
+(in-package #:sxsh-shell)
 
 (defstruct (shell (:constructor %make-shell))
   ;; variable table: name -> (value . exported-p)
@@ -10,7 +10,7 @@
   ;; positional parameters $1 $2 ... as a vector of strings
   (positional #() :type vector)
   ;; $0
-  (name "posh")
+  (name "sxsh")
   ;; $? of the last command
   (last-status 0 :type integer)
   ;; $$ (our pid)
