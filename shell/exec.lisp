@@ -329,9 +329,10 @@ STDIN/STDOUT are fds to attach. CLOSE-IN-CHILD lists pipe fds to close."
                                              (remove-if (lambda (f)
                                                           (or (= f stdin) (= f stdout)))
                                                         close-in-child))))))))
-        (if (eql pid 127)
-            (values nil 127)            ; lookup failed: no child to wait for
-            (values pid nil)))
+        (cond
+          ((eq pid :redirect-error) (values nil 1))
+          ((eql pid 127) (values nil 127))  ; lookup failed: no child to wait for
+          (t (values pid nil))))
       ;; builtin / compound: run in-process with fds redirected temporarily
       (let ((saved-in (sb-posix:dup 0)) (saved-out (sb-posix:dup 1)))
         (unwind-protect
@@ -471,7 +472,8 @@ words (split on whitespace). Guards against self-referential aliases."
        (run-builtin sh (first words) (rest words) node))
       ;; external via posix_spawn
       (t
-       (catch 'not-found
+       (let ((thrown
+              (catch 'not-found
          (if (shell-job-control sh)
              ;; job control: put the child in its own group, give it the
              ;; terminal, wait, then reclaim -- so Ctrl-Z/Ctrl-C hit the child.
@@ -480,8 +482,8 @@ words (split on whitespace). Guards against self-referential aliases."
                (return-from exec-simple
                  (wait-foreground sh pid (ignore-errors (deparse node)))))
              (let ((pid (spawn-external sh node :words words)))
-               (return-from exec-simple (wait-for pid)))))
-       127))))
+               (return-from exec-simple (wait-for pid)))))))
+         (if (eq thrown :redirect-error) 1 127))))))
 
 (defun wait-foreground (sh pid command)
   "Wait for a foreground child PID that is a group leader, handling terminal
@@ -682,7 +684,14 @@ a second time re-runs any command substitution in the words."
          (temp-env (apply-assignments sh (simple-command-assignments node)))
          (env (merge-env (exported-environ sh) temp-env)))
     (multiple-value-bind (redir-actions temps)
-        (build-spawn-file-actions sh (simple-command-redirects node))
+        (handler-case (build-spawn-file-actions sh (simple-command-redirects node))
+          ;; A redirection we cannot set up fails this command, not the shell.
+          (redirect-error (e)
+            (format *error-output* "posh: ~A~%" e)
+            (setf (shell-last-status sh) 1)
+            ;; distinct from a failed PATH lookup: that is 127, a redirection
+            ;; that could not be set up is 1
+            (throw 'not-found :redirect-error)))
       (let ((all-actions (append extra-actions redir-actions)))
         (unwind-protect
              (spawn prog words :env env :file-actions all-actions
@@ -812,12 +821,24 @@ and run it in-process. State changes (cd, var sets) are rolled back."
     new))
 
 (defun exec-if (sh node)
-  (if (zerop (without-errexit (exec-node sh (if-clause-condition node))))
-      (exec-node sh (if-clause-then node))
-      (let ((else (if-clause-else node)))
-        (if else (exec-node sh else) 0))))
+  ;; Redirections on a compound command apply to the whole construct. The
+  ;; parser has always collected these; the executor used to drop them, so
+  ;; `while read l; do ...; done <<EOF' and `if read l; then ...; fi < file'
+  ;; ran with the shell's own stdin and read nothing.
+  (exec-with-redirects
+   sh (if-clause-redirects node)
+   (lambda ()
+     (if (zerop (without-errexit (exec-node sh (if-clause-condition node))))
+         (exec-node sh (if-clause-then node))
+         (let ((else (if-clause-else node)))
+           (if else (exec-node sh else) 0))))))
 
 (defun exec-while (sh node until-p)
+  (exec-with-redirects
+   sh (if until-p (until-clause-redirects node) (while-clause-redirects node))
+   (lambda () (exec-while-1 sh node until-p))))
+
+(defun exec-while-1 (sh node until-p)
   (let ((status 0))
     (handler-case
         (loop
@@ -836,6 +857,11 @@ and run it in-process. State changes (cd, var sets) are rolled back."
     status))
 
 (defun exec-for (sh node)
+  (exec-with-redirects
+   sh (for-clause-redirects node)
+   (lambda () (exec-for-1 sh node))))
+
+(defun exec-for-1 (sh node)
   (let* ((name (for-clause-name node))
          (words-spec (for-clause-words node))
          (items (if (eq words-spec :default)
@@ -856,6 +882,11 @@ and run it in-process. State changes (cd, var sets) are rolled back."
     status))
 
 (defun exec-case (sh node)
+  (exec-with-redirects
+   sh (case-clause-redirects node)
+   (lambda () (exec-case-1 sh node))))
+
+(defun exec-case-1 (sh node)
   (let ((word (first (expand-word-to-fields sh (word-text (case-clause-word node))
                                             :split nil :glob nil)))
         (status 0))

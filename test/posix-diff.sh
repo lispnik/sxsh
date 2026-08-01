@@ -205,6 +205,63 @@ probe getopts-end       'set -- x -a; getopts "a" o; echo "st=$? o=$o"'
 probe getopts-silent    'set -- -z; getopts ":ab" o; echo "o=$o arg=$OPTARG"'
 probe getopts-ddash     'set -- -a -- -b; while getopts "ab" o; do echo "$o"; done; echo "ind=$OPTIND"'
 
+# --- redirections on compound commands (POSIX 2.9.4) ----------------------
+probe heredoc-while  'while read l; do echo "[$l]"; done <<EOF
+a
+b
+EOF'
+probe heredoc-for    'for i in 1; do read l; echo "[$l]"; done <<EOF
+y
+EOF'
+probe heredoc-if     'if read l; then echo "[$l]"; fi <<EOF
+z
+EOF'
+probe heredoc-case   'case x in x) read l; echo "[$l]";; esac <<EOF
+c
+EOF'
+probe heredoc-brace  '{ read l; echo "[$l]"; } <<EOF
+x
+EOF'
+probe heredoc-subsh  '( read l; echo "[$l]" ) <<EOF
+w
+EOF'
+probe heredoc-tabs   'cat <<-EOF
+	tabbed
+	EOF'
+probe heredoc-two    'cat <<E1; cat <<E2
+one
+E1
+two
+E2'
+probe heredoc-pipe   'cat <<EOF | tr a-z A-Z
+lower
+EOF'
+probe heredoc-arith  'cat <<EOF
+$((1+2))
+EOF'
+probe heredoc-in-fn  'f() { cat <<EOF
+in-func
+EOF
+}; f'
+
+# --- fd manipulation ------------------------------------------------------
+probe fd-dup-out     'exec 3>&1; echo x >&3; exec 3>&-; echo done'
+probe fd-read-from   'exec 4</etc/hosts; read l <&4; exec 4<&-; [ -n "$l" ] && echo got'
+probe fd-close-unused 'exec 5>&-; echo ok'
+probe fd-swap        'echo x 1>&2 2>&1 | cat'
+probe fd-order       '{ echo a; } 2>&1 1>/dev/null; echo done'
+probe redir-missing-in  'cat < /nonexistent-zz 2>/dev/null; echo st=$?' diag-text
+probe redir-missing-msg 'cat < /nonexistent-zz' diag-text
+probe redir-bad-outdir  'echo x > /nonexistent-dir-zz/f' diag-text
+
+# --- control-flow edges ---------------------------------------------------
+probe for-empty      'for i in; do echo $i; done; echo empty-ok'
+probe break-nested   'for i in 1 2; do for j in a b; do break 2; done; done; echo ok'
+probe continue-2     'for i in 1 2; do for j in a b; do [ $j = b ] && continue 2; echo "$i$j"; done; done'
+probe shift-too-many 'set -- a; shift 2 2>/dev/null; echo st=$?'
+probe func-nested    'f() { g() { echo nested; }; }; f; g'
+probe return-bare    'f() { return; }; f; echo $?'
+
 printf '\nposix-diff: %d passed, %d failed, %d known divergences (ref: %s)\n' \
   "$pass" "$fail" "$skipped" "$REF"
 [ "$fail" -eq 0 ]

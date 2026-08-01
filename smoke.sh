@@ -249,6 +249,36 @@ check read-escaped-delim '[a:b][]'   0 'printf "a\\\\:b\n" | { IFS=: read x y; e
 check read-continuation '[ab]'       0 'printf "a\\\\\nb\n" | { read x; echo "[$x]"; }'
 check read-while-no-nl  'got:l1'     0 'printf "l1\nl2" | { while read l; do echo "got:$l"; done; }'
 
+# --- redirections apply to compound commands ------------------------------
+check heredoc-while     '[a]
+[b]'                            0 'while read l; do echo "[$l]"; done <<EOF
+a
+b
+EOF'
+check heredoc-for       '[y]'   0 'for i in 1; do read l; echo "[$l]"; done <<EOF
+y
+EOF'
+check heredoc-if        '[z]'   0 'if read l; then echo "[$l]"; fi <<EOF
+z
+EOF'
+check heredoc-case      '[c]'   0 'case x in x) read l; echo "[$l]";; esac <<EOF
+c
+EOF'
+check heredoc-until     '[u]'   0 'until read l; do :; done <<EOF
+u
+EOF
+echo "[$l]"'
+check redirect-for-out  'a
+b'                              0 'f=$(mktemp); for i in a b; do echo $i; done > "$f"; cat "$f"; rm -f "$f"'
+check redirect-while-in '2'     0 'f=$(mktemp); printf "x\ny\n" > "$f"; n=0; while read l; do n=$((n+1)); done < "$f"; echo $n; rm -f "$f"'
+
+# --- redirection failures name the file and fail only the command ---------
+check_err redir-missing-in 'No such file or directory' 1 'cat < /nonexistent-zz'
+check redir-missing-status '1' 0 'cat < /nonexistent-zz 2>/dev/null; echo $?'
+check redir-shell-survives 'after' 0 'cat < /nonexistent-zz 2>/dev/null; echo after'
+check_err redir-bad-outdir 'No such file or directory' 1 'echo x > /nonexistent-dir-zz/f'
+check notfound-still-127  '127' 0 'nosuchcmd_zz 2>/dev/null; echo $?'
+
 # --- trap listing order and subshell trap isolation -----------------------
 check trap-order        "trap -- 'echo t' EXIT
 trap -- 'echo t' SIGINT

@@ -44,9 +44,19 @@ O_EXCL unconditionally broke writing to /dev/null under -C."
              (format s "~A: ~A" (redirect-error-path c)
                      (redirect-error-detail c)))))
 
+(defun errno-message (condition)
+  "A plain strerror-style message for a failed syscall.
+
+PRINC-TO-STRING on the condition yields SBCL's own wording -- `Error in
+SB-POSIX::OPEN-WITH-MODE: No such file or directory (2)' -- which leaks the
+implementation into what is supposed to be a shell diagnostic."
+  (let ((errno (ignore-errors (sb-posix:syscall-errno condition))))
+    (or (and errno (ignore-errors (sb-int:strerror errno)))
+        (princ-to-string condition))))
+
 (defun open-for-redirect (path flags mode)
   "sb-posix:open, but failures become a shell diagnostic rather than a raw
-Lisp condition (`Error in SB-POSIX::OPEN-WITH-MODE: File exists (17)')."
+Lisp condition."
   (handler-case (sb-posix:open path flags mode)
     (error (e)
       (error 'redirect-error
@@ -56,7 +66,7 @@ Lisp condition (`Error in SB-POSIX::OPEN-WITH-MODE: File exists (17)')."
                          ;; the set -C case, which is not really an error the
                          ;; user needs errno for
                          "cannot overwrite existing file"
-                         (princ-to-string e))))))
+                         (errno-message e))))))
 
 (defun default-fd (op)
   "The fd a redirection applies to when no explicit IO_NUMBER is given."
@@ -89,6 +99,13 @@ parameter/command/arith expansion unless the delimiter was quoted."
          (target-word (word-text (redirect-target redirect))))
     (ecase op
       (:< (let ((path (single-expand sh target-word)))
+            ;; posix_spawn performs this open in the child, so a failure comes
+            ;; back only as a generic spawn error naming the *program*. Check
+            ;; it here so the diagnostic names the file, as every shell does,
+            ;; and so the command fails rather than the shell aborting.
+            (handler-case (sb-posix:close (sb-posix:open path +o-rdonly+ 0))
+              (error (e)
+                (error 'redirect-error :path path :detail (errno-message e))))
             (values (list (fa-open fd path +o-rdonly+ 0)) nil)))
       (:> (let ((path (single-expand sh target-word)))
             (values (list (fa-open fd path (logior +o-wronly+ +o-creat+
