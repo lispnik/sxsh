@@ -1153,6 +1153,128 @@ meaning that process group. Returns T on success, NIL after reporting."
           (error () (format *error-output* "umask: ~A: invalid mask~%" spec) 1)))))
 
 ;;; hash -- command location cache; we keep a minimal real cache -----------
+;;; ulimit ----------------------------------------------------------------
+;;;
+;;; getrlimit/setrlimit are not in sb-posix, so they are bound here. The
+;;; resource numbers are NOT portable -- macOS has AS=5, MEMLOCK=6, NPROC=7,
+;;; NOFILE=8 where Linux has RSS=5, NPROC=6, NOFILE=7, MEMLOCK=8, AS=9 -- and
+;;; RLIM_INFINITY differs too (2^63-1 vs ~0). Every one of them is behind a
+;;; reader conditional for that reason; hardcoding one platform's values is
+;;; the same mistake that made job control silently wrong on macOS.
+
+(sb-alien:define-alien-routine ("getrlimit" %getrlimit) sb-alien:int
+  (resource sb-alien:int) (rlp (* t)))
+(sb-alien:define-alien-routine ("setrlimit" %setrlimit) sb-alien:int
+  (resource sb-alien:int) (rlp (* t)))
+
+(defconstant +rlimit-cpu+     0)
+(defconstant +rlimit-fsize+   1)
+(defconstant +rlimit-data+    2)
+(defconstant +rlimit-stack+   3)
+(defconstant +rlimit-core+    4)
+(defconstant +rlimit-as+      #+darwin 5 #-darwin 9)
+(defconstant +rlimit-memlock+ #+darwin 6 #-darwin 8)
+(defconstant +rlimit-nproc+   #+darwin 7 #-darwin 6)
+(defconstant +rlimit-nofile+  #+darwin 8 #-darwin 7)
+(defconstant +rlim-infinity+
+  #+darwin #x7FFFFFFFFFFFFFFF
+  #-darwin #xFFFFFFFFFFFFFFFF)
+
+(defparameter +ulimit-resources+
+  ;; (flag  description  resource  unit-in-bytes-or-1)
+  `((#\c "core file size"     ,+rlimit-core+    512)
+    (#\d "data seg size"      ,+rlimit-data+    1024)
+    (#\f "file size"          ,+rlimit-fsize+   512)
+    (#\l "max locked memory"  ,+rlimit-memlock+ 1024)
+    (#\n "open files"         ,+rlimit-nofile+  1)
+    (#\s "stack size"         ,+rlimit-stack+   1024)
+    (#\t "cpu time"           ,+rlimit-cpu+     1)
+    (#\u "max user processes" ,+rlimit-nproc+   1)
+    (#\v "virtual memory"     ,+rlimit-as+      1024))
+  "Resources ulimit can report or set, with the unit each is expressed in.
+POSIX only requires -f, in 512-byte blocks; the rest follow common usage.")
+
+(defun rlimit-get (resource)
+  "Return (values soft hard) for RESOURCE, or NIL on failure."
+  (sb-alien:with-alien ((rl (array (sb-alien:unsigned 64) 2)))
+    (when (zerop (%getrlimit resource (sb-alien:cast rl (* t))))
+      (values (sb-alien:deref rl 0) (sb-alien:deref rl 1)))))
+
+(defun rlimit-set (resource soft hard)
+  (sb-alien:with-alien ((rl (array (sb-alien:unsigned 64) 2)))
+    (setf (sb-alien:deref rl 0) soft
+          (sb-alien:deref rl 1) hard)
+    (zerop (%setrlimit resource (sb-alien:cast rl (* t))))))
+
+(defun ulimit-format (value unit)
+  (if (>= value +rlim-infinity+) "unlimited"
+      (princ-to-string (if (= unit 1) value (floor value unit)))))
+
+(defun ulimit-parse (text unit)
+  (cond
+    ((string= text "unlimited") +rlim-infinity+)
+    (t (let ((n (ignore-errors (parse-integer text))))
+         (and n (* n unit))))))
+
+(define-builtin "ulimit" (sh args out)
+  (let ((hard nil) (soft nil) (flag #\f) (operand nil) (all nil) (rest args))
+    (loop while (and rest (> (length (first rest)) 1)
+                     (char= (char (first rest) 0) #\-))
+          do (let ((letters (subseq (pop rest) 1)))
+               (loop for c across letters do
+                 (case c
+                   (#\H (setf hard t))
+                   (#\S (setf soft t))
+                   (#\a (setf all t))
+                   (t (if (assoc c +ulimit-resources+)
+                          (setf flag c)
+                          (progn
+                            (format *error-output*
+                                    "ulimit: ~C: invalid option~%" c)
+                            (return-from builtin 2))))))))
+    (setf operand (first rest))
+    ;; which of the pair to report: -H hard, otherwise soft
+    (flet ((report (entry)
+             (destructuring-bind (c desc resource unit) entry
+               (declare (ignore c))
+               (multiple-value-bind (cur max) (rlimit-get resource)
+                 (if cur
+                     (format out "~A~28T~A~%" desc
+                             (ulimit-format (if hard max cur) unit))
+                     (format out "~A~28T~A~%" desc "unknown"))))))
+      (when all
+        (dolist (e +ulimit-resources+) (report e))
+        (return-from builtin 0)))
+    (let ((entry (assoc flag +ulimit-resources+)))
+      (destructuring-bind (c desc resource unit) entry
+        (declare (ignore c desc))
+        (cond
+          ((null operand)
+           (multiple-value-bind (cur max) (rlimit-get resource)
+             (unless cur
+               (format *error-output* "ulimit: cannot read limit~%")
+               (return-from builtin 1))
+             (write-line (ulimit-format (if hard max cur) unit) out)
+             0))
+          (t
+           (let ((v (ulimit-parse operand unit)))
+             (unless v
+               (format *error-output* "ulimit: ~A: invalid number~%" operand)
+               (return-from builtin 1))
+             (multiple-value-bind (cur max) (rlimit-get resource)
+               (unless cur
+                 (format *error-output* "ulimit: cannot read limit~%")
+                 (return-from builtin 1))
+               ;; with neither -H nor -S, POSIX sets both
+               (let ((new-soft (if hard cur v))
+                     (new-hard (if (or hard (not soft)) v max)))
+                 (when (and soft (not hard)) (setf new-hard max))
+                 (if (rlimit-set resource new-soft new-hard)
+                     0
+                     (progn (format *error-output*
+                                    "ulimit: cannot modify limit~%")
+                            1)))))))))))
+
 (define-builtin "hash" (sh args out)
   (cond
     ((null args)

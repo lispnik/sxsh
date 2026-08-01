@@ -107,6 +107,12 @@ PATH=~/a:~/b rule)."
              (multiple-value-bind (str next) (expand-tilde sh raw i n)
                (dolist (ch (coerce str 'list)) (emit ch :quoted))
                (setf i next start-of-field nil)))
+            ;; $'...' : C-style escapes, otherwise literal (POSIX Issue 8)
+            ((and (char= c #\$) (< (1+ i) n) (char= (char raw (1+ i)) #\'))
+             (multiple-value-bind (str next) (expand-dollar-quote raw (+ i 2) n)
+               (emit-anchor)             ; $'' is still a field
+               (dolist (ch (coerce str 'list)) (emit ch :quoted))
+               (setf i next start-of-field nil)))
             ;; $@ / $* need special multi-field handling (see emit-at-params)
             ((and (char= c #\$) (< (1+ i) n) (char= (char raw (1+ i)) #\@))
              (emit-at-params sh #'emit #'emit-field-sep nil :split)
@@ -135,6 +141,86 @@ PATH=~/a:~/b rule)."
                (setf start-of-field (and assignment
                                          (or (char= c #\:) (char= c #\=)))))))))
     (nreverse out)))
+
+(defun dollar-quote-escape (raw i n)
+  "Decode the backslash escape at RAW[i] inside $'...'.
+Returns (values string next-index)."
+  (let ((e (char raw (1+ i))))
+    (macrolet ((ret (ch skip) `(values (string ,ch) (+ i ,skip))))
+      (case e
+        (#\a (ret (code-char 7) 2))
+        (#\b (ret (code-char 8) 2))
+        ((#\e #\E) (ret (code-char 27) 2))
+        (#\f (ret (code-char 12) 2))
+        (#\n (ret #\Newline 2))
+        (#\r (ret #\Return 2))
+        (#\t (ret #\Tab 2))
+        (#\v (ret (code-char 11) 2))
+        (#\\ (ret #\\ 2))
+        (#\' (ret #\' 2))
+        (#\" (ret #\" 2))
+        (#\? (ret #\? 2))
+        (#\x (let ((j (+ i 2)) (count 0))
+               (let ((start j))
+                 (loop while (and (< j n) (< count 2)
+                                  (digit-char-p (char raw j) 16))
+                       do (incf j) (incf count))
+                 (if (> j start)
+                     (values (string (code-char (parse-integer raw :start start
+                                                                   :end j
+                                                                   :radix 16)))
+                             j)
+                     (values "\\x" (+ i 2))))))
+        ((#\u #\U)
+         (let* ((limit (if (char= e #\u) 4 8)) (j (+ i 2)) (count 0)
+                (start j))
+           (loop while (and (< j n) (< count limit)
+                            (digit-char-p (char raw j) 16))
+                 do (incf j) (incf count))
+           (if (> j start)
+               (values (string (code-char (parse-integer raw :start start
+                                                             :end j :radix 16)))
+                       j)
+               (values (concatenate 'string "\\" (string e)) (+ i 2)))))
+        (#\c (if (< (+ i 2) n)
+                 (values (string (code-char
+                                  (logand (char-code
+                                           (char-upcase (char raw (+ i 2))))
+                                          #x1f)))
+                         (+ i 3))
+                 (values "\\c" (+ i 2))))
+        (t (if (digit-char-p e 8)
+               (let ((j (1+ i)) (count 0))
+                 (let ((start j))
+                   (loop while (and (< j n) (< count 3)
+                                    (digit-char-p (char raw j) 8))
+                         do (incf j) (incf count))
+                   (values (string (code-char (parse-integer raw :start start
+                                                                 :end j
+                                                                 :radix 8)))
+                           j)))
+               (values (concatenate 'string "\\" (string e)) (+ i 2))))))))
+
+(defun expand-dollar-quote (raw i n)
+  "Expand a $'...' literal whose opening quote is at RAW[i-1].
+Returns (values text index-past-the-closing-quote).
+
+POSIX Issue 8 (2024) adopted this from ksh/bash. The body is single-quoted --
+no parameter or command substitution -- but C-style backslash escapes are
+interpreted, which is the only portable way to put a tab or newline into a
+word without a literal one in the source."
+  (let ((out (make-string-output-stream)))
+    (loop
+      (when (>= i n) (return))
+      (let ((c (char raw i)))
+        (cond
+          ((char= c #\') (incf i) (return))
+          ((and (char= c #\\) (< (1+ i) n))
+           (multiple-value-bind (str next) (dollar-quote-escape raw i n)
+             (write-string str out)
+             (setf i next)))
+          (t (write-char c out) (incf i)))))
+    (values (get-output-stream-string out) i)))
 
 (defun expand-double (sh raw i n emit &optional emit-field-sep)
   "Expand the interior of a double-quoted string starting just after the

@@ -15,7 +15,19 @@
 set -u
 
 POSH=${1:-./posh}
-REF=${2:-/bin/bash}
+
+# Pick a modern bash by preference. macOS still ships 3.2.57 (2007) as
+# /bin/bash, which predates features the standard has since adopted -- $'\u'
+# among them -- so using it as the reference invents divergences that say
+# nothing about our conformance.
+pick_ref() {
+  local c
+  for c in /opt/homebrew/bin/bash /usr/local/bin/bash /bin/bash; do
+    [ -x "$c" ] && { printf '%s' "$c"; return; }
+  done
+  printf '%s' /bin/bash
+}
+REF=${2:-$(pick_ref)}
 
 pass=0; fail=0; skipped=0
 
@@ -313,6 +325,33 @@ probe st-eval-false     'eval "false"; echo $?'
 probe st-eval-empty     'eval ""; echo $?'
 probe st-assign-cmdsub  'v=$(true) w=$(false); echo $?'
 
+# --- $'...' C-style quoting (POSIX Issue 8) --------------------------------
+probe dq-tab            "echo \$'a\\tb'"
+probe dq-newline        "echo \$'l1\\nl2'"
+probe dq-hex            "echo \$'\\x41'"
+probe dq-octal          "echo \$'\\101'"
+probe dq-unicode        "echo \$'\\u0041'"
+probe dq-escaped-quote  "echo \$'q:\\'x'"
+probe dq-backslash      "echo \$'bs:\\\\'"
+probe dq-empty          "echo \$''"
+probe dq-no-expansion   "x=v; echo \$'\$x'"
+probe dq-one-word       "for w in \$'a b' c; do echo \"[\$w]\"; done"
+probe dq-in-assignment  "x=\$'a\\tb'; echo \"[\$x]\""
+probe dq-quoted-literal "echo \"\$'literal'\""
+
+# --- ulimit ---------------------------------------------------------------
+probe ulimit-default    'ulimit'
+probe ulimit-f          'ulimit -f'
+probe ulimit-n          'ulimit -n'
+probe ulimit-core       'ulimit -c'
+probe ulimit-stack      'ulimit -s'
+probe ulimit-hard       'ulimit -H -n'
+probe ulimit-soft       'ulimit -S -n'
+probe ulimit-set        'ulimit -n 256; ulimit -n'
+probe ulimit-set-f      'ulimit -f 100; ulimit -f'
+probe ulimit-builtin    'command -v ulimit'
+probe ulimit-bad-opt    'ulimit -Z 2>/dev/null; echo st=$?'
+
 printf '\nposix-diff: %d passed, %d failed, %d known divergences (ref: %s)\n' \
-  "$pass" "$fail" "$skipped" "$REF"
+  "$pass" "$fail" "$skipped" "$("$REF" --version 2>/dev/null | head -1 || echo "$REF")"
 [ "$fail" -eq 0 ]

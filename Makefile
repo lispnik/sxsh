@@ -6,7 +6,9 @@ BIN     := posh
 CACHE   := $(HOME)/.cache/common-lisp
 
 PYTHON  ?= python3
-REF_SHELL ?= /bin/bash
+# Leave REF_SHELL empty so posix-diff.sh picks a modern bash itself; macOS
+# /bin/bash is 3.2 and misreports conformance.
+REF_SHELL ?=
 # Spec files from third_party/oils that are in scope for a POSIX shell.
 OILS_SPECS ?= smoke posix quote word-split var-sub exit-status pipeline \
               command-sub arith assign redirect loop case_ if_ subshell \

@@ -119,6 +119,26 @@
       (vector-push-extend c out)
       (when (char= c #\') (return)))))
 
+(defun scan-dollar-quote (lx out)
+  "Consume a $'...' literal, in which a backslash escapes the next character
+-- including the closing quote.
+
+This differs from an ordinary '...' string, where nothing is special. Scanning
+it as one meant `$'it\\'s'' ended the string at the escaped quote and the rest
+of the line was read as a new one (\"unterminated single-quoted string\")."
+  (vector-push-extend (lx-advance lx) out)   ; $
+  (vector-push-extend (lx-advance lx) out)   ; opening '
+  (loop
+    (when (lx-eof-p lx)
+      (parse-error* (lexer-line lx) (lexer-column lx)
+                    "unterminated $'...' string"))
+    (let ((c (lx-advance lx)))
+      (vector-push-extend c out)
+      (cond
+        ((char= c #\\)
+         (unless (lx-eof-p lx) (vector-push-extend (lx-advance lx) out)))
+        ((char= c #\') (return))))))
+
 (defun scan-double-quote (lx out)
   "Consume a \"...\" string, honoring \\ escapes and nested $(...) / `...` / ${...}."
   (vector-push-extend (lx-advance lx) out)   ; opening "
@@ -173,6 +193,7 @@ tracking nesting, quotes and nested substitutions. Assumes point is on OPEN."
           ((char= c close)
            (decf depth) (vector-push-extend (lx-advance lx) out)
            (when (zerop depth) (return)))
+          ((and (char= c #\$) (eql (lx-peek lx 1) #\')) (scan-dollar-quote lx out))
           ((char= c #\') (scan-single-quote lx out))
           ((char= c #\") (scan-double-quote lx out))
           ((char= c #\`) (scan-backquote lx out))
@@ -245,6 +266,7 @@ Detects assignment-word shape as a side product via classify."
                (progn (lx-advance lx) (lx-advance lx))
                (progn (vector-push-extend (lx-advance lx) out)
                       (unless (lx-eof-p lx) (vector-push-extend (lx-advance lx) out)))))
+          ((and (char= c #\$) (eql (lx-peek lx 1) #\')) (scan-dollar-quote lx out))
           ((char= c #\') (scan-single-quote lx out))
           ((char= c #\") (scan-double-quote lx out))
           ((char= c #\`) (scan-backquote lx out))

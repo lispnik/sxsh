@@ -226,6 +226,17 @@ expanding a command twice runs them twice. `external-simple-command-p` therefore
 expanded argv as a second value and every caller threads it into `spawn-external`'s `:words`.
 Never call `expand-command-words` a second time on a node someone else already classified.
 
+### Use a modern bash as the differential reference
+
+`/bin/bash` on macOS is **3.2.57 (2007)** -- Apple froze it at the last
+GPLv2 release. It predates features the standard has since adopted, so it
+reports divergences that say nothing about our conformance: `$'\\u0041'`
+prints the escape literally there and `A` in any bash from 4.2 on.
+`test/posix-diff.sh` therefore prefers /opt/homebrew/bin/bash, then
+/usr/local/bin/bash, then /bin/bash, and prints the reference's version in its
+summary so a result is always interpretable. Pass a shell explicitly to
+override, e.g. `make posix REF_SHELL=/bin/dash`.
+
 ### The Oils spec "hang" is environmental, not a shell bug
 
 Two spec cases (`exit-status` "If subshell true WITH OUTPUT", `arith` "Logical
