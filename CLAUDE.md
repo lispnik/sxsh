@@ -226,6 +226,20 @@ expanding a command twice runs them twice. `external-simple-command-p` therefore
 expanded argv as a second value and every caller threads it into `spawn-external`'s `:words`.
 Never call `expand-command-words` a second time on a node someone else already classified.
 
+### The Oils spec "hang" is environmental, not a shell bug
+
+Two spec cases (`exit-status` "If subshell true WITH OUTPUT", `arith` "Logical
+Ops Short Circuit") time out on macOS with XQuartz installed. They are designed
+around commands named `X` and `x` not existing, but `/opt/X11/bin/X` and
+`/opt/X11/bin/x` are symlinks to `Xquartz` — so the shell dutifully starts an X
+server and waits for it. **bash hangs on the same input.** Do not go looking for
+a deadlock in the executor; `test/oils-spec.py` passes `--timeout` so these are
+recorded as failures rather than blocking the suite.
+
+The arith case reaches it because `(( ... ))` is ksh/bash arithmetic that we do
+not implement, so `(( 0 || (x = 33) ))` parses as nested subshells and runs `x`
+as a command. dash does the same thing; it is not a defect.
+
 ### Never use `(truename ".")` for the working directory
 
 `sb-posix:chdir` changes the process cwd but leaves `*default-pathname-defaults*` alone, and CL
