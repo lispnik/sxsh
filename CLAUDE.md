@@ -26,6 +26,7 @@ build.lisp        -> saves the bin/sxsh executable
 smoke.sh           -> end-to-end checks against that executable (302 cases)
 test/jobs-pty.py   -> job control, driven through a real pty (14 cases)
 test/fuzz-parser.py -> mutation fuzzer with shrinking (make fuzz)
+test/git-suite.py  -> git's own test suite, differentially (make git-tests)
 test/posix-diff.sh -> differential conformance vs a reference shell (247 cases)
 ```
 
@@ -52,6 +53,7 @@ make build          # save bin/sxsh (~40MB SBCL image)
 make smoke          # build, then drive bin/sxsh end-to-end (302 cases)
 make jobs           # job control through a real pty (14 cases)
 make fuzz           # fuzz the parser; findings are shrunk and the seed printed
+make git-tests      # git's t/ suite under sxsh vs bash (slow; builds test-tool once)
 make posix          # differential conformance vs bash (247 cases)
 make posix REF_SHELL=/bin/dash    # stricter reference
 make clean          # remove bin/ and this project's fasls
@@ -234,6 +236,19 @@ expanding a command twice runs them twice. `external-simple-command-p` therefore
 expanded argv as a second value and every caller threads it into `spawn-external`'s `:words`.
 Never call `expand-command-words` a second time on a node someone else already classified.
 
+### `local` exists, and is not POSIX Issue 7
+
+Every shell that matters has it and real scripts require it, so sxsh implements it. Scoping is
+**dynamic**: `shell-local-frames` is a save/restore stack, one frame per active function call,
+and a callee still sees the caller's locals. The frame is popped in `call-function`'s cleanup so
+locals are restored however the function ends — `return`, falling off the end, `set -e`, or a
+`break` unwinding past it.
+
+Shells disagree on the details, because it went unstandardized for decades. A bare `local x`
+leaves x **unset** in bash, **inherited** in dash (its man page says so explicitly), and
+**empty** in zsh. sxsh follows bash: that is the reading that makes `local` a declaration. Do
+not "fix" this toward dash without a reason.
+
 ### Control flow must not escape its execution environment
 
 `return`, `break`, `continue` and `exit` are Lisp conditions (`func-return`, `loop-break`,
@@ -350,6 +365,56 @@ on that descriptor has to see the following byte. Do not "optimize" this into a 
 stream. Going through SBCL's `*standard-input*` slurped the whole file on the first call, so in
 `while read l; do read X <f; done <g` the inner redirected `read` was served leftover bytes
 from `g`. `{ read first; cat; } <f` is the cheapest test that the offset is right.
+
+### git's test suite is the most demanding real script we have
+
+`make git-tests` runs git's own t/ suite under sxsh (`test/git-suite.py`, submodule
+`third_party/git` pinned to v2.55.0). test-lib.sh and test-lib-functions.sh are ~3000 lines of
+deliberately portable sh, and each tNNNN script drives them through hundreds of cases, so it
+reaches constructs our own tests barely touch.
+
+It is **differential, and that is the point**: every script runs twice, once under sxsh and
+once under a reference bash, and only tests that PASS under the reference and FAIL under sxsh
+are reported. Tests needing an unbuilt helper or an absent filesystem feature fail for both and
+cancel out, so every line of output is a real lead.
+
+Three setup details, all handled by the harness — it does not build git:
+
+- `GIT-BUILD-OPTIONS` is generated with `make GIT-BUILD-OPTIONS`, a target that only runs `sed`.
+  test-lib.sh sources it and bails without it.
+- `templates/blt` normally comes from a full build; we symlink the installed git's templates.
+- `t/helper/test-tool` genuinely must be compiled — test-lib.sh refuses to run otherwise. Only
+  that target is built, once, then cached in the submodule. `ignore = dirty` in .gitmodules
+  keeps the resulting build products out of `git status`.
+
+The installed git is used via `GIT_TEST_INSTALLED`, so nothing links against the submodule.
+
+**Failures here are often order-dependent, and that is a feature.** Three t0001 failures
+vanished when run with `--run=N` alone: an earlier test was leaking state into them. Bisecting
+with `--run=13-18`, `--run=14-18` found the culprit, and the root cause was the assignment-prefix
+bug below — `GIT_DIR=x git init` left GIT_DIR set for every later test. A suite that runs
+hundreds of cases in one shell process is the only thing that finds that class.
+
+### Assignment prefixes are command-scoped, except on special built-ins
+
+POSIX 2.9.1: `V=x cmd` puts V in the command's environment and leaves the shell's V alone —
+unless `cmd` is a **special** built-in (`+special-builtins+` in exec.lisp), where it persists.
+sxsh persisted for every command type, which is what poisoned the git tests above.
+
+Two things make this easy to get wrong in either direction:
+
+- The binding must still be **visible** while the command runs. `IFS=: read x y` is the whole
+  point of the feature. `apply-assignments` without `:to-shell` cannot serve, because it
+  restores before returning — right for an external command, which gets the values through its
+  environment, wrong for anything in-process. `bind-assignments` / `restore-assignments` are
+  the in-process pair.
+- Functions do **not** persist, matching bash, dash and zsh — do not lump them in with special
+  built-ins.
+
+Use `bash --posix` as the reference for this rule. Plain bash does not persist even for special
+built-ins; that is one of the deviations `set -o posix` exists to fix, so plain bash will
+mislead you here. It is a better reference generally, though it is not a strict mode — arrays,
+`[[ ]]` and `<<<` all still work under it.
 
 ### The Oils spec "hang" is environmental, not a shell bug
 

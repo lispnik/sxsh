@@ -707,9 +707,63 @@ otherwise return a list of temporary K=V for a command environment."
               (remhash name (shell-vars sh))))))
     (nreverse temp)))
 
+(defparameter +special-builtins+
+  '(":" "." "break" "continue" "eval" "exec" "exit" "export" "readonly"
+    "return" "set" "shift" "times" "trap" "unset")
+  "POSIX 2.14 special built-ins.
+
+The distinction is not cosmetic: a variable assignment prefixed to a special
+built-in persists after the command, while one prefixed to a regular built-in,
+an external command or a function does not. `V=x :' leaves V set; `V=x true'
+must not. bash --posix, dash, zsh and bash all agree on the regular case, and
+bash --posix and dash on the special case (bash's default mode deviates, which
+is one of the things `set -o posix' fixes).")
+
+(defun special-builtin-p (name)
+  (member name +special-builtins+ :test #'string=))
+
+(defun bind-assignments (sh assignments)
+  "Bind NAME=VALUE assignments in the shell and return an undo list for
+RESTORE-ASSIGNMENTS.
+
+This is the command-scoped form: the binding has to be VISIBLE while the
+command runs -- `IFS=: read x y' is the whole reason the feature exists -- but
+must not outlive it. APPLY-ASSIGNMENTS without :TO-SHELL cannot serve, because
+it restores before it returns; that is right for an external command, which
+receives the values through its environment, but not for anything we run
+in-process."
+  (let ((saved '()))
+    (dolist (a assignments saved)
+      (let* ((name (assignment-name a))
+             (vw (assignment-value a))
+             (val (or (if vw
+                          (first (expand-word-to-fields sh (word-text vw)
+                                                        :split nil :glob nil
+                                                        :assignment t))
+                          "")
+                      "")))
+        ;; Push before setting, so an earlier assignment is visible to a later
+        ;; one (`a=1 b=$a cmd') while still restoring to the original value.
+        (push (cons name (multiple-value-list (get-var sh name))) saved)
+        (set-var sh name val)))))
+
+(defun restore-assignments (sh saved)
+  (dolist (entry saved)
+    (destructuring-bind (name value found exported)
+        (cons (car entry) (cdr entry))
+      (if found
+          (setf (gethash name (shell-vars sh)) (cons value exported))
+          (remhash name (shell-vars sh))))))
+
 (defun run-builtin (sh name args node)
   "Run a builtin with redirections applied in-process."
-  (apply-assignments sh (simple-command-assignments node) :to-shell t)
+  ;; Assignments persist only for a special built-in; for a regular one they
+  ;; are scoped to the command, but still have to be visible while it runs.
+  (let ((assign-undo nil))
+    (if (special-builtin-p name)
+        (apply-assignments sh (simple-command-assignments node) :to-shell t)
+        (setf assign-undo
+              (bind-assignments sh (simple-command-assignments node))))
   (let (saved temps)
     (handler-case
         (multiple-value-setq (saved temps)
@@ -718,6 +772,7 @@ otherwise return a list of temporary K=V for a command environment."
       ;; rather than aborting the shell.
       (redirect-error (e)
         (format *error-output* "sxsh: ~A~%" e)
+        (restore-assignments sh assign-undo)
         (return-from run-builtin 1)))
     (unwind-protect
          ;; NOTE: FUNC-RETURN is deliberately not caught here. Catching it made
@@ -728,7 +783,8 @@ otherwise return a list of temporary K=V for a command environment."
          (funcall (find-builtin name) sh args *standard-output*)
       (finish-output *standard-output*)
       (restore-redirects saved)
-      (dolist (p temps) (ignore-errors (delete-file p))))))
+      (restore-assignments sh assign-undo)
+      (dolist (p temps) (ignore-errors (delete-file p)))))))
 
 (defun child-sigdefaults (sh)
   "Signal numbers that must be reset to SIG_DFL in a spawned child.
@@ -822,16 +878,25 @@ by a call to f.")
     (return-from call-function 1))
   (let ((saved-pos (shell-positional sh))
         (*function-depth* (1+ *function-depth*)))
-    (apply-assignments sh (simple-command-assignments node) :to-shell t)
+    ;; Scoped to the call, not persistent: `V=x f' must leave V as it was.
+    ;; bash, bash --posix, dash and zsh all agree here -- unlike the special
+    ;; built-in case, where dash and bash --posix persist.
+    (let ((assign-undo (bind-assignments sh (simple-command-assignments node))))
     (set-positional sh (rest words))
     (multiple-value-bind (saved temps)
         (apply-redirects-in-process sh (simple-command-redirects node))
+      (push-local-frame sh)
       (unwind-protect
            (handler-case (exec-node sh (function-def-body def))
              (func-return (e) (cf-code e)))
+        ;; Popped in the cleanup so locals are restored however the function
+        ;; ends -- `return', falling off the end, `set -e', or a `break'
+        ;; unwinding past it.
+        (pop-local-frame sh)
         (restore-redirects saved)
         (dolist (p temps) (ignore-errors (delete-file p)))
-        (setf (shell-positional sh) saved-pos)))))
+        (restore-assignments sh assign-undo)
+        (setf (shell-positional sh) saved-pos))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Compound commands

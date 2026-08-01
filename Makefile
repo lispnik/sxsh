@@ -65,6 +65,16 @@ oils: $(BIN)
 
 # `oils` is deliberately not part of `check`: it is a scoreboard to drive down,
 # not a pass/fail gate.
+## git-tests: run git's own test suite under sxsh, differentially vs bash
+git-tests: $(BIN)
+	@$(PYTHON) test/git-suite.py $(GIT_TESTS) || true
+
+# Also a scoreboard rather than a gate, and a slow one: the first run compiles
+# t/helper/test-tool (a few minutes, then cached in the submodule). Only tests
+# that PASS under the reference shell and FAIL under sxsh are reported, so
+# every line of output is a real lead.
+#   make git-tests GIT_TESTS="t0000-basic t3600-rm"
+#   test/git-suite.py --list        # everything available
 ## fuzz: throw mutated and random input at the parser (add --exec to go deeper)
 fuzz: $(BIN)
 	$(PYTHON) test/fuzz-parser.py $(FUZZ_ARGS)

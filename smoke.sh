@@ -586,6 +586,52 @@ check read-then-cat     'rest1
 rest2'                                  0 'printf "a\nrest1\nrest2\n" >"$SMOKE_TMP/f4"; { read first; cat; } <"$SMOKE_TMP/f4"'
 check read-fd-dup       'l1/l2'         0 'printf "l1\nl2\n" >"$SMOKE_TMP/f3"; exec 3<"$SMOKE_TMP/f3"; read x <&3; read y <&3; echo "$x/$y"; exec 3<&-'
 
+# --- local -----------------------------------------------------------------
+# Not in POSIX Issue 7, but bash, dash, ksh and zsh all have it and real
+# scripts require it: git's t/test-lib.sh alone uses it 41 times, and without
+# it those scripts abort on `local: command not found' rather than misbehave.
+# Semantics follow bash and dash, which agree wherever it matters.
+check local-basic       'in
+out'                                    0 'f() { local x=in; echo $x; }; x=out; f; echo $x'
+check local-no-value    '[UNSET]
+out'                                    0 'f() { local x; echo "[${x-UNSET}]"; }; x=out; f; echo $x'
+check local-multiple    '12'            0 'f() { local x=1 y=2; echo "$x$y"; }; f'
+check local-dynamic     'see=in'        0 'g() { echo "see=$x"; }; f() { local x=in; g; }; x=out; f'
+check local-after-ret   'st=3 x=out'    0 'f() { local x=in; return 3; }; x=out; f; echo "st=$? x=$x"'
+check local-callee-sets 'out'           0 'f() { local x=in; g; }; g() { x=changed; }; x=out; f; echo $x'
+check local-nested      'after=a'       0 'f() { local x=a; h; echo "after=$x"; }; h() { local x=b; }; f'
+check local-redeclare   '2
+out'                                    0 'f() { local x=1; local x=2; echo $x; }; x=out; f; echo $x'
+check local-unset       '[U]
+[out]'                                  0 'f() { local x=1; unset x; echo "[${x-U}]"; }; x=out; f; echo "[$x]"'
+check local-quoted-val  '[with space]'  0 'f() { local "x=with space"; echo "[$x]"; }; f'
+check local-from-arg    'hello'         0 'f() { local x=$1; echo $x; }; f hello'
+# restored however the function ends, not just on a normal return
+check local-errexit     '[out]'         0 'f() { local x=in; false; }; set -e; x=out; f || true; echo "[$x]"'
+check_err local-outside 'can only be used in a function' 1 'local z=1'
+
+# --- assignment prefixes are command-scoped, except on special builtins ----
+# POSIX 2.9.1. sxsh persisted them for every command type, so
+# `GIT_DIR=x git init' left GIT_DIR set -- which is exactly how one failing
+# git test poisoned three later ones. The reference here is `bash --posix':
+# plain bash does not persist even for special builtins, which is one of the
+# deviations `set -o posix' exists to fix.
+check assign-external   '[U]'           0 'V=x /bin/echo -n; echo "[${V-U}]"'
+check assign-regular    '[U]'           0 'V=x true; echo "[${V-U}]"'
+check assign-builtin-cd '[U]'           0 'V=x cd .; echo "[${V-U}]"'
+check assign-function   '[U]'           0 'f() { :; }; V=x f; echo "[${V-U}]"'
+check assign-overwrite  '[old]'         0 'V=old; V=new /bin/echo hi >/dev/null; echo "[$V]"'
+check assign-cmdsub     '[U][U]'        0 'W=$(pwd) D=zz /bin/echo hi >/dev/null; echo "[${W-U}][${D-U}]"'
+# special builtins DO persist
+check assign-special    '[x]'           0 'V=x :; echo "[${V-U}]"'
+check assign-special-ex '[x]'           0 'V=x export Z=1; echo "[${V-U}]"'
+# ...but the binding must still be visible while the command runs
+check assign-visible    'a|b'           0 'printf "a:b\n" | { IFS=: read x y; echo "$x|$y"; }'
+check assign-seen-func  'in=x
+after=[U]'                              0 'f() { echo "in=$V"; }; V=x f; echo "after=[${V-U}]"'
+check assign-left-right '1'             0 'a=1 b=$a /bin/sh -c "echo \$b"'
+check assign-in-env     'V=x'           0 'V=x env | grep "^V=" | head -1'
+
 # --- stdin / REPL mode ----------------------------------------------------
 got=$(printf 'echo from-stdin\nexit 0\n' | "$SXSH" 2>/dev/null)
 if printf '%s' "$got" | grep -q 'from-stdin'; then

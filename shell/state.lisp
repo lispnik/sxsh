@@ -49,6 +49,12 @@
   ;; signals received since the last trap check (list of signal-name strings),
   ;; to be handled between commands
   (pending-signals '())
+  ;; One frame per active function call, innermost first. A frame is a list of
+  ;; (NAME . SAVED) recording what `local NAME' shadowed, where SAVED is the
+  ;; previous (value . exported-p) cell or :UNSET. Scoping is dynamic, as in
+  ;; every shell that has `local': a function called from here still sees this
+  ;; function's locals, so this is a save/restore stack, not a lexical chain.
+  (local-frames '())
   ;; control-flow signals for break/continue/return handled via catch tags
   )
 
@@ -221,6 +227,41 @@ ignored rather than believed."
                           (opt sh :allexport)
                           (and cell (cdr cell))))))
   value)
+
+(defun push-local-frame (sh)
+  (push '() (shell-local-frames sh)))
+
+(defun pop-local-frame (sh)
+  "Restore everything the innermost frame shadowed, then discard it."
+  (let ((frame (pop (shell-local-frames sh))))
+    ;; Restore in reverse order of declaration: a name declared `local' twice
+    ;; in one function saved the outer binding first, and that is the one that
+    ;; has to end up in the table.
+    (dolist (entry frame)
+      (destructuring-bind (name . saved) entry
+        (if (eq saved :unset)
+            (remhash name (shell-vars sh))
+            (setf (gethash name (shell-vars sh)) saved))))))
+
+(defun declare-local (sh name)
+  "Record NAME as local to the current function and remove its current value.
+
+`local x' with no assignment leaves x unset rather than inheriting the outer
+value: that is what bash and zsh do, and it is the reading that makes `local'
+useful as a declaration. dash inherits instead, but a script that relies on
+that is relying on the least portable of the three behaviours."
+  (let ((frame (first (shell-local-frames sh))))
+    ;; Only the first `local x' in a frame saves; a second one would otherwise
+    ;; save the local binding and restore that on return instead of the
+    ;; caller's value.
+    (unless (assoc name frame :test #'string=)
+      (multiple-value-bind (cell found) (gethash name (shell-vars sh))
+        (push (cons name (if found cell :unset))
+              (first (shell-local-frames sh))))))
+  (remhash name (shell-vars sh))
+  name)
+
+(defun in-function-p (sh) (not (null (shell-local-frames sh))))
 
 (defun mark-readonly (sh name)
   (setf (gethash name (shell-readonly sh)) t))

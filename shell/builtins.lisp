@@ -845,6 +845,35 @@ be re-read to restore the current settings."
                 (mark-readonly sh a))))
         0)))
 
+(define-builtin "local" (sh args out)
+  ;; `local' is not in POSIX, but bash, dash, ksh and zsh all have it and real
+  ;; scripts assume it -- git's t/test-lib.sh alone uses it 41 times, and 155
+  ;; of its test scripts do. Without it those scripts do not merely misbehave,
+  ;; they abort on `local: command not found'.
+  ;;
+  ;; Semantics follow bash and dash, which agree wherever it matters: outside
+  ;; a function it is an error; `local x=v' shadows for the duration of the
+  ;; call; a callee still sees the local (dynamic scoping); and the previous
+  ;; value comes back however the function ends.
+  (cond
+    ((not (in-function-p sh))
+     (format *error-output* "local: can only be used in a function~%")
+     1)
+    (t
+     (let ((status 0))
+       (dolist (a args status)
+         (let ((eq (position #\= a)))
+           (let ((name (if eq (subseq a 0 eq) a)))
+             ;; A readonly name cannot be shadowed: bash and dash both refuse.
+             ;; Report and keep going, so `local a b c' still binds the rest.
+             (cond
+               ((readonly-p sh name)
+                (format *error-output* "local: ~A: is read only~%" name)
+                (setf status 1))
+               (t
+                (declare-local sh name)
+                (when eq (set-var sh name (subseq a (1+ eq)))))))))))))
+
 ;;; command -- run a command bypassing functions; -v/-V to describe ---------
 ;;; The actual "run external/builtin bypassing function lookup" behavior is
 ;;; handled in the executor; here we implement -v and -V, and for the plain

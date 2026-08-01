@@ -1,3 +1,8 @@
 [submodule "third_party/oils"]
 	path = third_party/oils
 	url = https://github.com/oils-for-unix/oils.git
+[submodule "third_party/git"]
+	path = third_party/git
+	url = https://github.com/git/git.git
+	shallow = true
+	ignore = dirty
