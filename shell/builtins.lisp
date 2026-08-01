@@ -432,8 +432,12 @@ arguments. Returns (values text status)."
         1)))
 
 (define-builtin "exit" (sh args out)
-  (signal 'shell-exit :code (if args (parse-integer (first args) :junk-allowed t)
-                                (shell-last-status sh)))
+  (signal 'shell-exit
+          :code (cond (args (parse-integer (first args) :junk-allowed t))
+                      ;; inside a trap, a bare `exit' reports the status that
+                      ;; was current when the trap action began
+                      (*trap-entry-status*)
+                      (t (shell-last-status sh))))
   0)
 
 (define-builtin "return" (sh args out)

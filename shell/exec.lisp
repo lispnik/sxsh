@@ -99,8 +99,9 @@ the trap overrides it. Without this, `trap \"echo done\" EXIT; exit 3' exited 0,
 because the trap's own `echo' overwrote the 3."
   (multiple-value-bind (action found) (gethash "EXIT" (shell-traps sh))
     (when (and found (plusp (length action)))
-      (let ((saved (shell-last-status sh))
-            (overridden nil))
+      (let* ((saved (shell-last-status sh))
+             (*trap-entry-status* saved)
+             (overridden nil))
         ;; Dispatch the nodes directly rather than through RUN: RUN catches
         ;; SHELL-EXIT itself and turns it into a status, which would hide an
         ;; explicit `exit N' in the trap from the handler below.
@@ -218,12 +219,13 @@ safe points between commands. Signals are handled in the order received."
             ;; SHELL-EXIT and turns it into a status, so an `exit' inside a
             ;; trap action never reached the handler below and the shell
             ;; carried on -- `trap "exit 9" TERM' did nothing on TERM.
-            (handler-case
+            (let ((*trap-entry-status* (shell-last-status sh)))
+             (handler-case
                 (dolist (node (parse-string action)) (exec-node sh node))
               (shell-exit (e)
                 (setf (shell-last-status sh) (or (shell-exit-code e) 0))
                 (signal 'shell-exit :code (shell-last-status sh)))
-              (error () nil))))))))
+              (error () nil)))))))))
 
 (defun exec-list (sh node)
   (let ((status 0))

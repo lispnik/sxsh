@@ -417,6 +417,27 @@ probe type-t-builtin   'type -t echo'
 probe type-t-file      'type -t cc'
 probe type-p-guard     'if type -p cc >/dev/null; then echo have; fi'
 
+# --- saved fds must be out of the script's reach --------------------------
+# A redirection's backup used to land in fd 3, where the script's own
+# `exec 3>&1' overwrote it; restoring then put stdout into fd 2. autoconf
+# probes fd liveness with exactly this idiom.
+probe fd-backup-collision 'if (exec 3>&1) 2>/dev/null; then :; else exec 1>/dev/null; fi
+printf M\\n >&2
+printf S\\n'
+probe fd-probe-trio 'if (exec 3>&0) 2>/dev/null; then :; else exec 0</dev/null; fi
+if (exec 3>&1) 2>/dev/null; then :; else exec 1>/dev/null; fi
+if (exec 3>&2)            ; then :; else exec 2>/dev/null; fi
+printf M\\n >&2
+printf S\\n'
+probe fd-backup-many 'exec 3>&1; { echo a; } 2>/dev/null; echo b >&2; exec 3>&-'
+
+# --- bare `exit' in a trap uses the pre-trap status (POSIX exit) ----------
+probe trap-bare-exit      'trap "true; exit" EXIT; false; echo unreachable'
+probe trap-bare-exit-echo 'trap "echo x; exit" EXIT; false'
+probe trap-bare-exit-imm  'trap "exit" EXIT; false'
+probe trap-explicit-exit  'trap "exit 7" EXIT; false'
+probe trap-exit-after-ok  'trap "exit" EXIT; true'
+
 printf '\nposix-diff: %d passed, %d failed, %d known divergences (ref: %s)\n' \
   "$pass" "$fail" "$skipped" "$("$REF" --version 2>/dev/null | head -1 || echo "$REF")"
 [ "$fail" -eq 0 ]

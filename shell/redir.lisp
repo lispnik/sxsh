@@ -68,6 +68,20 @@ Lisp condition."
                          "cannot overwrite existing file"
                          (errno-message e))))))
 
+(defconstant +fd-backup-base+ 10
+  "Saved fds live at or above this number.
+
+A redirection's backup must not sit where the script can reach it. Duplicating
+with plain dup() hands out the lowest free descriptor -- often fd 3 -- and a
+script that then does `exec 3>&1' silently overwrites the shell's saved copy.
+`(exec 3>&1) 2>/dev/null' did exactly that: restoring afterwards put stdout
+into fd 2, so every later `>&2' went to stdout. Real shells reserve the range
+above 10 for this.")
+
+(defun dup-to-high (fd)
+  "Duplicate FD to the lowest free descriptor >= +FD-BACKUP-BASE+."
+  (sb-posix:fcntl fd sb-posix:f-dupfd +fd-backup-base+))
+
 (defun default-fd (op)
   "The fd a redirection applies to when no explicit IO_NUMBER is given."
   (case op
@@ -168,7 +182,7 @@ RESTORE-REDIRECTS. Also returns temp paths to delete."
           (let* ((op (redirect-op r))
                  (fd (or (redirect-fd r) (default-fd op))))
             ;; back up the target fd
-            (let ((backup (ignore-errors (sb-posix:dup fd))))
+            (let ((backup (ignore-errors (dup-to-high fd))))
               (push (make-saved-fd :orig-fd fd :backup-fd backup) saved))
             (ecase op
               ((:< :> :>\| :>> :<>)

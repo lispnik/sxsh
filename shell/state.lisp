@@ -52,6 +52,16 @@
   ;; control-flow signals for break/continue/return handled via catch tags
   )
 
+(defvar *trap-entry-status* nil
+  "The exit status in effect when the current trap action began, or NIL.
+
+POSIX `exit': \"When exit is executed in a trap action, the last command is
+considered to be the command that executed immediately preceding the trap
+action.\" So a bare `exit' inside a trap reports the status the shell was
+terminating with, not that of the trap's own last command. autoconf relies on
+this -- its EXIT trap ends in a bare `exit', and without it every failing
+configure run reported success.")
+
 (define-condition shell-exit (condition)
   ((code :initarg :code :reader shell-exit-code :initform 0)))
 
