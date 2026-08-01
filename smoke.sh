@@ -15,6 +15,9 @@ pass=0
 fail=0
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/sxsh-smoke.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
+# Exported so a test's shell source can write scratch files of its own; the
+# unexported `tmp' is not visible to the shell under test.
+export SMOKE_TMP="$tmp"
 
 # check <name> <expected-stdout> <expected-status> <shell-source>
 check() {
@@ -519,6 +522,32 @@ check cf-exit-in-func     ''                3 'f() { exit 3; echo NO; }; f; echo
 check cf-exit-in-loop     ''                3 'for i in 1 2; do exit 3; echo NO; done; echo NO2'
 check cf-exit-in-brace    ''                3 '{ exit 3; echo NO; }; echo NO2'
 check cf-exit-in-case     ''                3 'case x in x) exit 3; echo NO;; esac; echo NO2'
+
+# `eval' and `.' run inline in the current environment, so control flow must
+# pass straight through them. Routing both through RUN -- which backstops
+# SHELL-EXIT and FUNC-RETURN -- made `eval "exit 0"' a silent no-op, which is
+# how libtool's --config ran past its own `exit' into a usage error.
+check cf-eval-exit        ''                6 'eval "exit 6"; echo NO'
+check cf-eval-return      'st=5'            0 'f() { eval "return 5"; echo NO; }; f; echo st=$?'
+check cf-eval-break       'done'            0 'for i in 1 2; do eval break; echo NO; done; echo done'
+check cf-eval-continue    'done'            0 'for i in 1 2 3; do eval continue; echo NO; done; echo done'
+check cf-eval-exit-nested ''                0 'f() { exit 0; }; g() { eval f; echo NO; }; g; echo NO2'
+check cf-eval-exit-arg    ''                0 'h() { eval "$1"; }; f() { exit 0; }; h f; echo NO'
+check cf-eval-status      'a
+b
+st=0'                                       0 'eval "echo a; echo b"; echo st=$?'
+check cf-eval-false       'st=1'            0 'eval "false"; echo st=$?'
+check cf-eval-empty       'st=0'            0 'eval ""; echo st=$?'
+
+# `return' in a sourced script ends the script and becomes its status; the
+# caller resumes. `exit' and `break' keep going (bash and dash agree).
+check cf-dot-return       'in-dot
+st=5'                                       0 'printf "echo in-dot\nreturn 5\necho NO\n" >"$SMOKE_TMP/d.sh"; . "$SMOKE_TMP/d.sh"; echo st=$?'
+check cf-dot-return-func  'in-dot
+AFTER st=5'                                 0 'printf "echo in-dot\nreturn 5\necho NO\n" >"$SMOKE_TMP/d.sh"; f() { . "$SMOKE_TMP/d.sh"; echo "AFTER st=$?"; }; f'
+check cf-dot-exit         'in-dot'          6 'printf "echo in-dot\nexit 6\necho NO\n" >"$SMOKE_TMP/d.sh"; . "$SMOKE_TMP/d.sh"; echo NO2'
+check cf-dot-break        'in-dot
+done'                                       0 'printf "echo in-dot\nbreak\necho NO\n" >"$SMOKE_TMP/d.sh"; for i in 1 2; do . "$SMOKE_TMP/d.sh"; echo NO2; done; echo done'
 
 # --- stdin / REPL mode ----------------------------------------------------
 got=$(printf 'echo from-stdin\nexit 0\n' | "$SXSH" 2>/dev/null)

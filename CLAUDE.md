@@ -257,6 +257,14 @@ construct and becomes its status rather than reaching the enclosing loop, functi
 multi-stage pipelines reach `spawn-stage` — `exec-pipeline-raw` runs a lone command directly —
 so a bare `return` is unaffected by the catcher there.
 
+**`eval` and `.` are not boundaries.** They run their input inline in the current environment,
+so control flow passes straight through. `run-string-capturing` therefore dispatches nodes
+itself rather than calling `run` — `run` backstops `shell-exit` and `func-return`, and routing
+`eval` through it made `eval "exit 0"` a silent no-op. The one exception is `return` in a dot
+script, which ends the script and becomes its status: the `.` builtin adds that handler back.
+bash, zsh and dash agree on every case here except a sourced `break`, where zsh is the outlier
+and sxsh follows bash and dash.
+
 Two related divergences are **unspecified**, and sxsh follows zsh on both. Do not "fix" them
 toward bash without checking the other shells first:
 
@@ -301,6 +309,27 @@ prints the escape literally there and `A` in any bash from 4.2 on.
 /usr/local/bin/bash, then /bin/bash, and prints the reference's version in its
 summary so a result is always interpretable. Pass a shell explicitly to
 override, e.g. `make posix REF_SHELL=/bin/dash`.
+
+### Real scripts find more bugs than hand-written probes
+
+This has been the most productive technique by a wide margin, and it is worth reaching for
+before writing another sweep of small cases. Running one autoconf `configure` found eight bugs
+— more than the three preceding hand-written differential sweeps combined. Running
+`/opt/homebrew/bin/glibtool` (13.5k lines of deliberately primitive portable sh) found the
+`eval` control-flow bug immediately, because libtool's `--config` and `--version` end in a
+function reached through `eval` that exits.
+
+The method: run the script under sxsh and under a modern bash in **separate scratch
+directories**, then compare stdout, stderr and exit status byte for byte. Anything that
+differs is a lead. Both must be given identical inputs and a clean directory, or the diff is
+noise. Useful invocations are the ones that exercise a lot of the script without needing a
+network or a full build — `--help`, `--version`, `--config`, `--dry-run`, and for libtool a
+complete `--mode=compile` → `link` → `install` → `finish` → `clean` cycle over a two-file C
+project (that whole sequence is byte-identical today).
+
+Where these bugs hide is the giveaway: a construct in a **non-final position**. `return` was
+broken for months because every test used it as the function's last command, where a swallowed
+condition and a working one look the same. Real scripts are full of non-final positions.
 
 ### The Oils spec "hang" is environmental, not a shell bug
 

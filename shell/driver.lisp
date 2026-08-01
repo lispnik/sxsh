@@ -3,15 +3,27 @@
 (in-package #:sxsh-shell)
 
 (defun run-string-capturing (sh src out)
-  "Parse and run SRC, sending command output to the current fd 1 (already set
-up by the caller). OUT is the builtin's stream; we finish it first so ordering
-with child output is sane. Returns the last status."
+  "Parse and run SRC in the CURRENT execution environment, sending command
+output to the current fd 1 (already set up by the caller). OUT is the builtin's
+stream; we finish it first so ordering with child output is sane. Returns the
+last status.
+
+Control flow is deliberately not caught here. `eval' and `.' run their input
+inline, not in a subshell, so `exit', `return', `break' and `continue' have to
+reach the enclosing shell, function or loop -- bash, zsh and dash agree on all
+four. That rules out RUN, which catches SHELL-EXIT and FUNC-RETURN as a
+top-level backstop: routing through it made `eval \"exit 0\"' a no-op, and
+libtool's --config and --version, which end in a function reached via `eval',
+ran on past their `exit' into a usage error. The `.' builtin adds back a
+FUNC-RETURN handler of its own, since `return' ends the sourced script rather
+than the caller."
   (declare (ignore out))
-  (handler-case
-      (run sh (parse-string src))
-    (sxsh:shell-parse-error (e)
-      (format *error-output* "sxsh: ~A~%" e)
-      2)))
+  (let ((nodes (handler-case (parse-string src)
+                 (sxsh:shell-parse-error (e)
+                   (format *error-output* "sxsh: ~A~%" e)
+                   (return-from run-string-capturing 2)))))
+    (dolist (node nodes (shell-last-status sh))
+      (exec-node sh node))))
 
 (defun slurp-file (path)
   "Read an entire file into a string. Works for non-seekable files such as

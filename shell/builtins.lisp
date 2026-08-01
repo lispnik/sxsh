@@ -682,7 +682,13 @@ be re-read to restore the current settings."
   (if (null args) (progn (format *error-output* ".: filename argument required~%") 2)
       (let ((path (find-source-file sh (first args))))
         (if (and path (probe-file path))
-            (run-string-capturing sh (slurp-file path) out)
+            ;; `return' ends the sourced script and becomes its status; the
+            ;; caller carries on afterwards. Everything else -- exit, break,
+            ;; continue -- propagates, because a dot script runs inline in the
+            ;; current environment (bash and dash both let a sourced `break'
+            ;; break the caller's loop; zsh is the outlier here).
+            (handler-case (run-string-capturing sh (slurp-file path) out)
+              (func-return (e) (cf-code e)))
             (progn (format *error-output* ".: ~A: not found~%" (first args)) 1)))))
 
 (setf (gethash "source" *builtins*) (gethash "." *builtins*))
