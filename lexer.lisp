@@ -30,7 +30,11 @@
   (line 1 :type fixnum)
   (column 1 :type fixnum)
   ;; queue of here-doc redirect nodes awaiting body collection at next newline
-  (pending-heredocs '()))
+  (pending-heredocs '())
+  ;; set when a here-doc body ran out of input before its delimiter. POSIX
+  ;; makes that a warning, so we still accept what we have -- but an
+  ;; incremental reader needs to know the text is not yet a complete command.
+  (heredoc-eof nil))
 
 (defun make-lexer (string)
   (%make-lexer :string string :len (length string)))
@@ -370,7 +374,9 @@ pending here-docs, in order, and attaches them to their redirect nodes."
                                    :adjustable t :fill-pointer 0)))
           (loop
             (when (lx-eof-p lx)
-              ;; POSIX: EOF before delimiter is a warning; accept what we have
+              ;; POSIX: EOF before delimiter is a warning; accept what we have,
+              ;; but flag it so callers reading incrementally keep going.
+              (setf (lexer-heredoc-eof lx) t)
               (return))
             ;; read one physical line
             (let ((line-start (lexer-pos lx))

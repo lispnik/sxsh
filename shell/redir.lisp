@@ -29,7 +29,7 @@ parameter/command/arith expansion unless the delimiter was quoted."
   (destructuring-bind (delim body quoted strip) (redirect-heredoc redirect)
     (declare (ignore delim strip))
     (let ((text (if quoted body
-                    (xchars->string (expand-pass sh body :tilde nil))))
+                    (xchars->string (expand-heredoc-body sh body))))
           (path (format nil "/tmp/posh-heredoc-~A-~A"
                         (sb-posix:getpid) (random 1000000))))
       (with-open-file (s path :direction :output :if-exists :supersede

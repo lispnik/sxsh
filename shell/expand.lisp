@@ -164,6 +164,50 @@ EMIT-FIELD-SEP, when provided, emits an explicit field boundary (used for
            (setf i next)))
         (t (funcall emit c :quoted) (incf i))))))
 
+(defun expand-heredoc-body (sh raw)
+  "Expand a here-document body whose delimiter was NOT quoted.
+
+POSIX 2.7.4: the body is treated as if inside double quotes -- parameter,
+command and arithmetic expansion apply -- except that the quote characters
+themselves are ordinary text, and backslash is special only before $, `, \\
+and newline.
+
+Running the body through the general word expansion instead (which is what
+this used to do) applied quote removal to it: a body containing a lone \"
+silently lost it, and an unbalanced quote could derail the scan entirely.
+There is no field splitting or pathname expansion here either."
+  (let ((out '()) (i 0) (n (length raw)))
+    (flet ((emit (ch) (push (make-xchar ch :quoted) out))
+           (emit-string (s) (dolist (ch (coerce s 'list))
+                              (push (make-xchar ch :quoted) out))))
+      (loop while (< i n) do
+        (let ((c (char raw i)))
+          (cond
+            ((char= c #\\)
+             (if (and (< (1+ i) n)
+                      (member (char raw (1+ i)) '(#\$ #\` #\\ #\Newline)))
+                 (progn
+                   ;; backslash-newline is a line continuation: both vanish
+                   (when (char/= (char raw (1+ i)) #\Newline)
+                     (emit (char raw (1+ i))))
+                   (incf i 2))
+                 (progn (emit #\\) (incf i))))
+            ;; No field splitting happens here, so $@ and $* both join.
+            ((and (char= c #\$) (< (1+ i) n)
+                  (member (char raw (1+ i)) '(#\@ #\*)))
+             (emit-string (join-positional sh (ifs-first sh)))
+             (incf i 2))
+            ((char= c #\$)
+             (multiple-value-bind (str next) (expand-dollar sh raw i n)
+               (emit-string str)
+               (setf i next)))
+            ((char= c #\`)
+             (multiple-value-bind (str next) (expand-backquote sh raw i n)
+               (emit-string str)
+               (setf i next)))
+            (t (emit c) (incf i))))))
+    (nreverse out)))
+
 (defun emit-at-params (sh emit emit-field-sep quoted-p class)
   "Emit the positional parameters as separate fields, inserting a field
 separator between each. CLASS is the xchar class for the characters. When

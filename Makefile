@@ -7,8 +7,12 @@ CACHE   := $(HOME)/.cache/common-lisp
 
 PYTHON  ?= python3
 REF_SHELL ?= /bin/bash
+# Spec files from third_party/oils that are in scope for a POSIX shell.
+OILS_SPECS ?= smoke posix quote word-split var-sub exit-status pipeline \
+              command-sub arith assign redirect loop case_ if_ subshell \
+              builtin-echo builtin-read builtin-trap builtin-cd glob tilde
 
-.PHONY: all build test test-parser test-shell smoke jobs posix check clean help
+.PHONY: all build test test-parser test-shell smoke jobs posix oils check clean help
 
 all: build
 
@@ -41,6 +45,12 @@ jobs: $(BIN)
 posix: $(BIN)
 	./test/posix-diff.sh ./$(BIN) $(REF_SHELL)
 
+## oils: Oils cross-shell spec tests (needs the submodule + a python2)
+oils: $(BIN)
+	$(PYTHON) test/oils-spec.py --summary $(OILS_SPECS)
+
+# `oils` is deliberately not part of `check`: it is a scoreboard to drive down,
+# not a pass/fail gate.
 ## check: everything -- both suites, smoke, job control, POSIX conformance
 check: test smoke jobs posix
 

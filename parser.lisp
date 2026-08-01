@@ -515,11 +515,19 @@ Returns a COMPLETE-COMMAND node (reusing the same structure)."
 ;;; ---------------------------------------------------------------------------
 
 (defun parse-string (string)
-  "Parse STRING as a shell program. Returns a list of COMPLETE-COMMAND nodes."
+  "Parse STRING as a shell program.
+
+Returns (values complete-commands incomplete-p). INCOMPLETE-P is true when a
+here-document body ran out of input before its delimiter: the AST is still
+usable (POSIX makes that a warning, not an error), but a reader feeding the
+parser line by line must keep reading rather than treat this as a command.
+Without it, `cat <<EOF\' on its own parses as a complete command and the
+here-doc body is then executed as shell source."
   (let ((p (make-parser string)))
-    (prog1 (parse-program p)
+    (let ((program (parse-program p)))
       (unless (eq (cur-type p) :eof)
-        (perr p "unexpected trailing token ~A ~S" (cur-type p) (cur-text p))))))
+        (perr p "unexpected trailing token ~A ~S" (cur-type p) (cur-text p)))
+      (values program (lexer-heredoc-eof (parser-lexer p))))))
 
 (defun parse-stream (stream)
   "Parse all text from STREAM."

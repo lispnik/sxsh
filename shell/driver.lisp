@@ -27,18 +27,34 @@ with child output is sane. Returns the last status."
 (defun run-file (sh path)
   (run-string sh (slurp-file path)))
 
+(defun stdin-is-interactive-p ()
+  "POSIX 2.5.3: a shell invoked with no operands is interactive only when both
+standard input and standard error are attached to a terminal.
+
+Deciding this from `no arguments' alone -- as this used to -- makes
+`posh < script' and `cmd | posh' print PS1 prompts into their own output and
+switch on job control. Every such invocation produced `$ ' noise interleaved
+with the script's real output."
+  (and (plusp (sb-unix:unix-isatty 0))
+       (plusp (sb-unix:unix-isatty 2))))
+
 (defun repl (sh)
-  "Simple interactive read-eval-print loop with job-control awareness."
-  (setf (shell-interactive sh) t)
+  "Read-eval-print loop. Prompts only when the shell is interactive; otherwise
+this is simply the reader for a script arriving on standard input."
   (init-job-control sh)
   (loop
-    ;; report any background jobs that finished since the last prompt
-    (poll-jobs sh)
-    (notify-finished-jobs sh *error-output*)
-    (let ((ps1 (or (nth-value 0 (get-var sh "PS1")) "$ ")))
-      (write-string ps1) (finish-output))
+    (when (shell-interactive sh)
+      ;; report any background jobs that finished since the last prompt
+      (poll-jobs sh)
+      (notify-finished-jobs sh *error-output*)
+      (let ((ps1 (or (nth-value 0 (get-var sh "PS1")) "$ ")))
+        (write-string ps1) (finish-output)))
     (let ((line (read-complete-command *standard-input*)))
-      (when (null line) (terpri) (return))
+      (when (null line)
+        ;; the newline moves the terminal past a Ctrl-D; on a piped script it
+        ;; would be a spurious blank line appended to the program's output
+        (when (shell-interactive sh) (terpri))
+        (return))
       (unless (string= (string-trim '(#\Space #\Tab #\Newline) line) "")
         (handler-case
             (run-string sh line)
@@ -68,7 +84,14 @@ when a parse error is 'unexpected EOF'-like). Returns NIL on EOF."
         (let ((src (get-output-stream-string buffer)))
           ;; try to parse; if it parses, return it; else keep reading
           (handler-case
-              (progn (parse-string src) (return src))
+              (multiple-value-bind (program incomplete) (parse-string src)
+                (declare (ignore program))
+                ;; A here-doc whose delimiter has not arrived yet parses fine
+                ;; but is not a complete command; keep reading or the body
+                ;; would be executed as shell source.
+                (if incomplete
+                    (write-string src buffer)
+                    (return src)))
             (posh:shell-parse-error ()
               ;; incomplete -> keep buffering
               (write-string src buffer))
@@ -85,11 +108,20 @@ Linux and macOS; anything else (notably Windows) is unsupported."
     (format *error-output*
             "posh: unsupported platform; requires a POSIX system (Linux or macOS)~%")
     (return-from main 1))
-  (let ((sh (make-shell :interactive (null argv))))
+  (let ((sh (make-shell :interactive (and (null argv)
+                                          (stdin-is-interactive-p)))))
     (unwind-protect
          (handler-case
              (cond
-               ((null argv) (repl sh))
+               ((null argv)
+                (if (shell-interactive sh)
+                    (repl sh)
+                    ;; A non-interactive shell reading a script from standard
+                    ;; input parses the whole text at once, exactly as it would
+                    ;; a file. Feeding it to the line-at-a-time reader instead
+                    ;; makes constructs that span lines depend on the reader
+                    ;; guessing where a command ends.
+                    (run-string sh (slurp-file "/dev/stdin"))))
                ((string= (first argv) "-c")
                 (set-positional sh (cddr argv))
                 (run-string sh (second argv)))
