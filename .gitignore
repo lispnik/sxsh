@@ -1,8 +1,7 @@
-# saved executables (~40MB SBCL images). The glob matters: a stray `sxsh2'
-# from a side-by-side build was committed once because only /sxsh was listed.
-/sxsh
-/sxsh[0-9]*
-/*.image
+# Built executables (~40MB SBCL images) all land in bin/, so one directory
+# covers them. An earlier layout put the binary at the repo root and listed it
+# by name, which let a stray side-by-side build get committed.
+/bin/
 
 # ASDF/SBCL build output
 *.fasl

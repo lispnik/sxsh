@@ -14,7 +14,7 @@
 
 set -u
 
-SXSH=${1:-./sxsh}
+SXSH=${1:-./bin/sxsh}
 
 # Pick a modern bash by preference. macOS still ships 3.2.57 (2007) as
 # /bin/bash, which predates features the standard has since adopted -- $'\u'

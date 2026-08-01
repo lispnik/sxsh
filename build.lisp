@@ -1,4 +1,4 @@
-;;;; build.lisp --- produce a standalone `sxsh` executable.
+;;;; build.lisp --- produce a standalone `bin/sxsh` executable.
 ;;;;
 ;;;;   sbcl --non-interactive --load build.lisp
 ;;;;
@@ -14,8 +14,10 @@
                        (sb-sys:interactive-interrupt () 130))
                :abort t))
 
+(ensure-directories-exist "bin/")
+
 (sb-ext:save-lisp-and-die
- "sxsh"
+ "bin/sxsh"
  :executable t
  :save-runtime-options t
  :toplevel #'sxsh-toplevel)

@@ -38,7 +38,7 @@ OILS = os.path.join(ROOT, 'third_party', 'oils')
 SPEC_DIR = os.path.join(OILS, 'spec')
 SPEC_BIN = os.path.join(OILS, 'spec', 'bin')
 SH_SPEC = os.path.join(OILS, 'test', 'sh_spec.py')
-SXSH = os.path.join(ROOT, 'sxsh')
+SXSH = os.path.join(ROOT, 'bin', 'sxsh')
 TMP = os.path.join(os.environ.get('TMPDIR', '/tmp'), 'sxsh-oils-spec')
 
 

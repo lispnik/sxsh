@@ -22,7 +22,7 @@ shell/       package state spawn arith expand redir deparse
              jobs builtins exec driver                          -> system "sxsh/shell"
 test/tests.lisp            -> "sxsh/test"        (48 cases)
 shell/test-shell.lisp      -> "sxsh/shell/test"  (84 cases)
-build.lisp        -> saves the ./sxsh executable
+build.lisp        -> saves the bin/sxsh executable
 smoke.sh           -> end-to-end checks against that executable (98 cases)
 test/jobs-pty.py   -> job control, driven through a real pty (14 cases)
 test/posix-diff.sh -> differential conformance vs a reference shell (76 cases)
@@ -41,12 +41,12 @@ make check          # everything (the one to run before calling it done)
 make test           # in-image ASDF suites only
 make test-parser    # 48 parser cases
 make test-shell     # 84 executor cases
-make build          # save ./sxsh (~40MB SBCL image)
-make smoke          # build, then drive ./sxsh end-to-end (98 cases)
+make build          # save bin/sxsh (~40MB SBCL image)
+make smoke          # build, then drive bin/sxsh end-to-end (98 cases)
 make jobs           # job control through a real pty (14 cases)
 make posix          # differential conformance vs bash (76 cases)
 make posix REF_SHELL=/bin/dash    # stricter reference
-make clean          # remove ./sxsh and this project's fasls
+make clean          # remove bin/ and this project's fasls
 ```
 
 The equivalent raw invocations, if you need them:

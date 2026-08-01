@@ -10,7 +10,7 @@
 
 set -u
 
-SXSH=${1:-./sxsh}
+SXSH=${1:-./bin/sxsh}
 pass=0
 fail=0
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/sxsh-smoke.XXXXXX")

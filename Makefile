@@ -2,7 +2,8 @@
 
 LISP    ?= sbcl
 SBCL    := $(LISP) --non-interactive
-BIN     := sxsh
+BINDIR  := bin
+BIN     := $(BINDIR)/sxsh
 CACHE   := $(HOME)/.cache/common-lisp
 
 PYTHON  ?= python3
@@ -18,7 +19,7 @@ OILS_SPECS ?= smoke posix quote word-split var-sub exit-status pipeline \
 
 all: build
 
-## build: save a standalone ./sxsh executable
+## build: save a standalone bin/sxsh executable
 build: $(BIN)
 
 $(BIN): sxsh.asd build.lisp $(wildcard *.lisp) $(wildcard shell/*.lisp)
@@ -56,9 +57,9 @@ oils: $(BIN)
 ## check: everything -- both suites, smoke, job control, POSIX conformance
 check: test smoke jobs posix
 
-## clean: remove the executable and this project's compiled fasls
+## clean: remove built executables and this project's compiled fasls
 clean:
-	rm -f $(BIN)
+	rm -rf $(BINDIR)
 	rm -rf $(CACHE)/*/$(CURDIR)
 
 help:

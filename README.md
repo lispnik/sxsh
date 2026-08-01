@@ -5,10 +5,10 @@ executor built on it that runs as a working shell. SBCL only; Linux and macOS.
 
 ```
 make check     # build and run every suite (540 checks)
-make build     # save a standalone ./sxsh
-./sxsh -c 'for i in 1 2 3; do echo $i; done'
-./sxsh script.sh args...
-./sxsh                     # interactive, with job control
+make build     # save a standalone bin/sxsh
+bin/sxsh -c 'for i in 1 2 3; do echo $i; done'
+bin/sxsh script.sh args...
+bin/sxsh                   # interactive, with job control
 ```
 
 ---

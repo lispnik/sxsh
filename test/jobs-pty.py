@@ -7,7 +7,7 @@ shell takes the job-control path, and Ctrl-Z reaches the foreground process
 group. This harness allocates a pty, puts sxsh in its own session with that
 pty as the controlling terminal, and drives it like a user would.
 
-    ./test/jobs-pty.py [path-to-sxsh]        (default: ./sxsh)
+    ./test/jobs-pty.py [path-to-sxsh]        (default: ./bin/sxsh)
 """
 
 import os
@@ -19,7 +19,7 @@ import sys
 import termios
 import time
 
-SXSH = sys.argv[1] if len(sys.argv) > 1 else "./sxsh"
+SXSH = sys.argv[1] if len(sys.argv) > 1 else "./bin/sxsh"
 PROMPT = "$ "
 
 passed = 0
