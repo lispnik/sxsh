@@ -1,0 +1,272 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## What this is
+
+Two ASDF systems in one tree, both SBCL-only:
+
+- **`posh`** — a parser for the POSIX shell command language (IEEE Std 1003.1 §2.3 token
+  recognition + §2.10 grammar). Produces an AST. Package `#:posh`. Deliberately performs
+  **no expansion** — words retain raw source text.
+- **`posh/shell`** — a tree-walking executor over that AST, implementing expansion, builtins,
+  redirection, pipelines, and job control. Package `#:posh-shell` (nickname `#:psh`).
+  Every external command is launched with **`posix_spawnp(3)`** via `sb-alien` — there is no
+  `fork`/`exec` and no `sb-ext:run-program`.
+
+## Layout
+
+```
+package.lisp ast.lisp conditions.lisp lexer.lisp parser.lisp   -> system "posh"
+shell/       package state spawn arith expand redir deparse
+             jobs builtins exec driver                          -> system "posh/shell"
+test/tests.lisp            -> "posh/test"        (48 cases)
+shell/test-shell.lisp      -> "posh/shell/test"  (84 cases)
+build.lisp        -> saves the ./posh executable
+smoke.sh           -> end-to-end checks against that executable (98 cases)
+test/jobs-pty.py   -> job control, driven through a real pty (14 cases)
+test/posix-diff.sh -> differential conformance vs a reference shell (76 cases)
+```
+
+`shell/package.lisp` also defines `ast-type`, the `typecase` mapping parser structs to the
+executor's dispatch keywords — it is not just a `defpackage`.
+
+## Building and testing
+
+`~/.config/common-lisp/source-registry.conf.d/50-local-projects.conf` registers
+`(:tree #p"/Users/mkennedy/Projects/common-lisp/")`, so ASDF finds `posh` from any directory.
+
+```bash
+make check          # everything (the one to run before calling it done)
+make test           # in-image ASDF suites only
+make test-parser    # 48 parser cases
+make test-shell     # 84 executor cases
+make build          # save ./posh (~40MB SBCL image)
+make smoke          # build, then drive ./posh end-to-end (98 cases)
+make jobs           # job control through a real pty (14 cases)
+make posix          # differential conformance vs bash (76 cases)
+make posix REF_SHELL=/bin/dash    # stricter reference
+make clean          # remove ./posh and this project's fasls
+```
+
+The equivalent raw invocations, if you need them:
+
+```bash
+sbcl --non-interactive --eval '(asdf:test-system "posh")'
+sbcl --non-interactive --eval '(asdf:test-system "posh/shell")'
+```
+
+Both `test-op`s **error on any failure**, so a non-zero exit is meaningful — the suites
+themselves only print `N passed, M failed` and would otherwise exit 0 on a red run.
+
+The layers test different things and all of them matter. The ASDF suites run in-image and never
+touch `main`, argv parsing, or process exit status; `smoke.sh` runs the saved executable and
+covers exactly that (plus script mode and stdin mode); `test/jobs-pty.py` allocates a real pty
+and puts posh in its own session, which is the only way to reach the job-control code paths at
+all — without a controlling terminal `have-tty-p` is false, `shell-job-control` stays nil, and
+foreground commands never get their own process group. `test/posix-diff.sh` runs the same
+source through posh and a reference shell and compares output+status, so the expectation comes
+from a conforming implementation instead of our own assumptions — it is the cheapest way to
+find divergence, and found `set -e`, `read`/IFS and the EXIT-trap bugs in a single pass. None
+is hermetic: they spawn real programs (`sort`, `head`, `sleep`, …) and write temp files.
+
+Adding a case to `posix-diff.sh` costs one line. Prefer it over hand-written expectations for
+anything the standard specifies. Its third argument marks a case where only the *wording* may
+differ (POSIX does not specify diagnostic text) — the exit status must still match, so the case
+stays meaningful. If bash itself deviates from POSIX (it disables aliases non-interactively),
+it is not a valid reference: assert posh's behaviour in `smoke.sh` instead.
+
+When adding a job-control test, assert on *observable process behaviour*, not on what `jobs`
+prints. The `bg` builtin sets the job state to `:running` unconditionally, so the table reports
+Running even when SIGCONT never arrived — an assertion on that string passes against a job that
+is still stopped. Give the job a deadline and check that it actually completed instead.
+
+`posh/shell` declares `(:require :sb-posix)`. Without it the first file fails to compile with
+`Package SB-POSIX does not exist`; don't drop it when editing `:depends-on`.
+
+### Running a single test
+
+Neither harness supports selecting a case by name — `run-all` is a flat sequence of `check`
+macro calls. To exercise one input, call the underlying helper in a REPL:
+
+```lisp
+(posh/test::p1 "if a; then b; fi")          ; => the sx s-expression the parser test compares
+(posh-shell/test::capture "echo $((1+1))")  ; => (values stdout-string exit-status)
+```
+
+Add a case by inserting a `(check "name" "shell source" expected)` into the relevant
+`run-all`. Parser expectations are `sx` forms (a compact s-expression rendering of the AST,
+defined at the top of `tests.lisp`); executor expectations are literal stdout strings, usually
+built with `(format nil "...~%")`. `check-error` asserts a parse failure; `check-status`
+asserts an exit code.
+
+In `smoke.sh` the shape is `check <name> <expected-stdout> <expected-status> <shell-source>`,
+where expected stdout has no trailing newline (`$(...)` strips it).
+
+## Architecture
+
+### Parser: the lexer is driven by the parser
+
+The POSIX grammar is not context-free, and this implementation does not pretend otherwise.
+`parser.lisp` calls `next-token` with flags that change classification:
+
+- Reserved words (`if then else elif fi do done case esac while until for { } ! in`) are
+  recognized **only** in command position — the parser passes `:command-position t` exactly
+  where the grammar allows them. `echo if then fi` yields three ordinary words.
+- Here-document **bodies** are collected by the lexer on demand (`collect-heredocs`) after the
+  parser has registered the `<<` / `<<-` operator, at the next newline.
+- `:io-number` and `:assignment-word` are contextual token types, not lexical ones.
+
+Quoting is scanned with balanced/nested awareness (`'...'`, `"..."`, `` `...` ``, `$(...)`,
+`${...}`) but preserved **verbatim** in `word-text`. Everything downstream re-reads that raw
+text. This is why the executor can `deparse` an AST back to source almost losslessly.
+
+`ast.lisp` defines plain `defstruct` nodes; `conditions.lisp` defines `shell-parse-error`.
+
+### Executor: everything hangs off `exec-node`
+
+`exec-node` (exec.lisp) is the single dispatch point — an `ecase` over `(ast-type node)`. It
+sets `shell-last-status` and applies `set -e` (`maybe-errexit`) on every node, so status
+bookkeeping lives in one place. Add a new node type by extending both `ast-type`
+(shell/package.lisp) and this `ecase`.
+
+Non-local control flow is signalled, not returned:
+
+| Mechanism | Raised by | Caught by |
+|---|---|---|
+| `shell-exit` condition | `exit`, `set -e`, fatal `set -u` | `main`, `repl`, `exec-subshell` |
+| `loop-break` / `loop-continue` (with `n`) | `break`, `continue` | `exec-for`, `exec-while` (decrementing `n` and re-signalling for `break 2`) |
+| `func-return` | `return` | function invocation |
+| `throw 'not-found` → 127 | PATH lookup failure | each spawn site |
+| `throw 'exec-builtin` / `'run-command-bypass` | `exec`, `command` builtins | `exec-simple` |
+
+Because these are `signal`-based conditions rather than `error`s, a stray `handler-case` on
+`error` will not swallow them — but `unwind-protect` cleanups still run, which is what
+restores fds and shell state.
+
+Key structural decisions:
+
+- **Subshells do not fork.** `exec-subshell` snapshots vars/functions/positionals/cwd
+  (`snapshot-shell`), runs the body in-process, and restores in an `unwind-protect`. Any new
+  piece of shell state that a subshell must isolate has to be added to *both*
+  `snapshot-shell` and `restore-shell` or it will leak out of `( … )`.
+- **Redirections have two backends** (redir.lisp): external commands compile them into a list
+  of `posix_spawn` file-action recipes; builtins, functions, and compound commands get real
+  `dup2` with saved fds restored afterward. Both paths must stay in sync when adding an
+  operator.
+- **Command substitution captures through a temp file**, not a pipe, so large output cannot
+  deadlock a bounded pipe. Trailing newlines are stripped.
+- **Builtins run in-process by necessity** (they mutate shell state), including inside
+  pipeline stages, where fds are temporarily redirected around the call.
+- **Word expansion tracks per-character provenance** (expand.lisp). Each char becomes an
+  `xchar` classed `:lit` (source, unquoted — globbable and splittable), `:quoted` (never split,
+  never glob), or `:split` (came from an unquoted expansion — IFS-splittable). This mask is
+  what makes `"$@"` produce one field per positional (and zero fields when empty) while `"$*"`
+  produces one, and what keeps glob metacharacters from an expansion inert. Changing expansion
+  almost always means changing how classes are assigned, not just the string building.
+- **Job control is real** (jobs.lisp, absent from the README's architecture table): each async
+  job gets its own process group via `posix_spawn`'s `SETPGROUP` attribute, tracked in a job
+  table with `jobs`/`fg`/`bg`, terminal ownership via `tcsetpgrp` on a private `/dev/tty` fd,
+  and `%n` / bare-number / `%prefix` job specs. `set -m` toggles it (`set-monitor`), defaulting
+  on for interactive shells and off otherwise.
+- **Backgrounding a compound re-execs this binary.** We cannot fork, so `{ ...; } &`, `f &`,
+  and any builtin `&` run as a real second process via `posh -c <source>` (`async-compound`).
+  The source is `async-prelude` + `deparse` of the node: cwd, non-exported variables, function
+  definitions and positional parameters are replayed as shell assignments, while exported
+  variables travel in the environment. `self-exec-path` returns NIL when we are not a saved
+  image (`*runtime-pathname*` ≠ `*core-pathname*`), and then it falls back to running
+  synchronously in-process — so the async tests only mean anything against a built `./posh`.
+
+### Two job-control invariants that are easy to break
+
+**Never write a signal number as a literal.** Linux and macOS disagree on exactly the signals
+job control uses: SIGCONT is 18/19, SIGTSTP 20/18, SIGCHLD 17/20, SIGSTOP 19/17 (SIGTTIN 21 and
+SIGTTOU 22 happen to agree). Always use `sb-unix:sigcont` and friends. Every one of these was
+previously a Linux literal, and on macOS the results were: `bg`/`fg` sent SIGTSTP instead of
+SIGCONT (re-stopping the job), `trap ... CONT` installed on the wrong signal, `128+SIGTSTP` was
+computed as 148 instead of 146, and — worst — `init-job-control` set **SIGCHLD** to `SIG_IGN`
+believing it was SIGTSTP, which tells the kernel to auto-reap children so every `waitpid`
+returns ECHILD and no job ever leaves `:running`.
+
+**`SIG_IGN` is inherited across `exec`; installed handlers are not.** This single fact decides
+how each signal is handled:
+
+- SIGTSTP/SIGTTIN/SIGTTOU need `SIG_IGN` in the shell (a handler would make `tcsetpgrp` fail
+  with EINTR instead of succeeding), so every spawned child must have them reset to `SIG_DFL`
+  or Ctrl-Z on the foreground job does nothing. That is what `child-sigdefaults` (exec.lisp)
+  plus `spawn`'s `:sigdefault` (`POSIX_SPAWN_SETSIGDEF`) are for. A signal the *user* ignored
+  via `trap '' SIG` is deliberately excluded — POSIX requires that one to be inherited.
+  **Any new `spawn` call site must pass `:sigdefault (child-sigdefaults sh)`.**
+- SIGINT/SIGQUIT instead get a no-op *handler* (`install-interrupt-handlers`). An interactive
+  shell must survive Ctrl-C and return to the prompt rather than being killed; using a handler
+  rather than `SIG_IGN` means `exec` resets them automatically, so children stay interruptible
+  with no `SETSIGDEF` bookkeeping.
+
+Reaping is once-per-pid: `update-job-state` and `wait-for-job` skip members already in
+`job-reaped` and treat an ECHILD from `waitpid` as "finished", not "still running". Treating
+ECHILD as running is what used to leave multi-stage pipeline jobs stuck at `:running` forever.
+Job status comes from the *last* pid in `job-pids` (pipeline order), per POSIX. `poll-jobs`
+also polls *stopped* jobs with `WCONTINUED` so an externally resumed job is noticed; the
+continued-status test must run **before** the stopped one, since on macOS a continued status
+also carries `0x7f` in its low byte.
+
+### `set -e` has scope, and expansion has side effects
+
+Two executor invariants that are easy to break and were each a real bug:
+
+**`set -e` is scoped.** `maybe-errexit` must not fire for a condition context. `exec-and-or`
+binds `*errexit-suppressed*` around its left subtree, `exec-if`/`exec-while` around the
+condition, `exec-pipeline-raw` around the stages; `maybe-errexit` additionally skips `:list`,
+`:and-or`, and `!`-led pipelines. Firing everywhere made `set -e; if false; then :; fi` exit —
+which kills most real scripts at their first `if`. `test/posix-diff.sh` has 21 cases pinning
+this against a reference shell; run them after touching anything in that area.
+
+**Expansion is not idempotent.** `expand-command-words` runs command substitutions, so
+expanding a command twice runs them twice. `external-simple-command-p` therefore returns the
+expanded argv as a second value and every caller threads it into `spawn-external`'s `:words`.
+Never call `expand-command-words` a second time on a node someone else already classified.
+
+### Never use `(truename ".")` for the working directory
+
+`sb-posix:chdir` changes the process cwd but leaves `*default-pathname-defaults*` alone, and CL
+resolves `"."` against the latter — so `(truename ".")` reports whatever directory the image
+started in, forever. Go through `current-directory` / `change-directory` (state.lisp), which
+read the real cwd via `getcwd` and keep `*default-pathname-defaults*` in step. Using `truename`
+here had `pwd`, `$PWD`, `cd -`, the subshell cwd snapshot, and the async prelude all reporting a
+stale directory after the first `cd`.
+
+### FFI layer (spawn.lisp)
+
+`posix_spawn_file_actions_t` and `posix_spawnattr_t` are opaque and represented differently
+per platform: inline structs on Linux/glibc (80 / 336 bytes), heap pointers on macOS. The code
+hands libc a zeroed byte block sized by `#+darwin` / `#-darwin` reader conditionals and never
+inspects the internals. Wait-status decoding uses portable bit arithmetic instead of the
+`sb-posix` `W*` macros, which are not exported on every platform. Linux and macOS only;
+`main` exits with a message on non-POSIX platforms.
+
+## README drift
+
+`README.md` is behind the code. It still says job control is minimal with "no `jobs`/`fg`/`bg`
+table, no process-group/terminal control" and that a backgrounded pipeline runs synchronously —
+all three are now implemented (jobs.lisp, `async-pipeline`). Its architecture table omits
+`jobs.lisp` and `deparse.lisp`; its test counts (48 + 73 = 121) are stale; and its invocation
+snippets predate the Makefile and the `posh/shell/test` system. `deparse.lisp`'s header comment
+claims deparsed source is used to re-exec the binary with `-c`; in the current code `deparse` is
+only used to record a job's display text. Prefer the source over the README, and update the
+README when you touch these areas.
+
+## Entry points
+
+```lisp
+(posh:parse-string "if true; then echo hi; fi")   ; => list of COMPLETE-COMMAND nodes
+(posh:tokenize "echo $(date) | wc -l")            ; raw token stream
+
+(let ((sh (posh-shell:make-shell)))
+  (posh-shell:run-string sh "for i in 1 2 3; do echo $i; done"))
+(posh-shell:repl (posh-shell:make-shell))
+(posh-shell:main)                                 ; script / -c / interactive dispatch
+```
+
+`main` reads `(rest sb-ext:*posix-argv*)`: no args → interactive REPL, `-c cmd [args]` →
+run string, otherwise treat argv[0] as a script path. The EXIT trap runs from an
+`unwind-protect` regardless of how the shell terminates.

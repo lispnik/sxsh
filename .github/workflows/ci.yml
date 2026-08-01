@@ -1,0 +1,82 @@
+name: CI
+
+# Both platforms matter more here than in most projects. posh binds
+# posix_spawn, waitpid and the job-control signals directly, and Linux and
+# macOS disagree on several of the constants involved (SIGCONT is 18 vs 19,
+# SIGTSTP 20 vs 18, SIGCHLD 17 vs 20, WCONTINUED 8 vs 16, and the opaque
+# posix_spawn structs are inline on glibc but pointers on Darwin). Several
+# real bugs in this code were invisible on one platform and fatal on the other,
+# so a green run on a single OS proves very little.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false          # a Linux-only failure must not hide a macOS one
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SBCL (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sbcl
+
+      - name: Install SBCL (macOS)
+        if: runner.os == 'macOS'
+        run: brew install sbcl
+
+      - name: Report toolchain
+        run: |
+          sbcl --version
+          python3 --version
+          bash --version | head -1
+          uname -a
+
+      # ASDF must be able to find posh.asd. The repo is checked out outside any
+      # registered tree, so point the source registry at the workspace.
+      - name: Configure ASDF source registry
+        run: |
+          mkdir -p ~/.config/common-lisp/source-registry.conf.d
+          printf '(:tree #p"%s/")\n' "$GITHUB_WORKSPACE" \
+            > ~/.config/common-lisp/source-registry.conf.d/50-ci.conf
+          cat ~/.config/common-lisp/source-registry.conf.d/50-ci.conf
+
+      - name: Parser suite
+        run: make test-parser
+
+      - name: Executor suite
+        run: make test-shell
+
+      - name: Build executable
+        run: make build
+
+      - name: Smoke tests
+        run: make smoke
+
+      # Needs a pty; GitHub runners provide one via the python pty module even
+      # though the job itself has no attached terminal.
+      - name: Job-control tests (pty)
+        run: make jobs
+
+      - name: POSIX conformance (vs bash)
+        run: make posix
+
+      # dash is the stricter reference: it has none of bash's extensions, so
+      # divergences it reports are more likely to be real POSIX violations.
+      - name: POSIX conformance (vs dash)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y dash
+          make posix REF_SHELL=/bin/dash
+        continue-on-error: true   # informational until the dash delta is triaged

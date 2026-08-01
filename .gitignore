@@ -1,0 +1,8 @@
+# saved executable (~40MB SBCL image)
+/posh
+
+# ASDF/SBCL build output
+*.fasl
+*.fas
+*.lib
+.cache/
