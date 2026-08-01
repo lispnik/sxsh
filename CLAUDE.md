@@ -21,11 +21,12 @@ package.lisp ast.lisp conditions.lisp lexer.lisp parser.lisp   -> system "sxsh"
 shell/       package state spawn arith expand redir deparse
              jobs builtins exec driver                          -> system "sxsh/shell"
 test/tests.lisp            -> "sxsh/test"        (48 cases)
-shell/test-shell.lisp      -> "sxsh/shell/test"  (84 cases)
+shell/test-shell.lisp      -> "sxsh/shell/test"  (86 cases)
 build.lisp        -> saves the bin/sxsh executable
-smoke.sh           -> end-to-end checks against that executable (98 cases)
+smoke.sh           -> end-to-end checks against that executable (302 cases)
 test/jobs-pty.py   -> job control, driven through a real pty (14 cases)
-test/posix-diff.sh -> differential conformance vs a reference shell (76 cases)
+test/fuzz-parser.py -> mutation fuzzer with shrinking (make fuzz)
+test/posix-diff.sh -> differential conformance vs a reference shell (247 cases)
 ```
 
 `shell/package.lisp` also defines `ast-type`, the `typecase` mapping parser structs to the
@@ -46,11 +47,12 @@ fails at READ time with `Package ASDF does not exist`; the Makefile passes
 make check          # everything (the one to run before calling it done)
 make test           # in-image ASDF suites only
 make test-parser    # 48 parser cases
-make test-shell     # 84 executor cases
+make test-shell     # 86 executor cases
 make build          # save bin/sxsh (~40MB SBCL image)
-make smoke          # build, then drive bin/sxsh end-to-end (98 cases)
+make smoke          # build, then drive bin/sxsh end-to-end (302 cases)
 make jobs           # job control through a real pty (14 cases)
-make posix          # differential conformance vs bash (76 cases)
+make fuzz           # fuzz the parser; findings are shrunk and the seed printed
+make posix          # differential conformance vs bash (247 cases)
 make posix REF_SHELL=/bin/dash    # stricter reference
 make clean          # remove bin/ and this project's fasls
 ```
