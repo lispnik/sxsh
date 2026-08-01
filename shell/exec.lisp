@@ -72,10 +72,16 @@ slash. A sourced file only has to be READABLE; requiring execute permission
 (defun run (sh ast-list)
   "Execute a list of complete-command nodes. Returns the last status."
   (handler-case
+   (handler-case
       (dolist (node ast-list (shell-last-status sh))
         (exec-node sh node))
     (shell-exit (e)
       (setf (shell-last-status sh) (or (shell-exit-code e) 0))
+      (shell-last-status sh)))
+    ;; `return' outside a function ends the script being read, as it does in a
+    ;; dot script; it must never escape as an unhandled condition.
+    (func-return (e)
+      (setf (shell-last-status sh) (cf-code e))
       (shell-last-status sh))))
 
 (defun run-string (sh src)
@@ -704,9 +710,12 @@ otherwise return a list of temporary K=V for a command environment."
         (format *error-output* "sxsh: ~A~%" e)
         (return-from run-builtin 1)))
     (unwind-protect
-         (handler-case
-             (funcall (find-builtin name) sh args *standard-output*)
-           (func-return (e) (cf-code e)))
+         ;; NOTE: FUNC-RETURN is deliberately not caught here. Catching it made
+         ;; `return' merely the exit status of the return builtin, so control
+         ;; carried straight on to the next command: `f() { return 1; echo x; }'
+         ;; printed x. It has to travel up to CALL-FUNCTION (or to the dot
+         ;; script, or to RUN as a backstop).
+         (funcall (find-builtin name) sh args *standard-output*)
       (finish-output *standard-output*)
       (restore-redirects saved)
       (dolist (p temps) (ignore-errors (delete-file p))))))
@@ -782,9 +791,27 @@ a second time re-runs any command substitution in the words."
   (setf (gethash (function-def-name node) (shell-functions sh)) node)
   0)
 
+(defvar *function-depth* 0
+  "How many shell functions are currently on the stack.")
+
+(defparameter +max-function-depth+ 1000
+  "Nesting limit for shell function calls.
+
+POSIX does not require a limit, but the alternative is not \"recurse
+forever\" -- it is exhausting the Lisp control stack, which SBCL reports as
+`INFO: Control stack guard page unprotected' followed by a backtrace. A shell
+must fail as a shell. Found by fuzzing, which reduced it to `f()${}f' followed
+by a call to f.")
+
 (defun call-function (sh def words node)
   "Invoke a shell function. Positional params become the call args; $0 stays."
-  (let ((saved-pos (shell-positional sh)))
+  (when (>= *function-depth* +max-function-depth+)
+    (format *error-output*
+            "sxsh: ~A: maximum function nesting level exceeded (~D)~%"
+            (first words) +max-function-depth+)
+    (return-from call-function 1))
+  (let ((saved-pos (shell-positional sh))
+        (*function-depth* (1+ *function-depth*)))
     (apply-assignments sh (simple-command-assignments node) :to-shell t)
     (set-positional sh (rest words))
     (multiple-value-bind (saved temps)

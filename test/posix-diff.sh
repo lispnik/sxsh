@@ -438,6 +438,18 @@ probe trap-bare-exit-imm  'trap "exit" EXIT; false'
 probe trap-explicit-exit  'trap "exit 7" EXIT; false'
 probe trap-exit-after-ok  'trap "exit" EXIT; true'
 
+# --- return actually returns (not just as the last command) ---------------
+probe return-stops        'f() { return 1; echo AFTER; }; f'
+probe return-status       'f() { return 1; echo AFTER; }; f; echo "st=$?"'
+probe return-from-andor   'f() { true && return; echo AFTER; }; f'
+probe return-from-if      'f() { if true; then return; fi; echo AFTER; }; f'
+probe return-from-brace   'f() { { return; }; echo AFTER; }; f'
+probe return-from-loop    'f() { for i in 1; do return; done; echo AFTER; }; f'
+probe return-recursion    'f() { [ $1 -le 0 ] && return; echo $1; f $(($1-1)); }; f 3'
+probe break-stops         'for i in 1 2 3; do break; echo NO; done; echo done'
+probe break-nested-2      'for i in 1 2; do for j in a b; do break 2; done; echo NO; done; echo done'
+probe continue-skips      'i=0; while [ $i -lt 3 ]; do i=$((i+1)); { continue; }; echo NO; done; echo $i'
+
 printf '\nposix-diff: %d passed, %d failed, %d known divergences (ref: %s)\n' \
   "$pass" "$fail" "$skipped" "$("$REF" --version 2>/dev/null | head -1 || echo "$REF")"
 [ "$fail" -eq 0 ]

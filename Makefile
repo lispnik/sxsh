@@ -19,12 +19,14 @@ PYTHON  ?= python3
 # Leave REF_SHELL empty so posix-diff.sh picks a modern bash itself; macOS
 # /bin/bash is 3.2 and misreports conformance.
 REF_SHELL ?=
+# Iterations etc. for `make fuzz'; findings are reproducible from the seed.
+FUZZ_ARGS ?= -n 1000
 # Spec files from third_party/oils that are in scope for a POSIX shell.
 OILS_SPECS ?= smoke posix quote word-split var-sub exit-status pipeline \
               command-sub arith assign redirect loop case_ if_ subshell \
               builtin-echo builtin-read builtin-trap builtin-cd glob tilde
 
-.PHONY: all build test test-parser test-shell smoke jobs posix oils check clean help
+.PHONY: all build test test-parser test-shell smoke jobs posix oils fuzz check clean help
 
 all: build
 
@@ -63,6 +65,10 @@ oils: $(BIN)
 
 # `oils` is deliberately not part of `check`: it is a scoreboard to drive down,
 # not a pass/fail gate.
+## fuzz: throw mutated and random input at the parser (add --exec to go deeper)
+fuzz: $(BIN)
+	$(PYTHON) test/fuzz-parser.py $(FUZZ_ARGS)
+
 ## check: everything -- both suites, smoke, job control, POSIX conformance
 check: test smoke jobs posix
 

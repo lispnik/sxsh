@@ -360,6 +360,14 @@ check lineno-tracks     '1
 2'                              0 'echo $LINENO
 echo $LINENO'
 
+# --- runaway recursion fails as a shell, not as a Lisp backtrace ----------
+# Found by fuzzing: `f()${}f' followed by a call to f exhausted the control
+# stack and dumped SBCL's own error.
+check_err recursion-limit 'maximum function nesting level exceeded' 1 'f() { f; }; f'
+check recursion-bounded '3
+2
+1'                              0 'f() { [ $1 -le 0 ] && return; echo $1; f $(($1-1)); }; f 3'
+
 # --- trap forms (POSIX 2.14) ----------------------------------------------
 check trap-multi-signal "trap -- 'echo hi' SIGINT
 trap -- 'echo hi' SIGTERM" 0 'trap "echo hi" INT TERM; trap'
