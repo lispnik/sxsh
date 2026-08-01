@@ -110,13 +110,25 @@ free-c-string-array."
 
 (define-condition spawn-error (error)
   ((code :initarg :code :reader spawn-error-code)
-   (file :initarg :file :reader spawn-error-file))
+   (file :initarg :file :reader spawn-error-file)
+   (actions :initarg :actions :initform nil :reader spawn-error-actions))
   (:report (lambda (c s)
-             (format s "posix_spawnp failed for ~S: ~A (error ~D)"
+             ;; Include the file actions: posix_spawn reports a failed action
+             ;; with the same errno as a missing program, so "no such file" on
+             ;; a program that plainly exists is otherwise unattributable.
+             (format s "posix_spawnp failed for ~S: ~A (error ~D)~@[ [actions: ~{~A~^ ~}]~]"
                      (spawn-error-file c)
                      (or (ignore-errors (sb-int:strerror (spawn-error-code c)))
                          "spawn error")
-                     (spawn-error-code c)))))
+                     (spawn-error-code c)
+                     (mapcar (lambda (a)
+                               (ecase (file-action-kind a)
+                                 (:dup2 (format nil "dup2(~A,~A)"
+                                                (file-action-a a) (file-action-b a)))
+                                 (:close (format nil "close(~A)" (file-action-a a)))
+                                 (:open (format nil "open(~A,~S)"
+                                                (file-action-a a) (file-action-b a)))))
+                             (spawn-error-actions c))))))
 
 (defun spawn (path argv &key (env (current-environ)) file-actions
                              pgroup (setpgroup nil) sigdefault)
@@ -179,7 +191,9 @@ to default automatically."
              (let ((rc (%posix-spawnp (sb-alien:addr pid) path fa* attr*
                                       argv-arr env-arr)))
                (unless (zerop rc)
-                 (error 'spawn-error :code rc :file path))
+                 (error 'spawn-error :code rc
+                                     :file path
+                                     :actions file-actions))
                pid))
         (when argv-arr (free-c-string-array argv-arr))
         (when env-arr (free-c-string-array env-arr))

@@ -11,9 +11,16 @@
 ;;; ---------------------------------------------------------------------------
 
 (defun find-in-path (sh name &key allow-slash)
-  "Resolve NAME to an executable path. If NAME contains a slash, use it as-is."
+  "Resolve NAME to an executable path, or NIL.
+
+A name containing a slash is used as given rather than searched for -- but it
+still has to exist and be executable. Returning it unconditionally meant a
+command like `/bin/uname' on a system without that file was handed to
+posix_spawn, whose failure surfaced as an unhandled error that killed the
+shell. Autoconf probes exactly that path on purpose."
+  (declare (ignore allow-slash))
   (if (find #\/ name)
-      (and (or allow-slash t) name)
+      (and (executable-p name) name)
       (let ((path (or (nth-value 0 (get-var sh "PATH")) "/usr/bin:/bin")))
         (dolist (dir (split-string path #\:) nil)
           (let ((candidate (if (string= dir "")
@@ -342,7 +349,8 @@ STDIN/STDOUT are fds to attach. CLOSE-IN-CHILD lists pipe fds to close."
                                                         close-in-child))))))))
         (cond
           ((eq pid :redirect-error) (values nil 1))
-          ((eql pid 127) (values nil 127))  ; lookup failed: no child to wait for
+          ((and (consp pid) (eq (first pid) :command-error))
+           (values nil (second pid)))     ; lookup failed: no child to wait for
           (t (values pid nil))))
       ;; builtin / compound: run in-process with fds redirected temporarily
       (let ((saved-in (sb-posix:dup 0)) (saved-out (sb-posix:dup 1)))
@@ -519,7 +527,10 @@ the same name may legitimately reappear once we have moved on to a later word."
                  (wait-foreground sh pid (ignore-errors (deparse node)))))
              (let ((pid (spawn-external sh node :words words)))
                (return-from exec-simple (wait-for pid)))))))
-         (if (eq thrown :redirect-error) 1 127))))))
+         (cond ((eq thrown :redirect-error) 1)
+               ((and (consp thrown) (eq (first thrown) :command-error))
+                (second thrown))
+               (t 127)))))))
 
 (defun wait-foreground (sh pid command)
   "Wait for a foreground child PID that is a group leader, handling terminal
@@ -619,8 +630,9 @@ words, apply NODE's redirections permanently to the shell."
   "Like spawn-external but with an explicit ARGV-WORDS list (already expanded),
 reusing NODE's assignments and redirections."
   (let* ((prog (or (find-in-path sh (first argv-words))
-                   (progn (report-not-found sh node (first argv-words))
-                          (throw 'not-found 127))))
+                   (progn (throw 'not-found
+                            (list :command-error
+                                  (report-not-found sh node (first argv-words)))))))
          (temp-env (apply-assignments sh (simple-command-assignments node)))
          (env (merge-env (exported-environ sh) temp-env)))
     (multiple-value-bind (redir-actions temps)
@@ -723,9 +735,9 @@ expanded the command (they all have, via EXTERNAL-SIMPLE-COMMAND-P): expanding
 a second time re-runs any command substitution in the words."
   (let* ((words (or words (expand-command-words sh node)))
          (prog (or (find-in-path sh (first words))
-                   (progn (report-not-found sh node (first words))
-                          (return-from spawn-external
-                            (signal-not-found)))))
+                   (return-from spawn-external
+                     (signal-not-found
+                      (report-not-found sh node (first words))))))
          (temp-env (apply-assignments sh (simple-command-assignments node)))
          (env (merge-env (exported-environ sh) temp-env)))
     (multiple-value-bind (redir-actions temps)
@@ -744,10 +756,10 @@ a second time re-runs any command substitution in the words."
                                :sigdefault (child-sigdefaults sh))
           (dolist (p temps) (ignore-errors (delete-file p))))))))
 
-(defun signal-not-found ()
-  ;; a sentinel: caller treats a NIL pid as status 127; but our callers expect a
-  ;; pid to wait on. Instead we throw to a handler in exec-simple.
-  (throw 'not-found 127))
+(defun signal-not-found (&optional (status 127))
+  ;; a sentinel: callers expect a pid to wait on, so we throw to a handler
+  ;; instead. The status travels in a marker that cannot be mistaken for a pid.
+  (throw 'not-found (list :command-error status)))
 
 (defun merge-env (base overrides)
   "OVERRIDES is a list of (name . value). Returns merged K=V list."
@@ -786,6 +798,11 @@ a second time re-runs any command substitution in the words."
 ;;; Compound commands
 ;;; ---------------------------------------------------------------------------
 
+(defun command-error-status (name)
+  "POSIX 2.8.2: 126 when the command is found but cannot be executed, 127 when
+it is not found at all."
+  (if (and (find #\/ name) (probe-file name)) 126 127))
+
 (defun report-not-found (sh node name)
   "Emit the `command not found' diagnostic with NODE's redirections in force.
 
@@ -797,9 +814,13 @@ around it."
   (exec-with-redirects
    sh (and node (simple-command-redirects node))
    (lambda ()
-     (format *error-output* "~A: command not found~%" name)
+     (format *error-output* "~A: ~A~%" name
+             (if (= (command-error-status name) 126)
+                 "Permission denied"
+                 "command not found"))
      (finish-output *error-output*)))
-  (setf (shell-last-status sh) 127))
+  (setf (shell-last-status sh) (command-error-status name))
+  (command-error-status name))
 
 (defun exec-with-redirects (sh redirects thunk)
   (if (null redirects)

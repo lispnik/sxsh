@@ -377,6 +377,46 @@ probe trap-runs-action  'trap "echo T" TERM; kill -TERM $$; sleep 0.2; echo afte
 probe readonly-fatal    'readonly r=1; r=2 2>/dev/null; echo REACHED' diag-text
 probe readonly-ok       'readonly r=1; echo ok'
 
+# --- command-line options (POSIX sh synopsis) -----------------------------
+# These run the shell under test directly rather than through probe(), since
+# probe() always passes -c.
+opt_probe() {  # opt_probe <name> <args...>
+  local name=$1; shift
+  local a b
+  a=$("$SXSH" "$@" 2>&1); a="$a|$?"
+  b=$("$REF" "$@" 2>&1); b="$b|$?"
+  if [ "$a" = "$b" ]; then pass=$((pass + 1)); else
+    fail=$((fail + 1))
+    printf 'FAIL %s\n  sxsh: %s\n  ref:  %s\n' "$name" "$a" "$b"
+  fi
+}
+opt_probe opt-c        -c 'echo hi'
+opt_probe opt-x        -x -c 'echo hi'
+opt_probe opt-e        -e -c 'false; echo NO'
+opt_probe opt-combined -ec 'false; echo NO'
+opt_probe opt-dollar0  -c 'echo $0' myname
+opt_probe opt-args     -c 'echo $1' n a1
+opt_probe opt-u        -c 'set -u; echo ${x-ok}'
+
+# --- commands named with a slash (POSIX 2.9.1.1) --------------------------
+probe slash-missing    '/nonexistent-zz/prog; echo st=$?' diag-text
+probe slash-notexec    '/etc/hosts; echo st=$?' diag-text
+probe slash-works      '/bin/echo ok'
+probe slash-guarded    '/bin/nosuchzz -X 2>/dev/null || echo unknown'
+probe slash-in-pipe    'echo a | /etc/hosts; echo st=$?' diag-text
+
+# --- fd redirection targets are expanded ----------------------------------
+probe fd-target-var    'fd=3; exec 3>&1; echo via-var >&$fd; exec 3>&-'
+probe fd-target-one    'n=1; echo hi >&$n'
+probe fd-target-four   'exec 4>&1; f=4; echo z >&$f'
+
+# --- type options used by real scripts ------------------------------------
+probe type-p           'type -p cc'
+probe type-p-missing   'type -p nosuchzz; echo st=$?'
+probe type-t-builtin   'type -t echo'
+probe type-t-file      'type -t cc'
+probe type-p-guard     'if type -p cc >/dev/null; then echo have; fi'
+
 printf '\nposix-diff: %d passed, %d failed, %d known divergences (ref: %s)\n' \
   "$pass" "$fail" "$skipped" "$("$REF" --version 2>/dev/null | head -1 || echo "$REF")"
 [ "$fail" -eq 0 ]

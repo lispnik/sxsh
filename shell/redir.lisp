@@ -122,16 +122,19 @@ parameter/command/arith expansion unless the delimiter was quoted."
       ((:<< :<<-)
        (let ((path (heredoc-tempfile sh redirect)))
          (values (list (fa-open fd path +o-rdonly+ 0)) path)))
-      (:<& (values (dup-actions fd target-word) nil))
-      (:>& (values (dup-actions fd target-word) nil)))))
+      (:<& (values (dup-actions fd (single-expand sh target-word)) nil))
+      (:>& (values (dup-actions fd (single-expand sh target-word)) nil)))))
 
-(defun dup-actions (fd target-word)
-  "Handle n<&m, n>&m, n<&- (close). TARGET-WORD is a digit string or '-'."
+(defun dup-actions (fd target)
+  "Handle n<&m, n>&m, n<&- (close). TARGET is an already-expanded fd number
+or '-'. It must be expanded first: `exec 3>&$fd' is ordinary shell, and
+classifying the raw word rejected it as a bad descriptor."
   (cond
-    ((string= target-word "-") (list (fa-close fd)))
-    ((every #'digit-char-p target-word)
-     (list (fa-dup2 (parse-integer target-word) fd)))
-    (t (error "bad file descriptor in redirection: ~A" target-word))))
+    ((string= target "-") (list (fa-close fd)))
+    ((and (plusp (length target)) (every #'digit-char-p target))
+     (list (fa-dup2 (parse-integer target) fd)))
+    (t (error 'redirect-error :path target
+                              :detail "bad file descriptor in redirection"))))
 
 (defun single-expand (sh word-text)
   "Expand a redirection target to a single field (no splitting; globbing only
@@ -186,11 +189,14 @@ RESTORE-REDIRECTS. Also returns temp paths to delete."
                  (push path temps)
                  (unless (= newfd fd) (sb-posix:dup2 newfd fd) (sb-posix:close newfd))))
               ((:<& :>&)
-               (let ((tgt (word-text (redirect-target r))))
+               ;; expanded, so `exec 3>&$fd' works
+               (let ((tgt (single-expand sh (word-text (redirect-target r)))))
                  (cond ((string= tgt "-") (ignore-errors (sb-posix:close fd)))
-                       ((every #'digit-char-p tgt)
+                       ((and (plusp (length tgt)) (every #'digit-char-p tgt))
                         (sb-posix:dup2 (parse-integer tgt) fd))
-                       (t (error "bad fd: ~A" tgt))))))))
+                       (t (error 'redirect-error
+                                 :path tgt
+                                 :detail "bad file descriptor in redirection"))))))))
       (error (e)
         (restore-redirects saved)
         (dolist (p temps) (ignore-errors (delete-file p)))

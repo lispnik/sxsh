@@ -683,20 +683,63 @@ be re-read to restore the current settings."
 
 (setf (gethash "source" *builtins*) (gethash "." *builtins*))
 
+(defun type-kind (sh name)
+  "Classify NAME: returns (values kind path) where kind is one of :alias,
+:function, :builtin or :file."
+  (cond
+    ((gethash name (shell-aliases sh)) (values :alias nil))
+    ((gethash name (shell-functions sh)) (values :function nil))
+    ((builtin-p name) (values :builtin nil))
+    (t (let ((p (find-in-path sh name)))
+         (if p (values :file p) (values nil nil))))))
+
 (define-builtin "type" (sh args out)
-  ;; POSIX: the status is non-zero if any operand could not be found, and the
-  ;; diagnostic belongs on stderr -- writing it to stdout with status 0 made
-  ;; `type foo >/dev/null && ...' succeed for a command that does not exist.
-  (let ((status 0))
-    (dolist (a args status)
-      (cond ((builtin-p a) (format out "~A is a shell builtin~%" a))
-            ((gethash a (shell-functions sh)) (format out "~A is a function~%" a))
-            ((gethash a (shell-aliases sh))
-             (format out "~A is an alias for ~A~%" a (gethash a (shell-aliases sh))))
-            (t (let ((p (find-in-path sh a)))
-                 (cond (p (format out "~A is ~A~%" a p))
-                       (t (format *error-output* "~A: not found~%" a)
-                          (setf status 1)))))))))
+  ;; POSIX defines no options for `type', but -p and -t are ubiquitous in real
+  ;; scripts -- an autoconf-style `if type -p gcc' is how they probe for a
+  ;; compiler. Without them the option was taken for a name and reported as
+  ;; \"-p: not found\".
+  (let ((path-only nil) (type-only nil) (force-path nil) (rest args))
+    (loop while (and rest (> (length (first rest)) 1)
+                     (char= (char (first rest) 0) #\-))
+          do (let ((o (pop rest)))
+               (when (string= o "--") (return))
+               (loop for c across (subseq o 1) do
+                 (case c
+                   (#\p (setf path-only t))
+                   (#\P (setf path-only t force-path t))
+                   (#\t (setf type-only t))
+                   (#\a)                ; accepted; we report the first match
+                   (t (format *error-output* "type: -~C: invalid option~%" c)
+                      (return-from builtin 2))))))
+    ;; POSIX: non-zero if any operand is not found, and the diagnostic goes to
+    ;; stderr -- writing it to stdout with status 0 made
+    ;; `type foo >/dev/null && ...' succeed for a command that does not exist.
+    (let ((status 0))
+      (dolist (a rest status)
+        (multiple-value-bind (kind path)
+            (if force-path
+                (let ((p (find-in-path sh a))) (if p (values :file p) (values nil nil)))
+                (type-kind sh a))
+          (cond
+            ((null kind)
+             (unless (or path-only type-only)
+               (format *error-output* "~A: not found~%" a))
+             (setf status 1))
+            (type-only
+             (write-line (ecase kind
+                           (:alias "alias") (:function "function")
+                           (:builtin "builtin") (:file "file"))
+                         out))
+            (path-only
+             ;; -p prints a path only for an executable on disk
+             (if (eq kind :file) (write-line path out) (setf status 0)))
+            (t
+             (ecase kind
+               (:alias (format out "~A is an alias for ~A~%"
+                               a (gethash a (shell-aliases sh))))
+               (:function (format out "~A is a function~%" a))
+               (:builtin (format out "~A is a shell builtin~%" a))
+               (:file (format out "~A is ~A~%" a path))))))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Tier-2 POSIX builtins

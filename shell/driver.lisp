@@ -102,33 +102,98 @@ when a parse error is 'unexpected EOF'-like). Returns NIL on EOF."
 Linux and macOS; anything else (notably Windows) is unsupported."
   (and (member :unix *features*) t))
 
+(defun parse-shell-options (sh argv)
+  "Consume leading command-line options, applying them to SH.
+
+POSIX: sh [-abCefhimnuvx] [-o option] [+abCefhimnuvx] [+o option]
+       [command_file [argument...]] | -c command_string [command_name ...]
+
+Returns (values mode operand rest), where MODE is :command, :stdin or :file.
+Without this, `sxsh -x script' took -x for the script's name -- the shell
+accepted none of the set options on its command line."
+  (let ((mode nil) (operand nil))
+    (loop
+      (let ((a (first argv)))
+        (cond
+          ((null a) (return))
+          ((string= a "--") (pop argv) (return))
+          ((string= a "-") (pop argv) (return))
+          ((and (> (length a) 1) (member (char a 0) '(#\- #\+)))
+           (let ((enable (char= (char a 0) #\-))
+                 (letters (subseq a 1)))
+             (pop argv)
+             (loop for i from 0 below (length letters) do
+               (let ((c (char letters i)))
+                 (case c
+                   (#\c (setf mode :command))
+                   (#\s (setf mode :stdin))
+                   (#\i (setf (shell-interactive sh) t))
+                   (#\o (let ((name (pop argv)))
+                          (cond
+                            ((null name) (print-options sh *standard-output*
+                                                        (not enable)))
+                            (t (let ((entry (option-by-name name)))
+                                 (unless entry
+                                   (format *error-output*
+                                           "sxsh: ~A: invalid option name~%" name)
+                                   (return-from parse-shell-options
+                                     (values :error nil nil)))
+                                 (set-option sh (third entry) enable))))))
+                   (t (let ((entry (option-by-letter c)))
+                        (unless entry
+                          (format *error-output* "sxsh: -~C: invalid option~%" c)
+                          (return-from parse-shell-options (values :error nil nil)))
+                        (set-option sh (third entry) enable))))))))
+          (t (return)))))
+    ;; what remains: the command string, or a script name, or nothing
+    (case mode
+      (:command (setf operand (pop argv)))
+      (:stdin)
+      (t (when argv (setf mode :file operand (pop argv)))))
+    (values (or mode :stdin) operand argv)))
+
 (defun main (&optional (argv (rest sb-ext:*posix-argv*)))
-  "Entry point. Supports: sxsh script.sh [args], sxsh -c 'cmd', or interactive."
+  "Entry point. Supports the POSIX sh synopsis: options, -c, a script, or an
+interactive/stdin session."
   (unless (supported-platform-p)
     (format *error-output*
             "sxsh: unsupported platform; requires a POSIX system (Linux or macOS)~%")
     (return-from main 1))
   (let ((sh (make-shell :interactive (and (null argv)
                                           (stdin-is-interactive-p)))))
-    (unwind-protect
-         (handler-case
-             (cond
-               ((null argv)
-                (if (shell-interactive sh)
-                    (repl sh)
-                    ;; A non-interactive shell reading a script from standard
-                    ;; input parses the whole text at once, exactly as it would
-                    ;; a file. Feeding it to the line-at-a-time reader instead
-                    ;; makes constructs that span lines depend on the reader
-                    ;; guessing where a command ends.
-                    (run-string sh (slurp-file "/dev/stdin"))))
-               ((string= (first argv) "-c")
-                (set-positional sh (cddr argv))
-                (run-string sh (second argv)))
-               (t
-                (setf (shell-name sh) (first argv))
-                (set-positional sh (rest argv))
-                (run-string sh (slurp-file (first argv)))))
+    (multiple-value-bind (mode operand rest) (parse-shell-options sh argv)
+      (when (eq mode :error) (return-from main 2))
+      (unwind-protect
+           (handler-case
+               (ecase mode
+                 (:command
+                  (unless operand
+                    (format *error-output* "sxsh: -c: option requires an argument~%")
+                    (return-from main 2))
+                  ;; `sh -c cmd name args' sets $0 from the next operand
+                  (when rest (setf (shell-name sh) (pop rest)))
+                  (set-positional sh rest)
+                  (run-string sh operand))
+                 (:file
+                  (setf (shell-name sh) operand)
+                  (set-positional sh rest)
+                  (let ((text (handler-case (slurp-file operand)
+                                (error ()
+                                  (format *error-output*
+                                          "sxsh: ~A: No such file or directory~%"
+                                          operand)
+                                  (return-from main 127)))))
+                    (run-string sh text)))
+                 (:stdin
+                  (set-positional sh rest)
+                  (if (and (shell-interactive sh) (stdin-is-interactive-p))
+                      (repl sh)
+                      ;; A non-interactive shell reading a script from standard
+                      ;; input parses the whole text at once, exactly as it would
+                      ;; a file. Feeding it to the line-at-a-time reader instead
+                      ;; makes constructs that span lines depend on the reader
+                      ;; guessing where a command ends.
+                      (run-string sh (slurp-file "/dev/stdin")))))
            (shell-exit (e) (setf (shell-last-status sh) (or (shell-exit-code e) 0)))
            (sxsh:shell-parse-error (e)
              (format *error-output* "sxsh: ~A~%" e)
@@ -136,6 +201,7 @@ Linux and macOS; anything else (notably Windows) is unsupported."
            (error (e)
              (format *error-output* "sxsh: ~A~%" e)
              (setf (shell-last-status sh) 1)))
-      ;; POSIX: the EXIT trap runs when the shell terminates, whatever the cause
-      (run-exit-traps sh))
-    (shell-last-status sh)))
+        ;; POSIX: the EXIT trap runs when the shell terminates, whatever the
+        ;; cause
+        (run-exit-traps sh))
+      (shell-last-status sh))))
