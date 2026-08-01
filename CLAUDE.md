@@ -331,6 +331,24 @@ Where these bugs hide is the giveaway: a construct in a **non-final position**. 
 broken for months because every test used it as the function's last command, where a swallowed
 condition and a working one look the same. Real scripts are full of non-final positions.
 
+### Two expansion/IO invariants that hung a real script
+
+**The pattern operand of `${var#pat}` is expanded.** POSIX applies tilde, parameter, command
+and arithmetic expansion to it — but neither field splitting nor pathname expansion, so
+`expand-nested-pattern` uses `expand-pass`, not `expand-word`. It renders the result with
+`xchars->pattern` rather than `xchars->string`, which is what keeps a metacharacter that came
+from an expansion live (`p="*."; ${s#$p}`) while one quoted in the source stays inert
+(`${s#"*"}`). The function used to return the operand untouched, so `${s#$p}` searched for the
+literal characters `$p`. Any script that walks a string a character at a time then loops
+forever — that is how gpgrt-config hung.
+
+**`read` must not read ahead.** It reads fd 0 a byte at a time via `fd-read-line` and stops at
+the newline, because POSIX requires the file offset to be left just past it: the next command
+on that descriptor has to see the following byte. Do not "optimize" this into a buffered
+stream. Going through SBCL's `*standard-input*` slurped the whole file on the first call, so in
+`while read l; do read X <f; done <g` the inner redirected `read` was served leftover bytes
+from `g`. `{ read first; cat; } <f` is the cheapest test that the offset is right.
+
 ### The Oils spec "hang" is environmental, not a shell bug
 
 Two spec cases (`exit-status` "If subshell true WITH OUTPUT", `arith` "Logical

@@ -502,10 +502,10 @@ ${name%%pat}. Returns (values string quoted-p)."
             (cond
               ((null op) (values (or val "") nil))
               ;; pattern removal
-              ((string= op "#")  (values (remove-prefix (or val "") word nil) nil))
-              ((string= op "##") (values (remove-prefix (or val "") word t) nil))
-              ((string= op "%")  (values (remove-suffix (or val "") word nil) nil))
-              ((string= op "%%") (values (remove-suffix (or val "") word t) nil))
+              ((string= op "#")  (values (remove-prefix sh (or val "") word nil) nil))
+              ((string= op "##") (values (remove-prefix sh (or val "") word t) nil))
+              ((string= op "%")  (values (remove-suffix sh (or val "") word nil) nil))
+              ((string= op "%%") (values (remove-suffix sh (or val "") word t) nil))
               ;; use default
               ((string= op ":-") (if (nonempty val) (values val nil)
                                      (values (expand-nested sh word) nil)))
@@ -597,9 +597,9 @@ separator). Returns NIL if none."
   (xchars->string (expand-pass sh word)))
 
 ;;; pattern removal helpers (shell patterns: * ? [..])
-(defun remove-prefix (s pattern greedy)
+(defun remove-prefix (sh s pattern greedy)
   "Remove the shortest (or longest, if GREEDY) prefix of S matching PATTERN."
-  (let ((pat (expand-nested-pattern pattern))
+  (let ((pat (expand-nested-pattern sh pattern))
         (candidates (if greedy
                         (loop for e from (length s) downto 0 collect e)
                         (loop for e from 0 to (length s) collect e))))
@@ -607,9 +607,9 @@ separator). Returns NIL if none."
       (when (shell-pattern-match pat (subseq s 0 end))
         (return-from remove-prefix (subseq s end))))))
 
-(defun remove-suffix (s pattern greedy)
+(defun remove-suffix (sh s pattern greedy)
   "Remove the shortest (or longest, if GREEDY) suffix of S matching PATTERN."
-  (let ((pat (expand-nested-pattern pattern))
+  (let ((pat (expand-nested-pattern sh pattern))
         (candidates (if greedy
                         (loop for st from 0 to (length s) collect st)
                         (loop for st from (length s) downto 0 collect st))))
@@ -617,10 +617,26 @@ separator). Returns NIL if none."
       (when (shell-pattern-match pat (subseq s start))
         (return-from remove-suffix (subseq s 0 start))))))
 
-(defun expand-nested-pattern (word)
-  ;; patterns in ${..#..} are expanded but not quote-removed of their globs;
-  ;; for our purposes expand params then treat as a pattern string.
-  word)
+(defun expand-nested-pattern (sh word)
+  "Expand the pattern operand of ${var#pat} and friends, then render it as a
+pattern string.
+
+This used to return WORD untouched -- the comment claimed it expanded
+parameters, but nothing did, so the pattern was matched as literal text.
+`p=h; ${s#$p}' looked for the two characters `$p'. That is an infinite loop in
+any script that walks a string a character at a time, which is how
+gpgrt-config's substitute_vars works:
+
+    __result=\"$__result$(printf %c \"$__string\")\"
+    __string=\"${__string#$(printf %c \"$__string\")}\"   # never shrank
+
+POSIX applies tilde, parameter, command and arithmetic expansion to the
+operand but neither field splitting nor pathname expansion, so EXPAND-PASS is
+right and EXPAND-WORD would not be. XCHARS->PATTERN, not XCHARS->STRING,
+renders the result: metacharacters that came from an expansion stay live
+(`p=\"*.\"; ${s#$p}' strips through the first dot) while ones that were quoted
+in the source go inert (`${s#\"*\"}' matches a literal asterisk)."
+  (xchars->pattern (expand-pass sh word)))
 
 (defun xchars->pattern (xchars)
   "Render XCHARS as a pattern string, keeping backslash escapes for anything

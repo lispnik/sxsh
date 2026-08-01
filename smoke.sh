@@ -549,6 +549,43 @@ check cf-dot-exit         'in-dot'          6 'printf "echo in-dot\nexit 6\necho
 check cf-dot-break        'in-dot
 done'                                       0 'printf "echo in-dot\nbreak\necho NO\n" >"$SMOKE_TMP/d.sh"; for i in 1 2; do . "$SMOKE_TMP/d.sh"; echo NO2; done; echo done'
 
+# --- ${var#pat}: the pattern operand is expanded ---------------------------
+# EXPAND-NESTED-PATTERN used to return the operand untouched, so `${s#$p}'
+# hunted for the literal two characters `$p'. Any script that walks a string a
+# character at a time then loops forever -- which is how gpgrt-config hung.
+check pat-var-prefix    'ello'          0 's=hello; p=h; echo "${s#$p}"'
+check pat-var-suffix    'hell'          0 's=hello; p=o; echo "${s%$p}"'
+check pat-var-longest   'b.c|c'         0 's=a.b.c; p="*."; echo "${s#$p}|${s##$p}"'
+check pat-var-suf-long  'a.b|a'         0 's=a.b.c; p=".*"; echo "${s%$p}|${s%%$p}"'
+check pat-cmdsub        'ello'          0 's=hello; echo "${s#$(printf %c "$s")}"'
+check pat-backquote     'ello'          0 's=hello; echo "${s#`echo h`}"'
+check pat-nested-param  'ello'          0 's=hello; echo "${s#${p:-h}}"'
+check pat-positional    'ello'          0 'set -- h; s=hello; echo "${s#$1}"'
+check pat-unset-var     'hello'         0 's=hello; echo "${s#$nosuchvar_zz}"'
+# metacharacters from an expansion stay live; ones quoted in the source do not
+check pat-quoted-star   'x'             0 's="*x"; echo "${s#"*"}"'
+check pat-escaped-star  ''              0 's=a*b; p="a\*b"; echo "${s#$p}"'
+check pat-literal-still 'llo|a.b|c'     0 's=hello; t=a.b.c; echo "${s#he}|${t%.*}|${t##*.}"'
+# the loop gpgrt-config's substitute_vars runs: it must terminate
+check pat-char-walk     'hello'         0 's=hello; r=""; while [ -n "$s" ]; do c=$(printf %c "$s"); r="$r$c"; s="${s#$c}"; done; echo "$r"'
+
+# --- read leaves the file offset just past the newline ---------------------
+# `read' used to go through the buffered *STANDARD-INPUT*, which slurped the
+# whole file on the first call. A redirected `read' inside a `while read' loop
+# was then served stale bytes from the outer input.
+check read-inner-redir  'a=V
+b=V
+c=V'                                    0 'printf "V\n" >"$SMOKE_TMP/f1"; printf "a\nb\nc\n" >"$SMOKE_TMP/f2"; while read l; do read X <"$SMOKE_TMP/f1"; echo "$l=$X"; done <"$SMOKE_TMP/f2"'
+check read-inner-heredoc 'a/Va
+b/Vb
+c/Vc'                                   0 'printf "a\nb\nc\n" | while read l; do read X <<EOF
+V$l
+EOF
+echo "$l/$X"; done'
+check read-then-cat     'rest1
+rest2'                                  0 'printf "a\nrest1\nrest2\n" >"$SMOKE_TMP/f4"; { read first; cat; } <"$SMOKE_TMP/f4"'
+check read-fd-dup       'l1/l2'         0 'printf "l1\nl2\n" >"$SMOKE_TMP/f3"; exec 3<"$SMOKE_TMP/f3"; read x <&3; read y <&3; echo "$x/$y"; exec 3<&-'
+
 # --- stdin / REPL mode ----------------------------------------------------
 got=$(printf 'echo from-stdin\nexit 0\n' | "$SXSH" 2>/dev/null)
 if printf '%s' "$got" | grep -q 'from-stdin'; then

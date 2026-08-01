@@ -468,7 +468,9 @@ arguments. Returns (values text status)."
                  (t (return)))))
     (when prompt (write-string prompt *error-output*) (finish-output *error-output*))
     (multiple-value-bind (line escaped eof-no-newline)
-        (read-one-logical-line *standard-input* raw-mode)
+        ;; fd 0, not *STANDARD-INPUT*: redirections move the descriptor, and a
+        ;; buffered stream would keep serving bytes read before the move.
+        (read-one-logical-line 0 raw-mode)
       (when (eq line :eof) (return-from builtin 1))
       (when silent (terpri *error-output*))
       ;; POSIX: input ending before a newline still assigns, but the status is
@@ -483,8 +485,49 @@ arguments. Returns (values text status)."
                     do (set-var sh nm (or (nth i parts) "")))
               status))))))
 
-(defun read-one-logical-line (stream raw-mode)
-  "Read one logical line for the `read' builtin.
+(defun fd-read-line (fd)
+  "Read one line from FD a byte at a time, consuming the newline but nothing
+beyond it. Returns (values line missing-newline), or :eof at end of input.
+
+The single-byte reads are the point, not an oversight. POSIX requires `read'
+to leave the file offset just past the newline it consumed, because the very
+next command may read the same descriptor. A buffered stream cannot do that:
+SBCL's *STANDARD-INPUT* slurped the whole file on the first READ-LINE, so in
+
+    while read l; do read X <f1; ...; done <f2
+
+the inner `read X' was served from f2's leftover buffer instead of f1, and
+only started honouring its own redirection once that buffer ran dry. That is
+what made gpgrt-config, which parses .pc files with exactly this shape, report
+another field's value for every variable it read."
+  (let ((buf (make-array 1 :element-type '(unsigned-byte 8)))
+        (out (make-string-output-stream))
+        (got-any nil))
+    (loop
+      (let ((n (sb-sys:with-pinned-objects (buf)
+                 (loop
+                   (multiple-value-bind (r errno)
+                       (sb-unix:unix-read fd (sb-sys:vector-sap buf) 1)
+                     (cond
+                       (r (return r))
+                       ;; EINTR is not end of input: a trap firing mid-read
+                       ;; would otherwise look like EOF and end the loop.
+                       ((eql errno sb-unix:eintr))
+                       (t (return 0))))))))
+        (cond
+          ((zerop n)
+           (return (if got-any
+                       (values (get-output-stream-string out) t)
+                       :eof)))
+          (t
+           (setf got-any t)
+           (let ((ch (code-char (aref buf 0))))
+             (if (char= ch #\Newline)
+                 (return (values (get-output-stream-string out) nil))
+                 (write-char ch out)))))))))
+
+(defun read-one-logical-line (fd raw-mode)
+  "Read one logical line for the `read' builtin from FD.
 
 Returns (values text escaped-positions eof-without-newline), or :eof as the
 first value at end of input.
@@ -507,7 +550,7 @@ when input ends before a newline, even though the fields are still assigned."
                (when esc (push pos escaped))
                (incf pos)))
       (loop
-        (multiple-value-bind (line missing-newline) (read-line stream nil :eof)
+        (multiple-value-bind (line missing-newline) (fd-read-line fd)
           (when (eq line :eof)
             (unless got-any
               (return-from read-one-logical-line (values :eof nil nil)))
