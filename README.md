@@ -82,7 +82,7 @@ use of `sb-ext:run-program`.
 | `shell/spawn.lisp` | FFI for `posix_spawnp`, file-actions, attributes; argv/env marshalling; `SETPGROUP` and `SETSIGDEF` |
 | `shell/state.lisp` | Variables (with export flags), functions, positional params, `$?`/`$$`/`$!`, options, working directory |
 | `shell/expand.lisp` | Word expansion (2.6): tilde, parameter, command & arithmetic substitution, field splitting on `$IFS`, globbing, quote removal |
-| `shell/arith.lisp` | `$(( ))` integer arithmetic, C-like precedence, `**`, assignment ops, ternary |
+| `shell/arith.lisp` | `$(( ))` integer arithmetic, C-like precedence, assignment ops, ternary, `++`/`--`, and `**` (a ksh/bash extension: ISO C has no exponentiation operator) |
 | `shell/redir.lisp` | Redirections as `posix_spawn` file-actions (external) or `dup2`-with-restore (builtins/compounds); here-doc temp files |
 | `shell/deparse.lisp` | AST back to shell source — used to run compounds asynchronously and to label jobs |
 | `shell/jobs.lisp` | Job table, process groups, terminal ownership, `set -m`, reaping |

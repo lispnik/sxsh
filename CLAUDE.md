@@ -232,6 +232,27 @@ expanding a command twice runs them twice. `external-simple-command-p` therefore
 expanded argv as a second value and every caller threads it into `spawn-external`'s `:words`.
 Never call `expand-command-words` a second time on a node someone else already classified.
 
+### The dash job's ~20 failures are expected, and were triaged
+
+CI runs `make posix REF_SHELL=/bin/dash` as an informational job. It reports
+about twenty failures; none of them is a conformance bug on our side. They fall
+into four groups:
+
+* **11 x `$'...'`** -- dash predates POSIX Issue 8 (2024) and prints the escape
+  literally. We implement it, so we are the more conformant of the two here.
+* **5 x exit-status value** -- arithmetic and redirection errors: we exit 1,
+  dash exits 2. POSIX requires a non-zero status without specifying which.
+* **2 x unspecified behaviour** -- `shift` past `$#` (POSIX: "the results are
+  unspecified"; we, bash and zsh return 1 and continue, dash exits) and
+  `echo` with backslashes (implementation-defined; dash interprets, bash
+  does not).
+* **2 x arithmetic dash lacks** -- `**` and the comma operator. Note `**` is a
+  ksh/bash extension, not POSIX: ISO C, which POSIX defers to, has no
+  exponentiation operator.
+
+Do not "fix" these against dash. If the count moves, triage the delta rather
+than assuming a regression.
+
 ### Use a modern bash as the differential reference
 
 `/bin/bash` on macOS is **3.2.57 (2007)** -- Apple froze it at the last
