@@ -47,7 +47,7 @@ posix: $(BIN)
 
 ## oils: Oils cross-shell spec tests (needs the submodule + a python2)
 oils: $(BIN)
-	$(PYTHON) test/oils-spec.py --summary $(OILS_SPECS)
+	@$(PYTHON) test/oils-spec.py --summary $(OILS_SPECS) || true
 
 # `oils` is deliberately not part of `check`: it is a scoreboard to drive down,
 # not a pass/fail gate.

@@ -84,11 +84,18 @@ def run_one(py2, name, extra_argv, quiet):
     if not os.path.isdir(tmp_env):
         os.makedirs(tmp_env)
 
-    # spec/bin must be on PATH: many cases call helpers from there (argv.py
-    # prints its arguments as a Python list, printenv.py dumps the
-    # environment). Without it those cases fail with status 127 and look like
-    # shell bugs.
-    path_env = os.pathsep.join([SPEC_BIN, os.environ.get('PATH', '/usr/bin:/bin')])
+    # Two things must be on the PATH handed to the cases, or a large fraction
+    # of them fail for reasons that have nothing to do with the shell:
+    #
+    #   spec/bin      - helper scripts the cases call directly. argv.py prints
+    #                   its arguments as a Python list and is how most word
+    #                   splitting cases show their result.
+    #   dirname(py2)  - those helpers are `#!/usr/bin/env python2` scripts. A
+    #                   pyenv python2 is not on PATH, so without this every
+    #                   argv.py case produces empty output and reads as a
+    #                   shell bug rather than a missing interpreter.
+    path_env = os.pathsep.join(
+        [os.path.dirname(py2), SPEC_BIN, os.environ.get('PATH', '/usr/bin:/bin')])
 
     # A per-case timeout is essential, not a nicety: sh_spec waits forever by
     # default, so a single case that hangs the shell under test blocks the
@@ -113,23 +120,30 @@ def run_one(py2, name, extra_argv, quiet):
 ANSI_RE = None
 
 
-def parse_totals(output):
-    """Pull 'pass N / FAIL N / total N' out of sh_spec's summary table.
+CASE_RE = None
 
-    The table is colourised, so the counts are separated from their labels by
-    escape sequences; strip those before matching or every count reads zero.
+
+def parse_totals(output):
+    """Count per-case verdicts in sh_spec's result table.
+
+    Counting the individual rows rather than the trailing summary, because
+    sh_spec omits that summary entirely when a file has no failures -- reading
+    it would score a perfect file 0/0. Rows look like
+
+        <case#> <line#> <verdict> <description>
+
+    colourised, so escape sequences are stripped first. Anything that is not
+    'pass' (FAIL, TIMEOUT, BUG, ...) counts against us.
     """
-    global ANSI_RE
+    global ANSI_RE, CASE_RE
     import re
     if ANSI_RE is None:
         ANSI_RE = re.compile(r'\x1b\[[0-9;]*m')
+        CASE_RE = re.compile(r'^\s*\d+\s+\d+\s+(\S+)\s', re.MULTILINE)
     plain = ANSI_RE.sub('', output)
-    got = {}
-    for key in ('pass', 'FAIL', 'total'):
-        m = re.search(r'^\s*%s\s+(\d+)\s*$' % key, plain, re.MULTILINE)
-        if m:
-            got[key] = int(m.group(1))
-    return got.get('pass', 0), got.get('FAIL', 0), got.get('total', 0)
+    verdicts = CASE_RE.findall(plain)
+    npass = sum(1 for v in verdicts if v == 'pass')
+    return npass, len(verdicts) - npass, len(verdicts)
 
 
 def main(argv):
