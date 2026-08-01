@@ -154,6 +154,12 @@ def run_script(shell, script, gitdir, timeout):
             continue
         # Strip a trailing TODO/known-breakage marker.
         desc = re.sub(r'\s*#.*$', '', desc).strip()
+        # Some tests build their own name from a path under the trash
+        # directory (t0060's test_submodule_relative_url cases do). Since the
+        # two runs use different output directories so as not to clobber each
+        # other, those names would never match and every one would look like a
+        # failure under sxsh. Normalise the run-specific prefix away.
+        desc = desc.replace(env['TEST_OUTPUT_DIRECTORY'], '<OUT>')
         results[desc] = (status == 'ok')
     if not results:
         head = (p.stdout + p.stderr).strip().splitlines()
@@ -193,15 +199,15 @@ def main():
     leads = []
     for name in tests:
         if not os.path.exists(os.path.join(GIT_T, name + '.sh')):
-            print('  %-22s SKIP (no such script)' % name)
+            print('  %-22s SKIP (no such script)' % name, flush=True)
             continue
         ref_res, ref_err = run_script(ref, name, gitdir, args.timeout)
         sx_res, sx_err = run_script(args.shell, name, gitdir, args.timeout)
         if ref_res is None:
-            print('  %-22s ref could not run: %s' % (name, ref_err))
+            print('  %-22s ref could not run: %s' % (name, ref_err), flush=True)
             continue
         if sx_res is None:
-            print('  %-22s sxsh could not run: %s' % (name, sx_err))
+            print('  %-22s sxsh could not run: %s' % (name, sx_err), flush=True)
             leads.append((name, '<entire script>', sx_err))
             continue
 
@@ -214,7 +220,10 @@ def main():
         for b in broken:
             leads.append((name, b, 'passes under %s' % os.path.basename(ref)))
         flag = '' if not broken else '   <-- %d lead(s)' % len(broken)
-        print('  %-22s %4d/%-4d%s' % (name, len(passed), len(eligible), flag))
+        # flush: each script takes minutes, and without this Python buffers the
+        # whole run when stdout is not a tty, so a long run looks like a hang.
+        print('  %-22s %4d/%-4d%s' % (name, len(passed), len(eligible), flag),
+              flush=True)
 
     if leads:
         print('\nTests passing under the reference shell but failing under sxsh:')
