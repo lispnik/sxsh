@@ -206,6 +206,49 @@ check export-p          "export FOO='1'" 0 'export FOO=1; export -p | grep "^exp
 check alias-expands     'aliased'    0 'alias g="echo aliased"
 g'
 
+# --- pathname expansion applies to unquoted expansion results (POSIX 2.6) --
+check glob-from-var     'g1 g2'      0 'cd "$(mktemp -d)"; touch g1 g2; p=g*; echo $p'
+check glob-from-quoted-assign 'g1 g2' 0 'cd "$(mktemp -d)"; touch g1 g2; p="g*"; echo $p'
+check glob-from-cmdsub  'g1 g2'      0 'cd "$(mktemp -d)"; touch g1 g2; echo $(echo "g*")'
+check glob-from-params  'g1 g2'      0 'cd "$(mktemp -d)"; touch g1 g2; set -- "g*"; echo $@'
+check glob-quoted-stays 'g*'         0 'cd "$(mktemp -d)"; touch g1 g2; p=g*; echo "$p"'
+check glob-literal-quoted 'g*'       0 'cd "$(mktemp -d)"; touch g1 g2; echo "g*"'
+check glob-noglob-opt   'g*'         0 'cd "$(mktemp -d)"; touch g1 g2; set -f; p=g*; echo $p'
+check glob-nomatch-literal 'zz*'     0 'cd "$(mktemp -d)"; p=zz*; echo $p'
+
+# --- POSIX bracket expressions --------------------------------------------
+check class-alpha       'y'          0 'case a in [[:alpha:]]) echo y;; *) echo n;; esac'
+check class-digit       'y'          0 'case 5 in [[:digit:]]) echo y;; *) echo n;; esac'
+check class-upper-neg   'n'          0 'case a in [[:upper:]]) echo y;; *) echo n;; esac'
+check class-space       'y'          0 'case " " in [[:space:]]) echo y;; *) echo n;; esac'
+check class-xdigit      'y'          0 'case f in [[:xdigit:]]) echo y;; *) echo n;; esac'
+check class-negated     'y'          0 'case 5 in [![:alpha:]]) echo y;; *) echo n;; esac'
+check class-mixed-set   'y'          0 'case 7 in [abc[:digit:]]) echo y;; *) echo n;; esac'
+check class-equiv       'y'          0 'case a in [[=a=]]) echo y;; *) echo n;; esac'
+check class-collate     'y'          0 'case a in [[.a.]]) echo y;; *) echo n;; esac'
+check class-range-still 'y'          0 'case c in [a-z]) echo y;; *) echo n;; esac'
+
+# --- set options ----------------------------------------------------------
+check set-o-lists       'yes'        0 'set -o | grep -q "^noclobber" && echo yes'
+check set-o-plus-form   'yes'        0 'set +o | grep -q "^set [+-]o errexit" && echo yes'
+check set-o-long-name   'yes'        0 'set -o noglob; case $- in *f*) echo yes;; esac'
+check set-noclobber     'a'          0 'cd "$(mktemp -d)"; set -C; echo a>f; echo b>f 2>/dev/null; cat f'
+check set-noclobber-st  '1'          0 'cd "$(mktemp -d)"; set -C; echo a>f; echo b>f 2>/dev/null; echo $?'
+check set-noclobber-force 'b'        0 'cd "$(mktemp -d)"; set -C; echo a>f; echo b>|f; cat f'
+check set-allexport     '1'          0 'set -a; V=x; env | grep -c "^V=x"'
+check set-noexec        ''           0 'set -n; echo NOTRUN'
+check set-invalid-opt   ''           2 'set -Z 2>/dev/null'
+
+# --- read: escapes and EOF status (POSIX 2.14) ----------------------------
+check read-eof-status   'st=1 x=a'   0 'printf "a" | { read x; echo "st=$? x=$x"; }'
+check read-newline-st   'st=0 x=a'   0 'printf "a\n" | { read x; echo "st=$? x=$x"; }'
+check read-backslash    '[ab]'       0 'printf "a\\\\b\n" | { read x; echo "[$x]"; }'
+check read-raw-keeps    '[a\b]'      0 'printf "a\\\\b\n" | { read -r x; echo "[$x]"; }'
+check read-escaped-ifs  '[a b][]'    0 'printf "a\\\\ b\n" | { read x y; echo "[$x][$y]"; }'
+check read-escaped-delim '[a:b][]'   0 'printf "a\\\\:b\n" | { IFS=: read x y; echo "[$x][$y]"; }'
+check read-continuation '[ab]'       0 'printf "a\\\\\nb\n" | { read x; echo "[$x]"; }'
+check read-while-no-nl  'got:l1'     0 'printf "l1\nl2" | { while read l; do echo "got:$l"; done; }'
+
 # --- working directory ----------------------------------------------------
 check cd-pwd            '/usr'      0 'cd /usr; pwd'
 check cd-updates-PWD    '/usr'      0 'cd /usr; echo $PWD'

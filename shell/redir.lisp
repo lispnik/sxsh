@@ -17,6 +17,36 @@
 (defconstant +o-excl+   sb-posix:o-excl)
 (defconstant +mode+ #o666)
 
+(defun noclobber-flags (sh)
+  "Extra open(2) flags for a plain `>' redirection.
+
+With `set -C' POSIX forbids `>' from truncating an existing regular file, so
+the open must fail instead: O_EXCL turns that into EEXIST. `>|' bypasses it
+and always truncates. Accepting -C and then truncating anyway -- which is what
+happened before -- is worse than not having the option at all."
+  (if (opt sh :noclobber) +o-excl+ +o-trunc+))
+
+(define-condition redirect-error (error)
+  ((path :initarg :path :reader redirect-error-path)
+   (detail :initarg :detail :reader redirect-error-detail))
+  (:report (lambda (c s)
+             (format s "~A: ~A" (redirect-error-path c)
+                     (redirect-error-detail c)))))
+
+(defun open-for-redirect (path flags mode)
+  "sb-posix:open, but failures become a shell diagnostic rather than a raw
+Lisp condition (`Error in SB-POSIX::OPEN-WITH-MODE: File exists (17)')."
+  (handler-case (sb-posix:open path flags mode)
+    (error (e)
+      (error 'redirect-error
+             :path path
+             :detail (if (and (logtest flags +o-excl+)
+                              (probe-file path))
+                         ;; the set -C case, which is not really an error the
+                         ;; user needs errno for
+                         "cannot overwrite existing file"
+                         (princ-to-string e))))))
+
 (defun default-fd (op)
   "The fd a redirection applies to when no explicit IO_NUMBER is given."
   (case op
@@ -50,7 +80,8 @@ parameter/command/arith expansion unless the delimiter was quoted."
       (:< (let ((path (single-expand sh target-word)))
             (values (list (fa-open fd path +o-rdonly+ 0)) nil)))
       (:> (let ((path (single-expand sh target-word)))
-            (values (list (fa-open fd path (logior +o-wronly+ +o-creat+ +o-trunc+)
+            (values (list (fa-open fd path (logior +o-wronly+ +o-creat+
+                                                   (noclobber-flags sh))
                                    +mode+)) nil)))
       (:>\| (let ((path (single-expand sh target-word)))
               (values (list (fa-open fd path (logior +o-wronly+ +o-creat+ +o-trunc+)
@@ -113,15 +144,17 @@ RESTORE-REDIRECTS. Also returns temp paths to delete."
                (let* ((path (single-expand sh (word-text (redirect-target r))))
                       (flags (ecase op
                                (:< +o-rdonly+)
-                               ((:> :>\|) (logior +o-wronly+ +o-creat+ +o-trunc+))
+                               (:> (logior +o-wronly+ +o-creat+
+                                           (noclobber-flags sh)))
+                               (:>\| (logior +o-wronly+ +o-creat+ +o-trunc+))
                                (:>> (logior +o-wronly+ +o-creat+ +o-append+))
                                (:<> (logior +o-rdwr+ +o-creat+))))
-                      (newfd (sb-posix:open path flags +mode+)))
+                      (newfd (open-for-redirect path flags +mode+)))
                  (unless (= newfd fd)
                    (sb-posix:dup2 newfd fd) (sb-posix:close newfd))))
               ((:<< :<<-)
                (let* ((path (heredoc-tempfile sh r))
-                      (newfd (sb-posix:open path +o-rdonly+ 0)))
+                      (newfd (open-for-redirect path +o-rdonly+ 0)))
                  (push path temps)
                  (unless (= newfd fd) (sb-posix:dup2 newfd fd) (sb-posix:close newfd))))
               ((:<& :>&)

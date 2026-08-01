@@ -132,7 +132,10 @@ pathname operations resolve against the same place. Returns the new cwd."
     (error 'readonly-violation :name name))
   (let ((cell (gethash name (shell-vars sh))))
     (setf (gethash name (shell-vars sh))
-          (cons value (or export (and cell (cdr cell))))))
+          ;; `set -a' (allexport) marks every assignment for export.
+          (cons value (or export
+                          (opt sh :allexport)
+                          (and cell (cdr cell))))))
   value)
 
 (defun mark-readonly (sh name)

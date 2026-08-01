@@ -86,6 +86,14 @@ because the trap's own `echo' overwrote the 3."
 
 (defun exec-node (sh node)
   "Dispatch on AST node type. Returns exit status; also sets shell-last-status."
+  ;; `set -n' (noexec): parse but do not execute, so a script can be syntax
+  ;; checked. The test belongs here rather than in RUN: `set -n; echo hi' is a
+  ;; single :list node, so a check over RUN's node list would never see the
+  ;; flag change. `set -n' itself still runs -- the flag is not set yet when
+  ;; its own node is dispatched. POSIX makes this a no-op for interactive
+  ;; shells, or there would be no way to turn it back off.
+  (when (and (opt sh :noexec) (not (shell-interactive sh)))
+    (return-from exec-node 0))
   (let ((status
           (handler-case
               (ecase (ast-type node)
@@ -528,8 +536,15 @@ otherwise return a list of temporary K=V for a command environment."
 (defun run-builtin (sh name args node)
   "Run a builtin with redirections applied in-process."
   (apply-assignments sh (simple-command-assignments node) :to-shell t)
-  (multiple-value-bind (saved temps)
-      (apply-redirects-in-process sh (simple-command-redirects node))
+  (let (saved temps)
+    (handler-case
+        (multiple-value-setq (saved temps)
+          (apply-redirects-in-process sh (simple-command-redirects node)))
+      ;; A redirection we cannot set up fails this command with status 1
+      ;; rather than aborting the shell.
+      (redirect-error (e)
+        (format *error-output* "posh: ~A~%" e)
+        (return-from run-builtin 1)))
     (unwind-protect
          (handler-case
              (funcall (find-builtin name) sh args *standard-output*)
@@ -638,10 +653,21 @@ around it."
 (defun exec-with-redirects (sh redirects thunk)
   (if (null redirects)
       (funcall thunk)
-      (multiple-value-bind (saved temps) (apply-redirects-in-process sh redirects)
-        (unwind-protect (funcall thunk)
-          (restore-redirects saved)
-          (dolist (p temps) (ignore-errors (delete-file p)))))))
+      (let (saved temps (ok t))
+        ;; A redirection that cannot be set up fails *this command* with status
+        ;; 1; it must not abort the shell. Only the setup is guarded -- errors
+        ;; from the command itself still propagate.
+        (handler-case
+            (multiple-value-setq (saved temps)
+              (apply-redirects-in-process sh redirects))
+          (redirect-error (e)
+            (format *error-output* "posh: ~A~%" e)
+            (setf ok nil)))
+        (if (not ok)
+            1
+            (unwind-protect (funcall thunk)
+              (restore-redirects saved)
+              (dolist (p temps) (ignore-errors (delete-file p))))))))
 
 (defun exec-brace (sh node)
   (exec-with-redirects sh (brace-group-redirects node)

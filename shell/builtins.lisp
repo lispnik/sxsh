@@ -217,35 +217,74 @@ format over remaining args like the real printf."
                   (setf prompt (subseq opt 2)) (pop names))
                  (t (return)))))
     (when prompt (write-string prompt *error-output*) (finish-output *error-output*))
-    (let ((line (read-one-logical-line *standard-input* raw-mode)))
+    (multiple-value-bind (line escaped eof-no-newline)
+        (read-one-logical-line *standard-input* raw-mode)
       (when (eq line :eof) (return-from builtin 1))
       (when silent (terpri *error-output*))
-      (if (null names)
-          (progn (set-var sh "REPLY" line) 0)
-          (let* ((ifs (or (nth-value 0 (get-var sh "IFS")) " "))
-                 (parts (split-on-ifs line ifs (length names))))
-            (loop for nm in names for i from 0
-                  do (set-var sh nm (or (nth i parts) "")))
-            0)))))
+      ;; POSIX: input ending before a newline still assigns, but the status is
+      ;; non-zero so `while read line' terminates on a file with no final
+      ;; newline instead of looping on the last record.
+      (let ((status (if eof-no-newline 1 0)))
+        (if (null names)
+            (progn (set-var sh "REPLY" line) status)
+            (let* ((ifs (or (nth-value 0 (get-var sh "IFS")) " "))
+                   (parts (split-on-ifs line ifs (length names) escaped)))
+              (loop for nm in names for i from 0
+                    do (set-var sh nm (or (nth i parts) "")))
+              status))))))
 
 (defun read-one-logical-line (stream raw-mode)
-  "Read a line; unless RAW-MODE, a trailing backslash continues onto the next
-line (the backslash-newline is removed). Returns :eof at end of input."
-  (let ((first (read-line stream nil :eof)))
-    (when (eq first :eof) (return-from read-one-logical-line :eof))
-    (if raw-mode
-        first
-        (let ((acc (make-string-output-stream)) (cur first))
-          (loop
-            (if (and (plusp (length cur)) (char= (char cur (1- (length cur))) #\\))
-                (progn
-                  (write-string (subseq cur 0 (1- (length cur))) acc)
-                  (let ((next (read-line stream nil :eof)))
-                    (if (eq next :eof) (return) (setf cur next))))
-                (progn (write-string cur acc) (return))))
-          (get-output-stream-string acc)))))
+  "Read one logical line for the `read' builtin.
 
-(defun split-on-ifs (line ifs maxfields)
+Returns (values text escaped-positions eof-without-newline), or :eof as the
+first value at end of input.
+
+Without -r, a backslash removes the special meaning of the next character
+(POSIX 2.14 `read'): `a\bc' reads as `abc', and a backslash-newline pair is a
+line continuation that keeps reading. The positions of characters that were
+escaped are reported because they must NOT be treated as IFS delimiters
+afterwards -- `read x' on `a\ b' yields the single field `a b'.
+
+EOF-WITHOUT-NEWLINE drives the exit status: POSIX requires a non-zero status
+when input ends before a newline, even though the fields are still assigned."
+  (let ((text (make-string-output-stream))
+        (escaped '())
+        (pos 0)
+        (eof-no-newline nil)
+        (got-any nil))
+    (labels ((emit (ch esc)
+               (write-char ch text)
+               (when esc (push pos escaped))
+               (incf pos)))
+      (loop
+        (multiple-value-bind (line missing-newline) (read-line stream nil :eof)
+          (when (eq line :eof)
+            (unless got-any
+              (return-from read-one-logical-line (values :eof nil nil)))
+            (setf eof-no-newline t)
+            (return))
+          (setf got-any t)
+          (when missing-newline (setf eof-no-newline t))
+          (cond
+            (raw-mode
+             (loop for ch across line do (emit ch nil))
+             (return))
+            (t
+             (let ((i 0) (n (length line)) (continues nil))
+               (loop while (< i n) do
+                 (let ((c (char line i)))
+                   (cond
+                     ((and (char= c #\\) (< (1+ i) n))
+                      (emit (char line (1+ i)) t)
+                      (incf i 2))
+                     ((char= c #\\)      ; trailing backslash: line continuation
+                      (setf continues t)
+                      (incf i))
+                     (t (emit c nil) (incf i)))))
+               (when (or (not continues) missing-newline) (return))))))))
+    (values (get-output-stream-string text) (nreverse escaped) eof-no-newline)))
+
+(defun split-on-ifs (line ifs maxfields &optional escaped)
   "Split LINE into at most MAXFIELDS fields using POSIX IFS rules.
 
 IFS holds two kinds of character and they behave differently (POSIX 2.6.5):
@@ -260,7 +299,10 @@ Treating IFS as whitespace-only, as this once did, meant `IFS=: read x y z'
 performed no splitting at all and dumped the whole line into x.
 
 Once MAXFIELDS-1 fields have been taken the rest of the line goes to the final
-field verbatim (delimiters included), minus trailing IFS whitespace."
+field verbatim (delimiters included), minus trailing IFS whitespace.
+
+ESCAPED lists character positions that were backslash-escaped on input; those
+are never delimiters, so `read x y' on `a\\ b c' gives x=\"a b\" and y=\"c\"."
   (let* ((ws '()) (delims '()))
     (loop for c across ifs
           do (if (member c '(#\Space #\Tab #\Newline))
@@ -268,22 +310,26 @@ field verbatim (delimiters included), minus trailing IFS whitespace."
                  (pushnew c delims)))
     (let ((ws-str (coerce ws 'string))
           (fields '()) (i 0) (n (length line)) (count 0))
-      (flet ((ifs-char-p (c) (or (member c ws) (member c delims)))
-             (skip-ws () (loop while (and (< i n) (member (char line i) ws))
+      (flet ((ifs-char-p (c &optional (at -1))
+               (and (not (member at escaped))
+                    (or (member c ws) (member c delims))))
+             (skip-ws () (loop while (and (< i n) (member (char line i) ws)
+                                          (not (member i escaped)))
                                do (incf i))))
         (skip-ws)                       ; leading IFS whitespace is discarded
         (loop
           (when (>= i n) (return))
           (when (>= (1+ count) maxfields) (return))
           (let ((start i))
-            (loop while (and (< i n) (not (ifs-char-p (char line i))))
+            (loop while (and (< i n) (not (ifs-char-p (char line i) i)))
                   do (incf i))
             (push (subseq line start i) fields)
             (incf count))
           ;; A delimiter is: an optional IFS-whitespace run, then at most one
           ;; non-whitespace IFS character, then another optional run.
           (skip-ws)
-          (when (and (< i n) (member (char line i) delims))
+          (when (and (< i n) (member (char line i) delims)
+                     (not (member i escaped)))
             (incf i)
             (skip-ws)))
         ;; whatever is left belongs to the last requested field
@@ -291,28 +337,84 @@ field verbatim (delimiters included), minus trailing IFS whitespace."
           (push (string-right-trim ws-str (subseq line i)) fields)))
       (nreverse fields))))
 
+(defparameter +shell-options+
+  ;; (letter long-name keyword) -- POSIX 2.14 `set'. The long name is what
+  ;; `set -o' reports and accepts; the letter is the short form.
+  '((#\a "allexport" :allexport)
+    (#\b "notify"    :notify)
+    (#\C "noclobber" :noclobber)
+    (#\e "errexit"   :errexit)
+    (#\f "noglob"    :noglob)
+    (#\h "hashall"   :hashall)
+    (#\m "monitor"   :monitor)
+    (#\n "noexec"    :noexec)
+    (#\u "nounset"   :nounset)
+    (#\v "verbose"   :verbose)
+    (#\x "xtrace"    :xtrace)
+    ;; -o only, no single-letter form
+    (nil "ignoreeof" :ignoreeof)
+    (nil "nolog"     :nolog)
+    (nil "vi"        :vi)))
+
+(defun option-by-letter (c) (find c +shell-options+ :key #'first))
+(defun option-by-name (name) (find name +shell-options+ :key #'second
+                                                        :test #'string=))
+
+(defun set-option (sh keyword enable)
+  "Apply one option. Monitor mode has side effects beyond the flag itself."
+  (if (eq keyword :monitor)
+      (set-monitor sh enable)
+      (setf (opt sh keyword) enable)))
+
+(defun print-options (sh out plus-form)
+  "`set -o' lists options as a table; `set +o' lists them as commands that can
+be re-read to restore the current settings."
+  (dolist (entry +shell-options+)
+    (destructuring-bind (letter name keyword) entry
+      (declare (ignore letter))
+      (if plus-form
+          (format out "set ~:[+~;-~]o ~A~%" (opt sh keyword) name)
+          (format out "~A~15T~:[off~;on~]~%" name (opt sh keyword)))))
+  0)
+
 (define-builtin "set" (sh args out)
   (cond
     ((null args)
      (maphash (lambda (k cell) (format out "~A=~A~%" k (car cell))) (shell-vars sh))
      0)
     (t
-     ;; handle -e -x -u -f and their + forms; then positional params after --
      (let ((rest args) (saw-params nil))
        (loop while rest do
          (let ((a (first rest)))
            (cond
              ((string= a "--") (pop rest) (setf saw-params t) (return))
              ((and (> (length a) 1) (member (char a 0) '(#\- #\+)))
-              (let ((enable (char= (char a 0) #\-)))
-                (loop for c across (subseq a 1) do
-                  (case c
-                    (#\e (setf (opt sh :errexit) enable))
-                    (#\x (setf (opt sh :xtrace) enable))
-                    (#\u (setf (opt sh :nounset) enable))
-                    (#\f (setf (opt sh :noglob) enable))
-                    (#\m (set-monitor sh enable))))
-                (pop rest)))
+              (let ((enable (char= (char a 0) #\-))
+                    (letters (subseq a 1)))
+                ;; -o / +o : long-form option, or list when no name follows
+                (if (string= letters "o")
+                    (let ((name (second rest)))
+                      (cond
+                        ((null name)
+                         (print-options sh out (not enable))
+                         (pop rest))
+                        (t
+                         (let ((entry (option-by-name name)))
+                           (unless entry
+                             (format *error-output*
+                                     "set: ~A: invalid option name~%" name)
+                             (return-from builtin 2))
+                           (set-option sh (third entry) enable))
+                         (pop rest) (pop rest))))
+                    (progn
+                      (loop for c across letters do
+                        (let ((entry (option-by-letter c)))
+                          (cond
+                            (entry (set-option sh (third entry) enable))
+                            (t (format *error-output*
+                                       "set: ~C: invalid option~%" c)
+                               (return-from builtin 2)))))
+                      (pop rest)))))
              (t (setf saw-params t) (return)))))
        (when saw-params (set-positional sh rest)))
      0)))

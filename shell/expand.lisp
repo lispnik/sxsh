@@ -17,7 +17,8 @@
 ;;;   :lit    ordinary literal (from source, unquoted) -- eligible for globbing
 ;;;   :quoted came from inside quotes or escaped -- never split, never glob
 ;;;   :split  came from an unquoted expansion -- eligible for IFS splitting
-;;; Globbing metacharacters are only active for :lit chars.
+;;; Globbing metacharacters are active for :lit AND :split (POSIX 2.6 globs
+;;; the results of unquoted expansions); :quoted never splits and never globs.
 
 (defstruct (xchar (:constructor make-xchar (char class)))
   char class)                           ; class in (:lit :quoted :split)
@@ -308,7 +309,11 @@ interactive."
     (when (opt sh :xtrace)   (write-char #\x s))
     (when (opt sh :nounset)  (write-char #\u s))
     (when (opt sh :noglob)   (write-char #\f s))
-    (when (opt sh :monitor)  (write-char #\m s))))
+    (when (opt sh :monitor)  (write-char #\m s))
+    (when (opt sh :allexport) (write-char #\a s))
+    (when (opt sh :noclobber) (write-char #\C s))
+    (when (opt sh :noexec)   (write-char #\n s))
+    (when (opt sh :verbose)  (write-char #\v s))))
 
 (defun ifs-first (sh)
   (let ((ifs (or (nth-value 0 (get-var sh "IFS")) "")))
@@ -595,8 +600,19 @@ empty field."
 ;;; Pathname expansion (globbing) -- honoring quoted vs literal metachars
 ;;; ---------------------------------------------------------------------------
 
+(defun glob-active-p (class)
+  "True for xchar classes whose metacharacters take part in pathname expansion.
+
+POSIX 2.6 applies pathname expansion to the results of *unquoted* expansions,
+so :split characters -- those produced by an unquoted parameter or command
+substitution -- glob exactly like literal source text. Restricting this to
+:lit, as it once was, meant `p=*.c; echo $p\' printed the pattern instead of
+the files, and likewise for $(...) output and \"$@\" elements. Only :quoted is
+exempt, which is what keeps `echo \"*\"' literal."
+  (member class '(:lit :split)))
+
 (defun field-has-glob-p (field)
-  (some (lambda (xc) (and (eq (xchar-class xc) :lit)
+  (some (lambda (xc) (and (glob-active-p (xchar-class xc))
                           (member (xchar-char xc) '(#\* #\? #\[))))
         field))
 
@@ -623,7 +639,7 @@ NUL sentinels so they match literally."
       (unless (member (xchar-class xc) '(:anchor :field-sep))
         (let ((c (xchar-char xc)))
           (if (and (member c '(#\* #\? #\[ #\]))
-                   (not (eq (xchar-class xc) :lit)))
+                   (not (glob-active-p (xchar-class xc))))
               (progn (write-char #\Nul s) (write-char c s))  ; literal metachar
               (write-char c s)))))))
 
@@ -724,8 +740,46 @@ converting it into a bracket expression when it's a metachar."
          (when (or (>= si sn) (char/= pc (char s si))) (return nil))
          (incf pp) (incf si))))))
 
+(defun char-class-member-p (name ch)
+  "True if CH belongs to the POSIX character class NAME (without the [: :])."
+  (cond
+    ((string= name "alpha") (alpha-char-p ch))
+    ((string= name "digit") (digit-char-p ch))
+    ((string= name "alnum") (alphanumericp ch))
+    ((string= name "upper") (upper-case-p ch))
+    ((string= name "lower") (lower-case-p ch))
+    ((string= name "space") (member ch '(#\Space #\Tab #\Newline #\Page #\Return
+                                         #\Vt)))
+    ((string= name "blank") (member ch '(#\Space #\Tab)))
+    ((string= name "print") (and (graphic-char-p ch) (char/= ch #\Rubout)))
+    ((string= name "graph") (and (graphic-char-p ch) (char/= ch #\Space)
+                                 (char/= ch #\Rubout)))
+    ((string= name "cntrl") (or (< (char-code ch) 32) (= (char-code ch) 127)))
+    ((string= name "punct") (and (graphic-char-p ch)
+                                 (char/= ch #\Space)
+                                 (not (alphanumericp ch))))
+    ((string= name "xdigit") (digit-char-p ch 16))
+    (t nil)))                           ; unknown class matches nothing
+
+(defun bracket-delimited (p i pe open close)
+  "Scan a [: :] / [= =] / [. .] construct starting at P[i] (the '[').
+Returns (values contents index-past-close) or (values nil nil) if unterminated."
+  (when (and (< (1+ i) pe) (char= (char p (1+ i)) open))
+    (let ((j (+ i 2)))
+      (loop
+        (when (>= (1+ j) pe) (return (values nil nil)))
+        (when (and (char= (char p j) close) (char= (char p (1+ j)) #\]))
+          (return (values (subseq p (+ i 2) j) (+ j 2))))
+        (incf j)))))
+
 (defun match-bracket (p pp pe s si sn)
-  "Match a [..] bracket expression at P[pp]. Returns (values matched-p next-pp)."
+  "Match a [..] bracket expression at P[pp]. Returns (values matched-p next-pp).
+
+Handles the POSIX bracket-expression forms (XBD 9.3.5): negation with ! or ^,
+ranges, character classes [:alpha:], equivalence classes [=a=] and collating
+symbols [.a.]. The class forms are what `[[:digit:]]' relies on; without them
+that pattern was read as the ordinary set {[,:,d,i,g,t} and matched the wrong
+characters entirely."
   (when (>= si sn) (return-from match-bracket (values nil pe)))
   (let ((i (1+ pp)) (negate nil) (matched nil) (ch (char s si)))
     (when (and (< i pe) (member (char p i) '(#\! #\^)))
@@ -737,6 +791,26 @@ converting it into a bracket expression when it's a metachar."
           (cond
             ((and (char= c #\]) (> i start))
              (incf i) (return))
+            ;; [:class:]
+            ((char= c #\[)
+             (multiple-value-bind (name next) (bracket-delimited p i pe #\: #\:)
+               (cond
+                 (name (when (char-class-member-p name ch) (setf matched t))
+                       (setf i next))
+                 (t
+                  ;; [=a=] and [.a.] have no locale weight here: both stand for
+                  ;; the literal character they enclose.
+                  (multiple-value-bind (eq next) (bracket-delimited p i pe #\= #\=)
+                    (multiple-value-bind (coll cnext)
+                        (if eq (values nil nil) (bracket-delimited p i pe #\. #\.))
+                      (let ((lit (or eq coll)) (nxt (or next cnext)))
+                        (cond
+                          (lit (when (and (plusp (length lit))
+                                          (char= (char lit 0) ch))
+                                 (setf matched t))
+                               (setf i nxt))
+                          (t (when (char= c ch) (setf matched t))
+                             (incf i))))))))))
             ;; range a-z
             ((and (< (+ i 2) pe) (char= (char p (1+ i)) #\-)
                   (char/= (char p (+ i 2)) #\]))
