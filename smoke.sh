@@ -249,6 +249,24 @@ check read-escaped-delim '[a:b][]'   0 'printf "a\\\\:b\n" | { IFS=: read x y; e
 check read-continuation '[ab]'       0 'printf "a\\\\\nb\n" | { read x; echo "[$x]"; }'
 check read-while-no-nl  'got:l1'     0 'printf "l1\nl2" | { while read l; do echo "got:$l"; done; }'
 
+# --- trap listing order and subshell trap isolation -----------------------
+check trap-order        "trap -- 'echo t' EXIT
+trap -- 'echo t' SIGINT
+trap -- 'echo t' SIGTERM
+t"                              0 'trap "echo t" EXIT INT TERM; trap'
+check trap-order-stable "trap -- 'echo b' SIGINT
+trap -- 'echo a' SIGTERM" 0 'trap "echo a" TERM; trap "echo b" INT; trap'
+check trap-subshell-own 'in
+S
+after'                          0 "(trap 'echo S' EXIT; echo in); echo after"
+check trap-parent-once  'sub
+after
+P'                              0 "trap 'echo P' EXIT; (echo sub); echo after"
+check trap-cmdsub-once  'cs
+after
+P'                              0 "trap 'echo P' EXIT; echo \$(echo cs); echo after"
+check trap-no-leak      ''      0 "(trap 'echo S' INT; :); trap"
+
 # --- quoted metacharacters stay inert in patterns --------------------------
 check pat-escaped-star-no  'glob' 0 'case "axb" in a\*b) echo lit;; *) echo glob;; esac'
 check pat-escaped-star-yes 'lit'  0 'case "a*b" in a\*b) echo lit;; *) echo glob;; esac'

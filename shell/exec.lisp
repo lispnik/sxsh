@@ -779,21 +779,31 @@ and run it in-process. State changes (cd, var sets) are rolled back."
    (lambda ()
      (let ((snap (snapshot-shell sh)))
        (unwind-protect
-            (handler-case (exec-node sh (subshell-body node))
-              (shell-exit (e) (or (shell-exit-code e) 0)))
+            (progn
+              ;; The parent's EXIT trap belongs to the parent: it must fire
+              ;; when the shell exits, not each time a subshell ends. One set
+              ;; INSIDE the subshell does fire here, when the subshell ends.
+              (remhash "EXIT" (shell-traps sh))
+              (prog1 (handler-case (exec-node sh (subshell-body node))
+                       (shell-exit (e) (or (shell-exit-code e) 0)))
+                (run-exit-traps sh)))
          (restore-shell sh snap))))))
 
 (defun snapshot-shell (sh)
   (list (alexandria-copy-hash (shell-vars sh))
         (alexandria-copy-hash (shell-functions sh))
         (copy-seq (shell-positional sh))
-        (ignore-errors (current-directory))))
+        (ignore-errors (current-directory))
+        ;; traps are shell state too: without this, `(trap "..." EXIT)' leaked
+        ;; out and fired when the whole shell exited
+        (alexandria-copy-hash (shell-traps sh))))
 
 (defun restore-shell (sh snap)
-  (destructuring-bind (vars funcs pos cwd) snap
+  (destructuring-bind (vars funcs pos cwd traps) snap
     (setf (shell-vars sh) vars
           (shell-functions sh) funcs
-          (shell-positional sh) pos)
+          (shell-positional sh) pos
+          (shell-traps sh) traps)
     (when cwd (ignore-errors (change-directory cwd)))))
 
 (defun alexandria-copy-hash (ht)

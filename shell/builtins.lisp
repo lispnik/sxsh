@@ -677,14 +677,26 @@ be re-read to restore the current settings."
 EXIT is not a signal and keeps its bare name."
   (if (string= cond-name "EXIT") "EXIT" (concatenate 'string "SIG" cond-name)))
 
+(defun trap-sort-key (cond-name)
+  "Ordering key for a trap listing: EXIT is condition 0, signals sort by number."
+  (if (string= cond-name "EXIT") 0 (or (signal-number cond-name) 1000)))
+
 (defun print-traps (sh out &optional conds)
+  "List traps in signal-number order, EXIT first.
+
+Hash-table order is arbitrary, so the listing came out differently from run to
+run -- useless for a script that diffs `trap' output, and not what any other
+shell does."
   (flet ((show (k v) (format out "trap -- '~A' ~A~%" v (trap-display-name k))))
     (if conds
         (dolist (c conds)
           (let ((k (normalize-signal c)))
             (multiple-value-bind (v found) (gethash k (shell-traps sh))
               (when found (show k v)))))
-        (maphash #'show (shell-traps sh))))
+        (let ((entries '()))
+          (maphash (lambda (k v) (push (cons k v) entries)) (shell-traps sh))
+          (dolist (e (sort entries #'< :key (lambda (e) (trap-sort-key (car e)))))
+            (show (car e) (cdr e))))))
   0)
 
 (defun valid-condition-p (name)
