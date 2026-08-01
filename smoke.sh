@@ -249,6 +249,21 @@ check read-escaped-delim '[a:b][]'   0 'printf "a\\\\:b\n" | { IFS=: read x y; e
 check read-continuation '[ab]'       0 'printf "a\\\\\nb\n" | { read x; echo "[$x]"; }'
 check read-while-no-nl  'got:l1'     0 'printf "l1\nl2" | { while read l; do echo "got:$l"; done; }'
 
+# --- quoted metacharacters stay inert in patterns --------------------------
+check pat-escaped-star-no  'glob' 0 'case "axb" in a\*b) echo lit;; *) echo glob;; esac'
+check pat-escaped-star-yes 'lit'  0 'case "a*b" in a\*b) echo lit;; *) echo glob;; esac'
+check pat-quoted-star      'lit'  0 'case "a*b" in "a*b") echo lit;; *) echo glob;; esac'
+check pat-escaped-dash     'y'    0 'case "-" in [a\-z]) echo y;; *) echo n;; esac'
+check pat-escaped-dash-neg 'n'    0 'case "b" in [a\-z]) echo y;; *) echo n;; esac'
+check pat-var-globs        'glob' 0 'v="a*b"; case "axb" in $v) echo glob;; *) echo lit;; esac'
+check pat-plain-star       'y'    0 'case abc in a*) echo y;; esac'
+check pat-bracket-rbracket 'y'    0 'case "]" in []]) echo y;; *) echo n;; esac'
+
+# --- cd option and path validation ----------------------------------------
+check cd-double-dash    '/tmp'  0 'cd -- /tmp; pwd'
+check cd-bad-component  ''      1 'cd /tmp/NOPE_xyz/.. 2>/dev/null'
+check pwd-double-dash   'yes'   0 'cd /tmp; [ "$(pwd --)" = /tmp ] && echo yes'
+
 # --- previously-known bugs: command -p, . PATH search, CDPATH, vars -------
 check command-p-runs    'hi'    0 'command -p echo hi'
 check command-p-stdpath '0'     0 'PATH=/nonexistent command -p true; echo $?'

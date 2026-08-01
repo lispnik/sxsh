@@ -536,6 +536,26 @@ separator). Returns NIL if none."
   ;; for our purposes expand params then treat as a pattern string.
   word)
 
+(defun xchars->pattern (xchars)
+  "Render XCHARS as a pattern string, keeping backslash escapes for anything
+that was quoted in the source.
+
+Plain quote removal (XCHARS->STRING) is wrong for a pattern: it drops the
+backslash from `a\\*b' and leaves a live `*', so `case axb in a\\*b)' matched.
+The matcher understands `\\c' as a literal c, so re-emitting the escape is
+enough to keep quoted metacharacters inert."
+  (with-output-to-string (out)
+    (dolist (xc xchars)
+      (case (xchar-class xc)
+        (:anchor)
+        (:field-sep (write-char #\Space out))
+        (t
+         (let ((c (xchar-char xc)))
+           (when (and (eq (xchar-class xc) :quoted)
+                      (find c "*?[]-\\"))
+             (write-char #\\ out))
+           (write-char c out)))))))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Backquote command substitution
 ;;; ---------------------------------------------------------------------------
@@ -757,6 +777,11 @@ converting it into a bracket expression when it's a metachar."
     (when (>= pp pe) (return (>= si sn)))
     (let ((pc (char p pp)))
       (cond
+        ;; a backslash makes the next pattern character literal
+        ((and (char= pc #\\) (< (1+ pp) pe))
+         (when (>= si sn) (return nil))
+         (unless (char= (char p (1+ pp)) (char s si)) (return nil))
+         (incf pp 2) (incf si))
         ((char= pc #\*)
          (incf pp)
          ;; collapse consecutive *
@@ -827,6 +852,10 @@ characters entirely."
           (cond
             ((and (char= c #\]) (> i start))
              (incf i) (return))
+            ;; escaped member: [a\-z] lists a, - and z rather than a range
+            ((and (char= c #\\) (< (1+ i) pe))
+             (when (char= (char p (1+ i)) ch) (setf matched t))
+             (incf i 2))
             ;; [:class:]
             ((char= c #\[)
              (multiple-value-bind (name next) (bracket-delimited p i pe #\: #\:)

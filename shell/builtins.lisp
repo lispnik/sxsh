@@ -125,7 +125,8 @@ format over remaining args like the real printf."
   ;; path with every symlink resolved.
   (let ((physical nil))
     (dolist (a args)
-      (cond ((string= a "-P") (setf physical t))
+      (cond ((string= a "--") (return))
+            ((string= a "-P") (setf physical t))
             ((string= a "-L") (setf physical nil))
             ((and (> (length a) 1) (char= (char a 0) #\-))
              (format *error-output* "pwd: ~A: invalid option~%" a)
@@ -137,6 +138,9 @@ format over remaining args like the real printf."
   (let ((physical nil) (rest args))
     (loop while (and rest (member (first rest) '("-L" "-P") :test #'string=))
           do (setf physical (string= (pop rest) "-P")))
+    ;; `--' ends the options; what follows is the operand even if it looks
+    ;; like one. Without this `cd -- /tmp' counted two arguments and failed.
+    (when (and rest (string= (first rest) "--")) (pop rest))
     (when (cdr rest)
       (format *error-output* "cd: too many arguments~%")
       (return-from builtin 2))
@@ -176,12 +180,16 @@ format over remaining args like the real printf."
                       ;; back to the raw target keeps us working when the
                       ;; lexical path does not exist (symlink chains where
                       ;; link/.. is not the same as the physical parent).
-                      (let ((logical
-                              (canonicalize-logical
-                               (if (and (plusp (length target))
-                                        (char= (char target 0) #\/))
-                                   target
-                                   (concatenate 'string old "/" target)))))
+                      (let* ((raw (if (and (plusp (length target))
+                                           (char= (char target 0) #\/))
+                                      target
+                                      (concatenate 'string old "/" target)))
+                             (logical (canonicalize-logical raw)))
+                        ;; Canonicalising first would let `cd BAD/..' succeed by
+                        ;; cancelling a component that does not exist. POSIX
+                        ;; requires every component of the operand to resolve.
+                        (unless (directoryp raw)
+                          (error "~A: No such file or directory" target))
                         (handler-case (progn (change-directory logical) logical)
                           (error () (change-directory target)))))))
             (setf (shell-logical-cwd sh) new)

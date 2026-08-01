@@ -852,8 +852,10 @@ and run it in-process. State changes (cd, var sets) are rolled back."
     (setf word (or word ""))
     (dolist (item (case-clause-items node) status)
       (when (some (lambda (pat)
-                    (let ((p (first (expand-word-to-fields
-                                     sh (word-text pat) :split nil :glob nil))))
+                    ;; Render with quoting preserved: plain quote removal would
+                    ;; turn `a\*b' into a live wildcard.
+                    (let ((p (xchars->pattern
+                              (expand-pass sh (word-text pat) :tilde nil))))
                       (shell-pattern-match (or p "") word)))
                   (case-item-patterns item))
         (return (if (case-item-body item)
