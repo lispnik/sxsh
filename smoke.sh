@@ -249,6 +249,29 @@ check read-escaped-delim '[a:b][]'   0 'printf "a\\\\:b\n" | { IFS=: read x y; e
 check read-continuation '[ab]'       0 'printf "a\\\\\nb\n" | { read x; echo "[$x]"; }'
 check read-while-no-nl  'got:l1'     0 'printf "l1\nl2" | { while read l; do echo "got:$l"; done; }'
 
+# --- IFS field splitting in expansions (POSIX 2.6.5) ----------------------
+check ifs-unset-default 2       0 'unset IFS; v="a b"; set -- $v; echo $#'
+check ifs-unset-star    'a b'   0 'unset IFS; set -- a b; echo "$*"'
+check ifs-empty-nosplit 1       0 'IFS=; v="a b"; set -- $v; echo $#'
+check ifs-ws-delim-run  2       0 'v="a : b"; IFS=" :"; set -- $v; echo $#'
+check ifs-ws-delim-run2 2       0 'v="a  :  b"; IFS=" :"; set -- $v; echo $#'
+check ifs-empty-field   3       0 'v="a::b"; IFS=:; set -- $v; echo $#'
+check ifs-leading-delim 2       0 'v=":a"; IFS=:; set -- $v; echo $#'
+check ifs-trailing-delim 1      0 'v="a:"; IFS=:; set -- $v; echo $#'
+check ifs-all-ws        0       0 'v="  "; set -- $v; echo $#'
+check ifs-ws-trim       '2|[a][b]' 0 'v="  a  b  "; set -- $v; echo "$#|[$1][$2]"'
+check ifs-unset-read    '[a][b]' 0 'unset IFS; printf "a\tb\n" | { read x y; echo "[$x][$y]"; }'
+
+# --- logical working directory (POSIX cd/pwd -L and -P) -------------------
+check pwd-logical       '/tmp/pl/link' 0 'rm -rf /tmp/pl; mkdir -p /tmp/pl/real; ln -s real /tmp/pl/link; cd /tmp/pl/link; pwd'
+check pwd-physical-opt  'yes'   0 'rm -rf /tmp/pl; mkdir -p /tmp/pl/real; ln -s real /tmp/pl/link; cd /tmp/pl/link; case "$(pwd -P)" in */pl/real) echo yes;; esac'
+check pwd-var-matches   'same'  0 'rm -rf /tmp/pl; mkdir -p /tmp/pl/real; ln -s real /tmp/pl/link; cd /tmp/pl/link; [ "$PWD" = "$(pwd)" ] && echo same'
+check cd-dotdot-logical '/tmp/pl' 0 'rm -rf /tmp/pl; mkdir -p /tmp/pl/real; ln -s real /tmp/pl/link; cd /tmp/pl/link; cd ..; pwd'
+check cd-P-resolves     'yes'   0 'rm -rf /tmp/pl; mkdir -p /tmp/pl/real; ln -s real /tmp/pl/link; cd -P /tmp/pl/link; case "$(pwd)" in */pl/real) echo yes;; esac'
+check pwd-ignores-lie   'yes'   0 'cd /tmp; PWD=/nonexistent-lie; case "$(pwd)" in */tmp) echo yes;; esac'
+check cd-too-many-args  ''      2 'cd a b 2>/dev/null'
+check cd-oldpwd         '/tmp'  0 'cd /tmp; cd /; cd - >/dev/null; pwd'
+
 # --- working directory ----------------------------------------------------
 check cd-pwd            '/usr'      0 'cd /usr; pwd'
 check cd-updates-PWD    '/usr'      0 'cd /usr; echo $PWD'

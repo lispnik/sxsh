@@ -42,6 +42,10 @@
   (pgid nil)
   ;; whether job control is active (interactive + controlling tty)
   (job-control nil)
+  ;; the logical working directory, tracked by `cd' and exported as $PWD.
+  ;; Kept as shell state rather than read back out of $PWD so that assigning
+  ;; to PWD cannot make `pwd' report a directory we are not in.
+  (logical-cwd nil)
   ;; signals received since the last trap check (list of signal-name strings),
   ;; to be handled between commands
   (pending-signals '())
@@ -70,6 +74,17 @@
       (set-var sh "IFS" (format nil " ~C~C" #\Tab #\Newline)))
     (set-var sh "PS1" (if interactive "$ " ""))
     (set-var sh "PS2" "> ")
+    ;; Trust an inherited $PWD only if it really names our current directory;
+    ;; otherwise start from the physical path.
+    (let ((inherited (nth-value 0 (get-var sh "PWD"))))
+      (setf (shell-logical-cwd sh)
+            (if (and inherited (plusp (length inherited))
+                     (char= (char inherited 0) #\/)
+                     (not (path-has-dot-components-p inherited))
+                     (same-directory-p inherited))
+                inherited
+                (current-directory))))
+    (set-var sh "PWD" (shell-logical-cwd sh) :export t)
     sh))
 
 ;;; ---------------------------------------------------------------------------
@@ -98,6 +113,59 @@ pathname operations resolve against the same place. Returns the new cwd."
     (setf *default-pathname-defaults*
           (pathname (concatenate 'string new "/")))
     new))
+
+(defun canonicalize-logical (path)
+  "Lexically canonicalize an absolute PATH: collapse empty components, drop
+`.', and remove `..' together with the component before it -- WITHOUT
+resolving symbolic links.
+
+That last part is the whole point of a logical path: POSIX `cd -L' (the
+default) requires `cd link/..' to return where the user came from, not to
+where the link pointed."
+  (let ((out '()) (part (make-string-output-stream)))
+    (flet ((finish-part ()
+             (let ((p (get-output-stream-string part)))
+               (cond ((or (string= p "") (string= p ".")))
+                     ((string= p "..") (when out (pop out)))
+                     (t (push p out))))))
+      (loop for ch across path
+            do (if (char= ch #\/) (finish-part) (write-char ch part)))
+      (finish-part))
+    (if out
+        (with-output-to-string (s)
+          (dolist (p (nreverse out)) (write-char #\/ s) (write-string p s)))
+        "/")))
+
+(defun path-has-dot-components-p (path)
+  "True if PATH contains a . or .. component."
+  (let ((parts '()) (part (make-string-output-stream)))
+    (flet ((finish-part () (push (get-output-stream-string part) parts)))
+      (loop for ch across path
+            do (if (char= ch #\/) (finish-part) (write-char ch part)))
+      (finish-part))
+    (some (lambda (p) (or (string= p ".") (string= p ".."))) parts)))
+
+(defun same-directory-p (path)
+  "True if PATH names the same directory as the process cwd (device+inode)."
+  (handler-case
+      (let ((a (sb-posix:stat path))
+            (b (sb-posix:stat ".")))
+        (and (= (sb-posix:stat-dev a) (sb-posix:stat-dev b))
+             (= (sb-posix:stat-ino a) (sb-posix:stat-ino b))))
+    (error () nil)))
+
+(defun logical-pwd (sh)
+  "The logical working directory: $PWD when it is usable, else the real one.
+
+POSIX requires $PWD to be an absolute pathname, free of . and .. components,
+that actually names the current directory -- so a stale or fabricated PWD is
+ignored rather than believed."
+  (let ((p (shell-logical-cwd sh)))
+    (if (and p (plusp (length p)) (char= (char p 0) #\/)
+             (not (path-has-dot-components-p p))
+             (same-directory-p p))
+        p
+        (current-directory))))
 
 (defun shell-quote (s)
   "Wrap S in single quotes so it survives re-parsing verbatim."

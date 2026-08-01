@@ -23,6 +23,12 @@
 (defstruct (xchar (:constructor make-xchar (char class)))
   char class)                           ; class in (:lit :quoted :split)
 
+(defparameter +default-ifs+
+  (coerce (list #\Space #\Tab #\Newline) 'string)
+  "IFS when the variable is unset. POSIX distinguishes unset from empty: unset
+behaves as <space><tab><newline>, only an explicitly empty IFS disables field
+splitting. Conflating them made `unset IFS' switch splitting off entirely.")
+
 (defun expand-word-to-fields (sh raw &key (split t) (glob t) (tilde t) assignment)
   "Expand RAW (a word's raw source text) into a list of field strings.
 When SPLIT is nil, no field splitting is done (assignment RHS, here-doc,
@@ -315,8 +321,16 @@ interactive."
     (when (opt sh :noexec)   (write-char #\n s))
     (when (opt sh :verbose)  (write-char #\v s))))
 
+(defun current-ifs (sh)
+  "The effective IFS: its value if set (possibly empty), else the default.
+Every consumer must go through this -- treating unset as \"\" disabled field
+splitting, joined \"$*\" with nothing, and made `read' split on spaces only."
+  (multiple-value-bind (val found) (get-var sh "IFS")
+    (if found val +default-ifs+)))
+
 (defun ifs-first (sh)
-  (let ((ifs (or (nth-value 0 (get-var sh "IFS")) "")))
+  "The first IFS character, used to join \"$*\"."
+  (let ((ifs (current-ifs sh)))
     (if (plusp (length ifs)) (string (char ifs 0)) "")))
 
 (defun join-positional (sh sep)
@@ -568,32 +582,51 @@ empty field."
         (ifs-split-segment sh (first segments)))))
 
 (defun ifs-split-segment (sh xchars)
-  "Apply IFS field splitting to one segment (no hard boundaries inside)."
-  (let* ((ifs (or (nth-value 0 (get-var sh "IFS")) ""))
-         (ws (remove-if-not (lambda (c) (member c '(#\Space #\Tab #\Newline)))
-                            (coerce ifs 'list)))
-         (non-ws (remove-if (lambda (c) (member c '(#\Space #\Tab #\Newline)))
-                            (coerce ifs 'list))))
-    (when (string= ifs "")
-      (return-from ifs-split-segment (list xchars)))  ; no splitting
-    ;; No splittable characters => the segment is a single field verbatim
-    ;; (quoted / literal case, incl. "" -> one empty field, and each "$@"
-    ;; element which is emitted as :quoted).
-    (unless (some (lambda (xc) (eq (xchar-class xc) :split)) xchars)
-      (return-from ifs-split-segment (list xchars)))
-    (let ((fields '()) (cur '()) (cur-real nil))
-      (labels ((ifs-white (c) (member c ws))
-               (ifs-delim (c) (member c non-ws))
-               (flush () (push (nreverse cur) fields) (setf cur nil cur-real nil)))
-        (dolist (xc xchars)
-          (if (eq (xchar-class xc) :split)
-              (let ((c (xchar-char xc)))
-                (cond
-                  ((ifs-white c) (when (or cur cur-real) (flush)))
-                  ((ifs-delim c) (flush))       ; non-ws IFS always ends a field
-                  (t (push xc cur) (setf cur-real t))))
-              (progn (push xc cur) (setf cur-real t))))
-        (when (or cur cur-real) (flush))
+  "Apply IFS field splitting to one segment (no hard boundaries inside).
+
+POSIX 2.6.5 treats IFS as two kinds of character, and a delimiter is a whole
+run rather than a single character: any amount of IFS whitespace, then at most
+one IFS non-whitespace character, then any more IFS whitespace, together form
+ONE field separator. Leading and trailing IFS whitespace is discarded.
+
+Flushing on each IFS character independently -- as this once did -- turned
+`a : b' with IFS=\" :\" into three fields, the middle one empty."
+  (let ()
+    (let* ((ifs (current-ifs sh))
+           (ws (remove-if-not (lambda (c) (member c '(#\Space #\Tab #\Newline)))
+                              (coerce ifs 'list)))
+           (non-ws (remove-if (lambda (c) (member c '(#\Space #\Tab #\Newline)))
+                              (coerce ifs 'list))))
+      (when (string= ifs "")
+        (return-from ifs-split-segment (list xchars)))   ; explicit IFS= : no split
+      ;; No splittable characters => the segment is a single field verbatim
+      ;; (quoted / literal case, incl. "" -> one empty field, and each "$@"
+      ;; element which is emitted as :quoted).
+      (unless (some (lambda (xc) (eq (xchar-class xc) :split)) xchars)
+        (return-from ifs-split-segment (list xchars)))
+      (let* ((v (coerce xchars 'vector))
+             (n (length v))
+             (i 0)
+             (fields '()))
+        (labels ((splittable (k) (eq (xchar-class (aref v k)) :split))
+                 (ch (k) (xchar-char (aref v k)))
+                 (ws-at (k) (and (splittable k) (member (ch k) ws)))
+                 (delim-at (k) (and (splittable k) (member (ch k) non-ws)))
+                 (ifs-at (k) (or (ws-at k) (delim-at k)))
+                 (skip-ws () (loop while (and (< i n) (ws-at i)) do (incf i))))
+          (skip-ws)                      ; leading IFS whitespace is discarded
+          (loop
+            ;; Stopping here rather than after consuming a separator is what
+            ;; keeps a trailing delimiter from producing an empty last field.
+            (when (>= i n) (return))
+            (let ((start i))
+              (loop while (and (< i n) (not (ifs-at i))) do (incf i))
+              (push (coerce (subseq v start i) 'list) fields))
+            ;; consume exactly one separator run
+            (skip-ws)
+            (when (and (< i n) (delim-at i))
+              (incf i)
+              (skip-ws))))
         (nreverse fields)))))
 
 ;;; ---------------------------------------------------------------------------

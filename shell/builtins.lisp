@@ -121,24 +121,57 @@ format over remaining args like the real printf."
     (t (princ-to-string arg))))
 
 (define-builtin "pwd" (sh args out)
-  (write-line (current-directory) out)
+  ;; -L (default) prints the logical path, preserving symlinks; -P prints the
+  ;; path with every symlink resolved.
+  (let ((physical nil))
+    (dolist (a args)
+      (cond ((string= a "-P") (setf physical t))
+            ((string= a "-L") (setf physical nil))
+            ((and (> (length a) 1) (char= (char a 0) #\-))
+             (format *error-output* "pwd: ~A: invalid option~%" a)
+             (return-from builtin 2))))
+    (write-line (if physical (current-directory) (logical-pwd sh)) out))
   0)
 
 (define-builtin "cd" (sh args out)
-  (let* ((target (cond ((null args) (or (nth-value 0 (get-var sh "HOME")) "/"))
-                       ((string= (first args) "-")
-                        (or (nth-value 0 (get-var sh "OLDPWD"))
-                            (return-from builtin 1)))
-                       (t (first args))))
-         (old (current-directory)))
-    (handler-case
-        (progn
-          (let ((new (change-directory target)))
+  (let ((physical nil) (rest args))
+    (loop while (and rest (member (first rest) '("-L" "-P") :test #'string=))
+          do (setf physical (string= (pop rest) "-P")))
+    (when (cdr rest)
+      (format *error-output* "cd: too many arguments~%")
+      (return-from builtin 2))
+    (let* ((arg (first rest))
+           (to-oldpwd (equal arg "-"))
+           (target (cond ((null arg) (or (nth-value 0 (get-var sh "HOME")) "/"))
+                         (to-oldpwd
+                          (or (nth-value 0 (get-var sh "OLDPWD"))
+                              (progn (format *error-output* "cd: OLDPWD not set~%")
+                                     (return-from builtin 1))))
+                         (t arg)))
+           (old (logical-pwd sh)))
+      (handler-case
+          (let ((new
+                  (if physical
+                      (change-directory target)
+                      ;; Logical mode: resolve the target against $PWD and
+                      ;; canonicalize lexically, then chdir to THAT. Falling
+                      ;; back to the raw target keeps us working when the
+                      ;; lexical path does not exist (symlink chains where
+                      ;; link/.. is not the same as the physical parent).
+                      (let ((logical
+                              (canonicalize-logical
+                               (if (and (plusp (length target))
+                                        (char= (char target 0) #\/))
+                                   target
+                                   (concatenate 'string old "/" target)))))
+                        (handler-case (progn (change-directory logical) logical)
+                          (error () (change-directory target)))))))
+            (setf (shell-logical-cwd sh) new)
             (set-var sh "OLDPWD" old :export t)
             (set-var sh "PWD" new :export t)
-            (when (string= (or (first args) "") "-") (write-line new out)))
-          0)
-      (error (e) (format *error-output* "cd: ~A~%" e) 1))))
+            (when to-oldpwd (write-line new out))
+            0)
+        (error (e) (format *error-output* "cd: ~A~%" e) 1)))))
 
 (define-builtin "export" (sh args out)
   ;; `export -p' is the POSIX-specified way to list exported variables in a
@@ -227,7 +260,7 @@ format over remaining args like the real printf."
       (let ((status (if eof-no-newline 1 0)))
         (if (null names)
             (progn (set-var sh "REPLY" line) status)
-            (let* ((ifs (or (nth-value 0 (get-var sh "IFS")) " "))
+            (let* ((ifs (current-ifs sh))
                    (parts (split-on-ifs line ifs (length names) escaped)))
               (loop for nm in names for i from 0
                     do (set-var sh nm (or (nth i parts) "")))
