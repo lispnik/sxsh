@@ -38,7 +38,14 @@ OILS = os.path.join(ROOT, 'third_party', 'oils')
 SPEC_DIR = os.path.join(OILS, 'spec')
 SPEC_BIN = os.path.join(OILS, 'spec', 'bin')
 SH_SPEC = os.path.join(OILS, 'test', 'sh_spec.py')
-SXSH = os.path.join(ROOT, 'bin', 'sxsh')
+# SXSH_SHELL scores a different shell against the same corpus. That is what
+# makes our own number interpretable: a raw pass rate counts bash extensions
+# (arrays, [[ ]], ${x^^}) and cases that depend on the test environment as
+# failures. `SXSH_SHELL=/opt/homebrew/bin/bash make oils' gives the ceiling --
+# the tilde file expects a user `bar' with home /home/bar, so bash scores 7/14
+# on this machine too, and those seven say nothing about our conformance.
+# Compare against that, not against 100%.
+SXSH = os.environ.get('SXSH_SHELL') or os.path.join(ROOT, 'bin', 'sxsh')
 TMP = os.path.join(os.environ.get('TMPDIR', '/tmp'), 'sxsh-oils-spec')
 
 
