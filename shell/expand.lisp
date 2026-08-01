@@ -128,9 +128,12 @@ PATH=~/a:~/b rule)."
                (dolist (ch (coerce str 'list)) (emit ch :split))
                (setf i next start-of-field nil)))
             (t (emit c :lit) (incf i)
-               ;; In an assignment, a ':' re-enables tilde expansion for the
-               ;; next segment (PATH=~/a:~/b); otherwise clear start-of-field.
-               (setf start-of-field (and assignment (char= c #\:))))))))
+               ;; In an assignment context, tilde expansion is re-enabled after
+               ;; the '=' and after each unquoted ':' -- that is what makes
+               ;; both `x=~' and `PATH=~/a:~/b' work. Outside one, a tilde is
+               ;; only special at the very start of the word.
+               (setf start-of-field (and assignment
+                                         (or (char= c #\:) (char= c #\=)))))))))
     (nreverse out)))
 
 (defun expand-double (sh raw i n emit &optional emit-field-sep)

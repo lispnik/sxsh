@@ -335,13 +335,38 @@ substitution twice when the test and the spawn each expanded independently."
                 words))
       (values nil nil)))
 
+(defparameter +declaration-utilities+ '("export" "readonly")
+  "Utilities whose `name=value' operands are expanded as assignments.
+
+POSIX 2.9.1: for these, a word of that form is treated the way a real
+assignment would be, so the tilde after `=' (and after each unquoted `:')
+expands. Without this `export PATH=~/bin' exported a literal ~.")
+
+(defun assignment-operand-p (raw)
+  "True if RAW has the shape name=value."
+  (let ((eq (position #\= raw)))
+    (and eq (plusp eq)
+         (let ((name (subseq raw 0 eq)))
+           (and (or (alpha-char-p (char name 0)) (char= (char name 0) #\_))
+                (every (lambda (c) (or (alphanumericp c) (char= c #\_)))
+                       name))))))
+
 (defun expand-command-words (sh cmd)
   "Expand the word list of a simple command into argv (no assignments).
 Applies alias substitution to the command name (first word)."
-  (let ((argv '()))
+  (let ((argv '()) (declaration nil) (first t))
     (dolist (w (simple-command-words cmd))
-      (dolist (f (expand-word-to-fields sh (word-text w)))
-        (push f argv)))
+      (let* ((raw (word-text w))
+             (fields (expand-word-to-fields
+                      sh raw
+                      ;; operands of export/readonly expand like assignments
+                      :assignment (and declaration (assignment-operand-p raw)))))
+        (when first
+          (setf declaration (and (member (first fields) +declaration-utilities+
+                                         :test #'string=)
+                                 t)
+                first nil))
+        (dolist (f fields) (push f argv))))
     (setf argv (nreverse argv))
     (apply-alias sh argv)))
 

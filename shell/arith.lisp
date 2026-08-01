@@ -56,9 +56,13 @@ condition -- \"arithmetic error DIVISION-BY-ZERO signalled / Operation was
                   (push-op three) (incf i 3))
                  ((and two (member two '("==" "!=" "<=" ">=" "&&" "||" "<<" ">>"
                                          "+=" "-=" "*=" "/=" "%=" "&=" "|=" "^="
-                                         "**")
+                                         "**" "++" "--")
                                    :test #'string=))
                   (push-op two) (incf i 2))
+                 ((char= c #\.)
+                  ;; POSIX arithmetic is integer-only; `1.5' is a syntax error
+                  ;; rather than something to truncate silently.
+                  (error "invalid arithmetic operator: ~A" (subseq s i)))
                  (t (push-op (string c)) (incf i)))))))))
     (nreverse toks)))
 
@@ -72,9 +76,21 @@ condition -- \"arithmetic error DIVISION-BY-ZERO signalled / Operation was
                           (and tk (eq (atok-kind tk) :op)
                                (string= (atok-value tk) str))))
              (eat (str) (if (op? str) (progn (next) t) nil))
-             (val (name) (let ((v (nth-value 0 (get-var sh name))))
-                           (if (and v (plusp (length v)))
-                               (or (ignore-errors (eval-arith sh v)) 0) 0)))
+             (val (name)
+               (multiple-value-bind (v found) (get-var sh name)
+                 (when (and (not found) (opt sh :nounset))
+                   (error 'shell-unset-var :name name))
+                 (if (and v (plusp (length v)))
+                     (or (ignore-errors (eval-arith sh v)) 0)
+                     0)))
+             (store (name value) (set-var sh name (princ-to-string value)) value)
+             ;; ++name / --name : update, yield the NEW value
+             (p-preincr (delta)
+               (let ((tk (peek)))
+                 (unless (and tk (eq (atok-kind tk) :name))
+                   (error "arithmetic: operand expected"))
+                 (let ((name (atok-value (next))))
+                   (store name (+ (val name) delta)))))
              ;; expression : assignment {, assignment}
              (p-comma ()
                (let ((v (p-assign)))
@@ -177,10 +193,18 @@ condition -- \"arithmetic error DIVISION-BY-ZERO signalled / Operation was
              (p-power ()
                (let ((base (p-unary)))
                  (if (op? "**")
-                     (progn (next) (expt base (p-power)))  ; right-associative
+                     (progn (next)
+                            (let ((e (p-power)))
+                              (when (minusp e)
+                                ;; (expt 2 -1) is the rational 1/2 in Lisp, and
+                                ;; printing that produced the literal "1/2".
+                                (error "exponent less than 0"))
+                              (expt base e)))  ; right-associative
                      base)))
              (p-unary ()
-               (cond ((eat "+") (p-unary))
+               (cond ((eat "++") (p-preincr 1))
+                     ((eat "--") (p-preincr -1))
+                     ((eat "+") (p-unary))
                      ((eat "-") (- (p-unary)))
                      ((eat "!") (if (= 0 (p-unary)) 1 0))
                      ((eat "~") (lognot (p-unary)))
@@ -191,6 +215,14 @@ condition -- \"arithmetic error DIVISION-BY-ZERO signalled / Operation was
                    ((null tk) 0)
                    ((op? "(") (next) (prog1 (p-comma) (eat ")")))
                    ((eq (atok-kind tk) :num) (atok-value (next)))
-                   ((eq (atok-kind tk) :name) (val (atok-value (next))))
+                   ((eq (atok-kind tk) :name)
+                    (let ((name (atok-value (next))))
+                      (cond
+                        ;; postfix: yields the value from before the update
+                        ((eat "++") (let ((old (val name)))
+                                      (store name (1+ old)) old))
+                        ((eat "--") (let ((old (val name)))
+                                      (store name (1- old)) old))
+                        (t (val name)))))
                    (t (next) 0)))))
       (if (zerop (length toks)) 0 (p-comma)))))

@@ -249,6 +249,37 @@ check read-escaped-delim '[a:b][]'   0 'printf "a\\\\:b\n" | { IFS=: read x y; e
 check read-continuation '[ab]'       0 'printf "a\\\\\nb\n" | { read x; echo "[$x]"; }'
 check read-while-no-nl  'got:l1'     0 'printf "l1\nl2" | { while read l; do echo "got:$l"; done; }'
 
+# --- arithmetic: increment/decrement and integer-only errors --------------
+check arith-postincr    '1
+2'                              0 'x=1; echo $((x++)); echo $x'
+check arith-preincr     '2
+2'                              0 'x=1; echo $((++x)); echo $x'
+check arith-postdecr    '5
+4'                              0 'x=5; echo $((x--)); echo $x'
+check arith-predecr     '4
+4'                              0 'x=5; echo $((--x)); echo $x'
+check arith-incr-unset  '0
+1'                              0 'echo $((y++)); echo $y'
+check arith-compound    '3
+3'                              0 'x=1; echo $((x+=2)); echo $x'
+check_err arith-neg-exponent 'exponent less than 0' 1 'echo $((2**-1))'
+check_err arith-float   'invalid arithmetic operator' 1 'echo $((1.5))'
+check_err arith-nounset 'parameter not set'    1 'set -u; echo $((undef))'
+check arith-exp-ok      '8'     0 'echo $((2**3))'
+
+# --- tilde expansion (POSIX 2.6.1) ----------------------------------------
+check tilde-word        'yes'   0 '[ "$(echo ~)" = "$HOME" ] && echo yes'
+check tilde-assign      'yes'   0 'x=~; [ "$x" = "$HOME" ] && echo yes'
+check tilde-after-colon 'yes'   0 'x=a:~; [ "$x" = "a:$HOME" ] && echo yes'
+check tilde-export      'yes'   0 'export x=~; [ "$x" = "$HOME" ] && echo yes'
+check tilde-readonly    'yes'   0 'readonly x=~; [ "$x" = "$HOME" ] && echo yes'
+check tilde-export-path 'yes'   0 'export p=a:~:b; [ "$p" = "a:$HOME:b" ] && echo yes'
+check tilde-quoted      '~'     0 'echo "~"'
+check tilde-default-sub 'yes'   0 '[ "$(echo ${undef:-~})" = "$HOME" ] && echo yes'
+# zsh and POSIX agree that a plain operand is NOT an assignment context; bash
+# expands here as an extension, so this deliberately differs from bash.
+check tilde-plain-operand 'a=~' 0 'echo a=~'
+
 # --- IFS field splitting in expansions (POSIX 2.6.5) ----------------------
 check ifs-unset-default 2       0 'unset IFS; v="a b"; set -- $v; echo $#'
 check ifs-unset-star    'a b'   0 'unset IFS; set -- a b; echo "$*"'
