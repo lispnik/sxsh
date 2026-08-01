@@ -145,6 +145,12 @@ because the trap's own `echo' overwrote the 3."
               1)
             (readonly-violation (e)
               (format *error-output* "sxsh: ~A~%" e)
+              ;; POSIX 2.8.1: a variable assignment error is fatal to a
+              ;; non-interactive shell. Reporting and carrying on let a script
+              ;; run past a failed assignment with the old value still in
+              ;; place, which is exactly what readonly exists to prevent.
+              (unless (shell-interactive sh)
+                (signal 'shell-exit :code 1))
               1))))
     (setf (shell-last-status sh) status)
     (maybe-errexit sh status node)
@@ -201,7 +207,12 @@ safe points between commands. Signals are handled in the order received."
       (dolist (sig sigs)
         (multiple-value-bind (action found) (gethash sig (shell-traps sh))
           (when (and found (plusp (length action)))
-            (handler-case (run sh (parse-string action))
+            ;; Dispatch the nodes directly rather than through RUN: RUN catches
+            ;; SHELL-EXIT and turns it into a status, so an `exit' inside a
+            ;; trap action never reached the handler below and the shell
+            ;; carried on -- `trap "exit 9" TERM' did nothing on TERM.
+            (handler-case
+                (dolist (node (parse-string action)) (exec-node sh node))
               (shell-exit (e)
                 (setf (shell-last-status sh) (or (shell-exit-code e) 0))
                 (signal 'shell-exit :code (shell-last-status sh)))
@@ -586,10 +597,19 @@ words, apply NODE's redirections permanently to the shell."
         0)
       ;; exec a command: spawn it, and on success replace the shell (exit with
       ;; its status). A failure to find the command is fatal to the shell.
+      ;;
+      ;; The redirections are part of the exec and take effect before it, so
+      ;; `exec nosuchcmd 2>/dev/null' must swallow the diagnostic. Applying
+      ;; them only inside the spawn meant the message escaped to the shell's
+      ;; own stderr when the lookup failed.
       (let ((prog (find-in-path sh (first exec-words))))
         (if (null prog)
-            (progn (format *error-output* "exec: ~A: not found~%" (first exec-words))
-                   (signal 'shell-exit :code 127) 127)
+            (progn
+              (ignore-errors
+               (apply-redirects-in-process sh (simple-command-redirects node)))
+              (format *error-output* "exec: ~A: not found~%" (first exec-words))
+              (finish-output *error-output*)
+              (signal 'shell-exit :code 127) 127)
             (let ((pid (spawn-external-words sh node exec-words)))
               (let ((status (wait-for pid)))
                 (signal 'shell-exit :code status)

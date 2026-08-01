@@ -108,16 +108,22 @@
   (check "getopts-arg" "set -- -f data; getopts f: o; echo $o=$OPTARG"
          (format nil "f=data~%"))
   (check "trap-exit" "trap 'echo bye' EXIT; echo hi" (format nil "hi~%bye~%"))
-  (check "readonly-keeps" "readonly x=1; x=2 2>/dev/null; echo $x" (format nil "1~%"))
-  (check-status "readonly-status" "readonly x=1; x=2 2>/dev/null; true" 0)
+  ;; POSIX 2.8.1 makes a variable assignment error fatal to a non-interactive
+  ;; shell, so nothing after the failed assignment runs. These two used to
+  ;; assert that execution continued, which bash and zsh both disagree with.
+  (check "readonly-fatal" "readonly x=1; x=2 2>/dev/null; echo REACHED" "")
+  (check-status "readonly-status" "readonly x=1; x=2 2>/dev/null; true" 1)
+  (check "readonly-ok" "readonly x=1; echo $x" (format nil "1~%"))
   (check "alias-basic" "alias g='echo aliased'; g" (format nil "aliased~%"))
   (check "alias-selfref" "alias ls='ls -x'; alias ls" (format nil "alias ls='ls -x'~%"))
   (check "unalias" "alias q=x; unalias q; alias q 2>/dev/null; echo ok" (format nil "ok~%"))
   (check "read-reply" "printf 'hello there\\n' | { read; echo $REPLY; }"
          (format nil "hello there~%"))
   (check "read-p" "printf 'val\\n' | { read -p '' x; echo $x; }" (format nil "val~%"))
+  ;; `type' writes its not-found diagnostic to stderr, so 2>/dev/null hides it.
   (check "unset-f" "f(){ echo hi; }; unset -f f; type f 2>/dev/null; echo done"
-         (format nil "f: not found~%done~%"))
+         (format nil "done~%"))
+  (check-status "type-notfound-status" "type nosuchcmd_zz 2>/dev/null" 1)
   (check "wait-all" "sleep 0.05 & sleep 0.05 & wait; echo waited" (format nil "waited~%"))
   (check "umask-roundtrip" "umask 022; umask" (format nil "0022~%"))
   ;; times: two lines, each "MmS.SSSs MmS.SSSs"

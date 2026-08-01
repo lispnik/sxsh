@@ -684,13 +684,19 @@ be re-read to restore the current settings."
 (setf (gethash "source" *builtins*) (gethash "." *builtins*))
 
 (define-builtin "type" (sh args out)
-  (dolist (a args)
-    (cond ((builtin-p a) (format out "~A is a shell builtin~%" a))
-          ((gethash a (shell-functions sh)) (format out "~A is a function~%" a))
-          (t (let ((p (find-in-path sh a)))
-               (if p (format out "~A is ~A~%" a p)
-                   (format out "~A: not found~%" a))))))
-  0)
+  ;; POSIX: the status is non-zero if any operand could not be found, and the
+  ;; diagnostic belongs on stderr -- writing it to stdout with status 0 made
+  ;; `type foo >/dev/null && ...' succeed for a command that does not exist.
+  (let ((status 0))
+    (dolist (a args status)
+      (cond ((builtin-p a) (format out "~A is a shell builtin~%" a))
+            ((gethash a (shell-functions sh)) (format out "~A is a function~%" a))
+            ((gethash a (shell-aliases sh))
+             (format out "~A is an alias for ~A~%" a (gethash a (shell-aliases sh))))
+            (t (let ((p (find-in-path sh a)))
+                 (cond (p (format out "~A is ~A~%" a p))
+                       (t (format *error-output* "~A: not found~%" a)
+                          (setf status 1)))))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Tier-2 POSIX builtins
@@ -1140,17 +1146,36 @@ meaning that process group. Returns T on success, NIL after reporting."
           0))))
 
 ;;; umask [mask] ----------------------------------------------------------
+(defun umask-symbolic (mask)
+  "Render MASK the way `umask -S' does: the permissions it LEAVES, not the
+bits it clears."
+  (flet ((who (shift)
+           (let ((bits (logandc1 (ldb (byte 3 shift) mask) 7)))
+             (with-output-to-string (s)
+               (when (logtest bits 4) (write-char #\r s))
+               (when (logtest bits 2) (write-char #\w s))
+               (when (logtest bits 1) (write-char #\x s))))))
+    (format nil "u=~A,g=~A,o=~A" (who 6) (who 3) (who 0))))
+
 (define-builtin "umask" (sh args out)
-  (if (null args)
-      (progn (let ((m (sb-posix:umask 0)))
-               (sb-posix:umask m)     ; restore
-               (format out "~4,'0O~%" m))
-             0)
-      (let ((spec (first args)))
-        (handler-case
-            (let ((val (parse-integer spec :radix 8)))
-              (sb-posix:umask val) 0)
-          (error () (format *error-output* "umask: ~A: invalid mask~%" spec) 1)))))
+  (let ((symbolic nil) (rest args))
+    (loop while (and rest (string= (first rest) "-S"))
+          do (pop rest) (setf symbolic t))
+    (cond
+      ((null rest)
+       (let ((m (sb-posix:umask 0)))
+         (sb-posix:umask m)            ; restore
+         (write-line (if symbolic (umask-symbolic m) (format nil "~4,'0O" m)) out))
+       0)
+      (t
+       (let ((spec (first rest)))
+         (handler-case
+             (let ((val (parse-integer spec :radix 8)))
+               (unless (<= 0 val #o777) (error "out of range"))
+               (sb-posix:umask val) 0)
+           (error ()
+             (format *error-output* "umask: ~A: invalid mask~%" spec)
+             1)))))))
 
 ;;; hash -- command location cache; we keep a minimal real cache -----------
 ;;; ulimit ----------------------------------------------------------------

@@ -352,6 +352,31 @@ probe ulimit-set-f      'ulimit -f 100; ulimit -f'
 probe ulimit-builtin    'command -v ulimit'
 probe ulimit-bad-opt    'ulimit -Z 2>/dev/null; echo st=$?'
 
+# --- exec, umask, type (POSIX 2.14) ---------------------------------------
+probe exec-replaces     'exec echo replaced; echo NOTREACHED'
+probe exec-absolute     'exec /bin/echo abs; echo NOTREACHED'
+probe exec-notfound     'exec nosuchcmd_zz 2>/dev/null; echo after'
+probe exec-notfound-msg 'exec nosuchcmd_zz' diag-text
+probe exec-redir-only   'exec 3>&1; echo x >&3; exec 3>&-; echo done'
+probe exec-in-subshell  '(exec echo sub); echo after'
+probe umask-default     'umask'
+probe umask-set         'umask 022; umask'
+probe umask-restrictive 'umask 077; umask'
+probe umask-symbolic    'umask -S'
+probe umask-symbolic-77 'umask 077; umask -S'
+probe umask-invalid     'umask 999 2>/dev/null; echo st=$?'
+probe type-builtin      'type echo'
+probe type-notfound     'type nosuchcmd_zz 2>/dev/null; echo st=$?'
+probe type-guard        'type nosuchcmd_zz >/dev/null 2>&1 && echo found || echo missing'
+probe type-external     'type /bin/sh'
+
+# --- traps that exit, and assignment errors -------------------------------
+probe trap-exit-in-sig  'trap "exit 9" TERM; kill -TERM $$; sleep 0.2; echo NOTREACHED'
+probe trap-exit-usr1    'trap "exit 9" USR1; kill -USR1 $$; sleep 0.2; echo NOTREACHED'
+probe trap-runs-action  'trap "echo T" TERM; kill -TERM $$; sleep 0.2; echo after'
+probe readonly-fatal    'readonly r=1; r=2 2>/dev/null; echo REACHED' diag-text
+probe readonly-ok       'readonly r=1; echo ok'
+
 printf '\nposix-diff: %d passed, %d failed, %d known divergences (ref: %s)\n' \
   "$pass" "$fail" "$skipped" "$("$REF" --version 2>/dev/null | head -1 || echo "$REF")"
 [ "$fail" -eq 0 ]
