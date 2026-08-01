@@ -1,13 +1,16 @@
 # sxsh --- POSIX shell parser + executor in Common Lisp (SBCL only)
 
 LISP    ?= sbcl
-# ocicl is the expected toolchain: its runtime (loaded from ~/.sbclrc by
-# `ocicl setup') supplies ASDF and points the source registry at the current
-# directory. The explicit (require :asdf) is a fallback so the suites still run
-# on a stock SBCL, where `(asdf:test-system ...)' would otherwise fail at READ
-# time with "Package ASDF does not exist" -- which is what CI hit on its first
-# run, because only this developer machine had ocicl configured.
-SBCL    := $(LISP) --non-interactive --eval '(require :asdf)'
+# ocicl is the toolchain: its runtime, loaded from ~/.sbclrc by `ocicl setup',
+# supplies ASDF and points the source registry at the current directory.
+#
+# (require :asdf) is added ONLY when that runtime is absent. Doing it
+# unconditionally loads SBCL's bundled ASDF over ocicl's, after which the
+# system search falls through to ocicl's own finder and dies looking for an
+# ocicl.csv this project has no reason to have.
+OCICL_RUNTIME := $(HOME)/.local/share/ocicl/ocicl-runtime.lisp
+ASDF_FALLBACK := $(if $(wildcard $(OCICL_RUNTIME)),,--eval '(require :asdf)')
+SBCL    := $(LISP) --non-interactive $(ASDF_FALLBACK)
 BINDIR  := bin
 BIN     := $(BINDIR)/sxsh
 CACHE   := $(HOME)/.cache/common-lisp
