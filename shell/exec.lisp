@@ -406,21 +406,46 @@ Applies alias substitution to the command name (first word)."
     (apply-alias sh argv)))
 
 (defun apply-alias (sh argv)
-  "If the first word of ARGV is an alias, replace it with the alias body's
-words (split on whitespace). Guards against self-referential aliases."
+  "Substitute aliases at the front of ARGV.
+
+POSIX 2.3.1: normally only the command word is a candidate, but if the value
+an alias expands to ends in a <blank>, the NEXT word is checked too -- the
+rule that makes `alias sudo=\"sudo \"' expand an aliased command after sudo.
+Without it, `alias g=\"echo \"; alias h=world; g h' printed h instead of world.
+
+Self-reference is guarded per position: an alias may not expand itself, but
+the same name may legitimately reappear once we have moved on to a later word."
   (if (null argv)
       argv
-      (let ((seen '()) (result argv))
+      (let ((out '())          ; already-settled words, reversed
+            (rest argv)
+            (check-next t))
         (loop
-          (let ((head (first result)))
-            (multiple-value-bind (body found) (gethash head (shell-aliases sh))
-              (if (and found (not (member head seen :test #'string=)))
-                  (progn
-                    (push head seen)
-                    ;; naive split of the alias body on spaces/tabs
-                    (let ((parts (remove "" (split-string-ws body) :test #'string=)))
-                      (setf result (append parts (rest result)))))
-                  (return result))))))))
+          (when (or (null rest) (not check-next))
+            (return (nconc (nreverse out) rest)))
+          (let ((seen '()) (expanded nil))
+            ;; expand this position until it is no longer an alias
+            (loop
+              (let ((head (first rest)))
+                (multiple-value-bind (body found) (gethash head (shell-aliases sh))
+                  (if (and found (not (member head seen :test #'string=)))
+                      (progn
+                        (push head seen)
+                        (setf expanded t)
+                        ;; a trailing blank licenses checking the next word
+                        (setf check-next
+                              (and (plusp (length body))
+                                   (member (char body (1- (length body)))
+                                           '(#\Space #\Tab))
+                                   t))
+                        (let ((parts (remove "" (split-string-ws body)
+                                             :test #'string=)))
+                          (setf rest (append parts (cdr rest)))))
+                      (return)))))
+            (unless expanded (setf check-next nil))
+            ;; this position is settled; move past it
+            (when (and check-next rest)
+              (push (pop rest) out)))))))
 
 (defun split-string-ws (s)
   (let ((out '()) (start 0) (n (length s)))

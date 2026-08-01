@@ -249,6 +249,36 @@ check read-escaped-delim '[a:b][]'   0 'printf "a\\\\:b\n" | { IFS=: read x y; e
 check read-continuation '[ab]'       0 'printf "a\\\\\nb\n" | { read x; echo "[$x]"; }'
 check read-while-no-nl  'got:l1'     0 'printf "l1\nl2" | { while read l; do echo "got:$l"; done; }'
 
+# --- ${x:?} and set -u terminate a non-interactive shell ------------------
+# POSIX requires the shell to exit with a non-zero status; the value itself is
+# unspecified (bash uses 127, we and zsh use 1), so only the exit is asserted.
+check colon-question-exits ''    1 'echo ${x:?} 2>/dev/null; echo AFTER'
+check colon-question-msg   ''    1 'echo ${x:?msg} 2>/dev/null; echo AFTER'
+check nounset-exits        ''    1 'set -u; echo $u 2>/dev/null; echo AFTER'
+check_err colon-question-text 'parameter null or not set' 1 'echo ${x:?}'
+check_err colon-question-custom 'msg' 1 'echo ${x:?msg}'
+check colon-question-set   'v'   0 'x=v; echo ${x:?}'
+
+# --- alias substitution (POSIX 2.3.1) -------------------------------------
+# bash cannot be the reference here: it disables aliases in non-interactive
+# shells, its own documented deviation. Verified against zsh instead.
+check alias-basic       'hi'     0 'alias g="echo hi"
+g'
+check alias-trailing-blank 'world' 0 'alias g="echo "
+alias h=world
+g h'
+check alias-blank-extra 'world extra' 0 'alias g="echo "
+alias h=world
+g h extra'
+check alias-no-blank    'hi world' 0 'alias g="echo hi"
+g world'
+check alias-chained     'A'      0 'alias a="echo A"
+alias b=a
+b'
+check alias-listing     "alias g='echo x'" 0 'alias g="echo x"; alias g'
+check alias-unalias     '127'    0 'alias g="echo hi"; unalias g; g 2>/dev/null; echo $?'
+check alias-unalias-all ''       0 'alias g=x; unalias -a; alias'
+
 # --- redirections apply to compound commands ------------------------------
 check heredoc-while     '[a]
 [b]'                            0 'while read l; do echo "[$l]"; done <<EOF

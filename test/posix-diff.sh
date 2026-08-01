@@ -262,6 +262,57 @@ probe shift-too-many 'set -- a; shift 2 2>/dev/null; echo st=$?'
 probe func-nested    'f() { g() { echo nested; }; }; f; g'
 probe return-bare    'f() { return; }; f; echo $?'
 
+# --- parameter expansion corners (POSIX 2.6.2) ----------------------------
+probe pe-unset-dash     'unset x; echo "${x-def}"'
+probe pe-null-dash      'x=; echo "${x-def}"'
+probe pe-null-colondash 'x=; echo "${x:-def}"'
+probe pe-assign         'unset x; echo "${x:=set}$x"'
+probe pe-alt            'x=v; echo "${x:+alt}"'
+probe pe-alt-null       'x=; echo "${x+alt}"'
+# NOTE: no ${x:?} probe. POSIX requires a non-interactive shell to exit with
+# a non-zero status but does not specify which; bash uses 127, we and zsh use
+# 1. The behaviour that IS specified is asserted in smoke.sh.
+probe pe-strip-short    'f=a.b.c; echo "${f#*.}"'
+probe pe-strip-long     'f=a.b.c; echo "${f##*.}"'
+probe pe-suffix-short   'f=a.b.c; echo "${f%.*}"'
+probe pe-suffix-long    'f=a.b.c; echo "${f%%.*}"'
+probe pe-empty-pattern  'f=abc; echo "${f#}"'
+probe pe-nomatch        'f=abc; echo "${f#x}"'
+probe pe-basename       'p=/a/b/c; echo "${p##*/}"'
+probe pe-dirname        'p=/a/b/c; echo "${p%/*}"'
+probe pe-length         'x=abc; echo ${#x}'
+probe pe-argc           'set -- a b; echo ${#}'
+probe pe-adjacent       'x=a; echo "${x}b"'
+probe pe-nounset-dash   'unset u; set -u; echo "${u-ok}"'
+probe pe-undef-concat   'echo ${undefined_zz}extra'
+
+# --- quoting --------------------------------------------------------------
+probe q-dquote-escape   'echo "a\"b"'
+probe q-dollar-escape   'echo "a\$b"'
+probe q-backslash       'echo "a\\b"'
+probe q-escaped-space   'echo a\ b'
+probe q-at-expands      'set -- "a b" c; for i in "$@"; do echo "[$i]"; done'
+probe q-at-empty        'set -- ; for i in "$@"; do echo no; done; echo empty'
+probe q-at-in-word      'set -- a b; echo "x${@}y"'
+probe q-star-ifs        'set -- a b; IFS=-; echo "$*"'
+probe q-nested-cmdsub   'echo "$(echo "nested \"quotes\"")"'
+probe q-adjacent        'echo a"b"c'
+
+# --- exit status propagation ----------------------------------------------
+probe st-subshell       '(exit 3); echo $?'
+probe st-func-return    'f() { return 4; }; f; echo $?'
+probe st-func-last      'f() { false; }; f; echo $?'
+probe st-cmdsub-assign  'x=$(exit 6); echo $?'
+probe st-pipeline-last  'true | false; echo $?'
+probe st-pipeline-first 'false | true; echo $?'
+probe st-negate         '! true; echo $?'
+probe st-if-nomatch     'if false; then :; fi; echo $?'
+probe st-for-empty      'for i in; do :; done; echo $?'
+probe st-case-nomatch   'case x in y) false;; esac; echo $?'
+probe st-eval-false     'eval "false"; echo $?'
+probe st-eval-empty     'eval ""; echo $?'
+probe st-assign-cmdsub  'v=$(true) w=$(false); echo $?'
+
 printf '\nposix-diff: %d passed, %d failed, %d known divergences (ref: %s)\n' \
   "$pass" "$fail" "$skipped" "$REF"
 [ "$fail" -eq 0 ]
