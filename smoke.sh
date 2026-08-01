@@ -465,6 +465,61 @@ else
 firstarg" "$got" "$got_st"
 fi
 
+# --- control flow must not escape its execution environment ---------------
+# Every case here once escaped a boundary it should not cross. The shape that
+# hides such a bug is a construct in a NON-FINAL position -- `return' looked
+# correct for months because every test used it as the last command -- so each
+# case is followed by something that must, or must not, still run.
+
+# A subshell is a separate execution environment: return/break/continue end
+# the subshell and become its status. bash, zsh, dash and bash 3.2 agree.
+check cf-sub-return       'st=4'            0 'f() { (return 4); echo st=$?; }; f'
+check cf-sub-return-nf    'st=4'            0 'f() { (return 4; echo NO); echo st=$?; }; f'
+check cf-sub-return-after 'AFTER'           0 'f() { (return 4); echo AFTER; }; f'
+check cf-sub-exit         'st=5'            0 'f() { (exit 5; echo NO); echo st=$?; }; f'
+check cf-sub-break        'IN
+IN
+done'                                       0 'for i in 1 2; do (break); echo IN; done; echo done'
+check cf-sub-break-nf     'st=0
+st=0'                                       0 'for i in 1 2; do (break; echo NO); echo st=$?; done'
+check cf-sub-continue     'IN
+IN
+done'                                       0 'for i in 1 2; do (continue); echo IN; done; echo done'
+
+# So is a command substitution.
+check cf-csub-return      '[] AFTER'        0 'f() { x=$(return 4; echo NO); echo "[$x] AFTER"; }; f'
+check cf-csub-exit        '[] after'        0 'x=$(exit 3; echo NO); echo "[$x] after"'
+check cf-csub-break       'IN[]
+IN[]
+done'                                       0 'for i in 1 2; do x=$(break; echo NO); echo "IN[$x]"; done; echo done'
+
+# So is each stage of a pipeline (POSIX XCU 2.9.2). `echo a | { exit 4; }'
+# sets the pipeline's status; it does not exit the shell.
+check cf-pipe-return      'AFTER
+st=0'                                       0 'f() { echo a | { return 3; }; echo AFTER; }; f; echo st=$?'
+check cf-pipe-exit        'AFTER st=4'      0 'echo a | { exit 4; }; echo AFTER st=$?'
+check cf-pipe-break       'IN
+IN
+done'                                       0 'for i in 1 2; do echo a | { break; }; echo IN; done; echo done'
+
+# `return' must reach the function, not stop at the builtin. Catching it in
+# RUN-BUILTIN made `return' merely the builtin's exit status, so control
+# carried straight on to the next command.
+check cf-return-nonfinal  ''                1 'f() { return 1; echo NO; }; f'
+check cf-return-nested    'AFTER-G'         0 'f() { g() { return 1; echo NO; }; g; echo AFTER-G; }; f'
+check cf-return-in-loop   'st=2'            0 'f() { while true; do return 2; done; echo NO; }; f; echo st=$?'
+check cf-return-in-case   'st=3'            0 'f() { case a in a) return 3; echo NO;; esac; echo NO2; }; f; echo st=$?'
+check cf-return-in-brace  'st=3'            0 'f() { { return 3; }; echo NO; }; f; echo st=$?'
+check cf-return-andor     'st=3'            0 'f() { true && return 3; echo NO; }; f; echo st=$?'
+check cf-break-n          'done'            0 'for i in 1 2 3; do for j in a b; do break 2; done; echo NO; done; echo done'
+check cf-continue-n       'done'            0 'for i in 1 2; do for j in a b; do continue 2; done; echo NO; done; echo done'
+
+# `exit' ends the shell from anywhere, including a non-final position.
+check cf-exit-in-func     ''                3 'f() { exit 3; echo NO; }; f; echo NO2'
+check cf-exit-in-loop     ''                3 'for i in 1 2; do exit 3; echo NO; done; echo NO2'
+check cf-exit-in-brace    ''                3 '{ exit 3; echo NO; }; echo NO2'
+check cf-exit-in-case     ''                3 'case x in x) exit 3; echo NO;; esac; echo NO2'
+
 # --- stdin / REPL mode ----------------------------------------------------
 got=$(printf 'echo from-stdin\nexit 0\n' | "$SXSH" 2>/dev/null)
 if printf '%s' "$got" | grep -q 'from-stdin'; then

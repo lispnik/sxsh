@@ -232,6 +232,44 @@ expanding a command twice runs them twice. `external-simple-command-p` therefore
 expanded argv as a second value and every caller threads it into `spawn-external`'s `:words`.
 Never call `expand-command-words` a second time on a node someone else already classified.
 
+### Control flow must not escape its execution environment
+
+`return`, `break`, `continue` and `exit` are Lisp conditions (`func-return`, `loop-break`,
+`loop-continue`, `shell-exit`) that unwind to a catcher. Every bug in this class has been the
+same mistake in one of two directions: a catcher too close, swallowing the condition before it
+reaches its target, or no catcher at a boundary that POSIX says is one.
+
+**Too close.** `run-builtin` caught `func-return`, so `return` was merely the exit status of the
+`return` builtin and control carried straight on: `f() { return 1; echo x; }` printed `x`. Do
+not wrap a builtin call in a handler for these conditions. `run` keeps a `func-return` backstop
+because `return` outside a function ends the script being read, as it does in a dot script.
+
+**Missing.** POSIX gives each of these its own execution environment, so control flow ends the
+construct and becomes its status rather than reaching the enclosing loop, function, or shell:
+
+| boundary | catcher |
+|---|---|
+| subshell `( ... )` | `exec-subshell` |
+| command substitution `$( ... )` | `command-substitute` |
+| each stage of a multi-stage pipeline (XCU 2.9.2) | `spawn-stage` |
+
+`echo a | { exit 4; }` sets the pipeline's status to 4; it does not exit the shell. Only
+multi-stage pipelines reach `spawn-stage` — `exec-pipeline-raw` runs a lone command directly —
+so a bare `return` is unaffected by the catcher there.
+
+Two related divergences are **unspecified**, and sxsh follows zsh on both. Do not "fix" them
+toward bash without checking the other shells first:
+
+- `break` inside a function called from a loop: bash and dash error and continue; zsh and
+  bash 3.2 break the caller's loop, which is what sxsh does.
+- `return` in a trap fired outside any function: bash errors and continues; zsh and dash end
+  the script with the return status, which is what sxsh does.
+
+**Test these in a non-final position.** The `return` bug survived for months because every test
+used `return` as the last command in the function, where a swallowed condition and a working
+one look identical. `smoke.sh` has a `cf-*` block that follows each construct with a command
+that must, or must not, still run; ten of those checks fail if the catchers are removed.
+
 ### The dash job's ~20 failures are expected, and were triaged
 
 CI runs `make posix REF_SHELL=/bin/dash` as an informational job. It reports

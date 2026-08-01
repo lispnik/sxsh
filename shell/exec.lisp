@@ -366,7 +366,17 @@ STDIN/STDOUT are fds to attach. CLOSE-IN-CHILD lists pipe fds to close."
              (progn
                (unless (= stdin 0) (sb-posix:dup2 stdin 0))
                (unless (= stdout 1) (sb-posix:dup2 stdout 1))
-               (values nil (exec-node sh cmd)))
+               ;; POSIX: each pipeline stage runs in a subshell environment, so
+               ;; control flow ends the stage and becomes its status -- it does
+               ;; not reach the enclosing shell. `echo a | { exit 4; }' sets the
+               ;; pipeline's status to 4; it does not exit the shell. Only
+               ;; multi-stage pipelines reach here (EXEC-PIPELINE-RAW runs a
+               ;; lone command directly), so a bare `return' is unaffected.
+               (values nil (handler-case (exec-node sh cmd)
+                             (shell-exit (e) (or (shell-exit-code e) 0))
+                             (func-return (e) (or (cf-code e) 0))
+                             (loop-break () 0)
+                             (loop-continue () 0))))
           (sb-posix:dup2 saved-in 0) (sb-posix:close saved-in)
           (sb-posix:dup2 saved-out 1) (sb-posix:close saved-out))))))
 
@@ -888,8 +898,20 @@ and run it in-process. State changes (cd, var sets) are rolled back."
               ;; when the shell exits, not each time a subshell ends. One set
               ;; INSIDE the subshell does fire here, when the subshell ends.
               (remhash "EXIT" (shell-traps sh))
+              ;; A subshell is a separate execution environment, so control
+              ;; flow must not escape it: `(break)' cannot break the caller's
+              ;; loop and `(return 4)' cannot return from the caller's
+              ;; function. Both terminate the subshell body instead -- bash,
+              ;; zsh, dash and bash 3.2 all agree on that. For the status they
+              ;; agree too on return (the return code); break/continue end the
+              ;; body with 0, following zsh, which is the shell sxsh already
+              ;; matches on the related unspecified question of whether break
+              ;; crosses a function boundary.
               (prog1 (handler-case (exec-node sh (subshell-body node))
-                       (shell-exit (e) (or (shell-exit-code e) 0)))
+                       (shell-exit (e) (or (shell-exit-code e) 0))
+                       (func-return (e) (or (cf-code e) 0))
+                       (loop-break () 0)
+                       (loop-continue () 0))
                 (run-exit-traps sh)))
          (restore-shell sh snap))))))
 
@@ -1204,7 +1226,14 @@ temp file so large output can't deadlock on a bounded pipe buffer."
              (let ((*standard-output*
                      (sb-sys:make-fd-stream 1 :output t :buffering :full)))
                (unwind-protect
-                    (handler-case (run sh ast) (shell-exit () nil))
+                    ;; Like a subshell, `$(...)' is its own execution
+                    ;; environment: control flow ends the substitution, it
+                    ;; does not reach the enclosing loop or function.
+                    (handler-case (run sh ast)
+                      (shell-exit () nil)
+                      (func-return () nil)
+                      (loop-break () nil)
+                      (loop-continue () nil))
                  (finish-output *standard-output*))
                ;; POSIX: remember this substitution's exit status so a command
                ;; made only of assignments can adopt it as its own $?.
