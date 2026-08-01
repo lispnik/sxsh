@@ -36,6 +36,16 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install sbcl
 
+      # The macOS runner's /bin/bash is 3.2.57 (2007), which predates features
+      # the standard has since adopted -- $'\u0041' among them. Using it as the
+      # differential reference reports divergences that say nothing about our
+      # conformance, so install a current one for posix-diff.sh to prefer.
+      - name: Install a modern bash for the differential reference (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install bash
+          /opt/homebrew/bin/bash --version | head -1
+
       # ocicl is this project's Lisp toolchain. Its runtime supplies ASDF and
       # points the source registry at the current directory, which is how the
       # systems are found -- a stock SBCL has neither, and `asdf:test-system'
