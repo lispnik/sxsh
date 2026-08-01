@@ -29,7 +29,8 @@
                 #:case-item #:case-item-patterns #:case-item-body #:case-item-terminator
                 #:function-def #:function-def-name #:function-def-body
                 #:function-def-redirects
-                #:word #:word-text)
+                #:word #:word-text
+                #:node-line)
   (:export #:make-shell #:shell #:run #:run-string #:repl #:main
            #:shell-last-status #:spawn))
 

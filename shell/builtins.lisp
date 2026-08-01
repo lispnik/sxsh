@@ -141,6 +141,7 @@ format over remaining args like the real printf."
       (format *error-output* "cd: too many arguments~%")
       (return-from builtin 2))
     (let* ((arg (first rest))
+           (from-cdpath nil)
            (to-oldpwd (equal arg "-"))
            (target (cond ((null arg) (or (nth-value 0 (get-var sh "HOME")) "/"))
                          (to-oldpwd
@@ -149,6 +150,23 @@ format over remaining args like the real printf."
                                      (return-from builtin 1))))
                          (t arg)))
            (old (logical-pwd sh)))
+      ;; CDPATH: a relative operand that is not . or .. is looked for in each
+      ;; listed directory, and a match found there is echoed (POSIX 2.14 cd).
+      (when (and arg (not to-oldpwd)
+                 (not (char= (char target 0) #\/))
+                 (not (member target '("." "..") :test #'string=))
+                 (not (and (> (length target) 1)
+                           (member (subseq target 0 2) '("./" "../")
+                                   :test #'string=))))
+        (let ((cdpath (nth-value 0 (get-var sh "CDPATH"))))
+          (when (and cdpath (plusp (length cdpath)))
+            (dolist (dir (split-string cdpath #\:))
+              (let ((candidate (if (string= dir "")
+                                   target
+                                   (concatenate 'string dir "/" target))))
+                (when (directoryp candidate)
+                  (setf target candidate from-cdpath t)
+                  (return)))))))
       (handler-case
           (let ((new
                   (if physical
@@ -169,7 +187,7 @@ format over remaining args like the real printf."
             (setf (shell-logical-cwd sh) new)
             (set-var sh "OLDPWD" old :export t)
             (set-var sh "PWD" new :export t)
-            (when to-oldpwd (write-line new out))
+            (when (or to-oldpwd from-cdpath) (write-line new out))
             0)
         (error (e) (format *error-output* "cd: ~A~%" e) 1)))))
 
@@ -458,8 +476,12 @@ be re-read to restore the current settings."
         (run-string-capturing sh src out))))
 
 (define-builtin "." (sh args out)
+  ;; POSIX: when the operand contains no slash the shell searches $PATH for it,
+  ;; exactly as it would for a command. FIND-IN-PATH already does both halves;
+  ;; the previous :allow-slash call short-circuited every name to itself, so a
+  ;; bare `. helpers.sh' only ever worked from the right directory.
   (if (null args) (progn (format *error-output* ".: filename argument required~%") 2)
-      (let ((path (find-in-path sh (first args) :allow-slash t)))
+      (let ((path (find-source-file sh (first args))))
         (if (and path (probe-file path))
             (run-string-capturing sh (slurp-file path) out)
             (progn (format *error-output* ".: ~A: not found~%" (first args)) 1)))))

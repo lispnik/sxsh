@@ -22,6 +22,7 @@
    #:token-column
    ;; AST node accessors -- see ast.lisp for the full set
    #:node-type
+   #:node-line
    #:complete-command
    #:and-or #:and-or-left #:and-or-right #:and-or-op
    #:pipeline #:pipeline-commands #:pipeline-bang #:pipeline-timed

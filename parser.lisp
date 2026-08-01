@@ -235,7 +235,8 @@ We snapshot the lexer, read a token, then restore."
 
 (defun parse-simple-command (p)
   "cmd_prefix (assignments/redirs) then words and more redirs."
-  (let ((assignments '()) (words '()) (redirects '()))
+  (let ((assignments '()) (words '()) (redirects '())
+        (start-line (let ((tk (parser-cur p))) (if tk (token-line tk) 0))))
     ;; prefix: assignment_words and redirects, in any order, before first word
     (loop
       (cond
@@ -268,7 +269,10 @@ We snapshot the lexer, read a token, then restore."
         (t (return))))
     (when (and (null assignments) (null words) (null redirects))
       (perr p "expected a command"))
-    (make-simple-command (nreverse assignments) (nreverse words) (nreverse redirects))))
+    (let ((cmd (make-simple-command (nreverse assignments) (nreverse words)
+                                    (nreverse redirects))))
+      (setf (node-line cmd) start-line)
+      cmd)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; redirections

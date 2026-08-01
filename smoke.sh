@@ -249,6 +249,24 @@ check read-escaped-delim '[a:b][]'   0 'printf "a\\\\:b\n" | { IFS=: read x y; e
 check read-continuation '[ab]'       0 'printf "a\\\\\nb\n" | { read x; echo "[$x]"; }'
 check read-while-no-nl  'got:l1'     0 'printf "l1\nl2" | { while read l; do echo "got:$l"; done; }'
 
+# --- previously-known bugs: command -p, . PATH search, CDPATH, vars -------
+check command-p-runs    'hi'    0 'command -p echo hi'
+check command-p-stdpath '0'     0 'PATH=/nonexistent command -p true; echo $?'
+check command-plain     'hi'    0 'command echo hi'
+check command-v         'echo'  0 'command -v echo'
+check command-bypass-fn '127'   0 'f(){ echo func; }; command f 2>/dev/null; echo $?'
+check dot-path-search   'sourced-ok' 0 'd=$(mktemp -d); echo "echo sourced-ok" > "$d/lib.sh"; PATH=$d:$PATH; . lib.sh'
+check dot-sets-vars     '[v]'   0 'd=$(mktemp -d); echo "V=v" > "$d/lib.sh"; PATH=$d:$PATH; . lib.sh; echo "[$V]"'
+check dot-absolute      'sourced-ok' 0 'd=$(mktemp -d); echo "echo sourced-ok" > "$d/lib.sh"; . "$d/lib.sh"'
+check dot-missing       ''      1 '. /nonexistent/nope.sh 2>/dev/null'
+check cdpath-finds      'yes'   0 'd=$(mktemp -d); mkdir "$d/proj"; CDPATH=$d; cd proj >/dev/null; case "$PWD" in */proj) echo yes;; esac'
+check cdpath-absolute   '/tmp'  0 'd=$(mktemp -d); mkdir "$d/proj"; CDPATH=$d; cd /tmp; pwd'
+check optind-initial    '1'     0 'echo $OPTIND'
+check ppid-set          'yes'   0 'test "$PPID" -gt 0 && echo yes'
+check lineno-tracks     '1
+2'                              0 'echo $LINENO
+echo $LINENO'
+
 # --- trap forms (POSIX 2.14) ----------------------------------------------
 check trap-multi-signal "trap -- 'echo hi' SIGINT
 trap -- 'echo hi' SIGTERM" 0 'trap "echo hi" INT TERM; trap'

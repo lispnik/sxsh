@@ -22,6 +22,28 @@
             (when (executable-p candidate)
               (return candidate)))))))
 
+(defun readable-file-p (path)
+  (handler-case
+      (and (not (directoryp path))
+           (progn (sb-posix:access path sb-posix:r-ok) t))
+    (error () nil)))
+
+(defun find-source-file (sh name)
+  "Resolve the operand of `.' -- POSIX searches $PATH when it contains no
+slash. A sourced file only has to be READABLE; requiring execute permission
+(as the command search does) would reject most shell libraries."
+  (if (find #\/ name)
+      (and (readable-file-p name) name)
+      (or (let ((path (or (nth-value 0 (get-var sh "PATH")) "/usr/bin:/bin")))
+            (dolist (dir (split-string path #\:) nil)
+              (let ((candidate (if (string= dir "")
+                                   name
+                                   (concatenate 'string dir "/" name))))
+                (when (readable-file-p candidate)
+                  (return candidate)))))
+          ;; every shell also falls back to the current directory
+          (and (readable-file-p name) name))))
+
 (defun executable-p (path)
   (handler-case
       (let ((st (sb-posix:stat path)))
@@ -94,6 +116,12 @@ because the trap's own `echo' overwrote the 3."
   ;; shells, or there would be no way to turn it back off.
   (when (and (opt sh :noexec) (not (shell-interactive sh)))
     (return-from exec-node 0))
+  ;; $LINENO is the line of the command currently executing. Nodes the parser
+  ;; did not stamp keep line 0, so only update when we have a real line.
+  (let ((line (posh::node-line node)))
+    (when (plusp line)
+      (setf (gethash "LINENO" (shell-vars sh))
+            (cons (princ-to-string line) nil))))
   (let ((status
           (handler-case
               (ecase (ast-type node)
@@ -427,9 +455,13 @@ words (split on whitespace). Guards against self-referential aliases."
        (exec-exec-builtin sh node (rest words)))
       ;; `command NAME ...` : run NAME as a builtin/external, bypassing any
       ;; shell function of the same name. -v/-V are handled inside the builtin.
+      ;; -p means "run it, using the standard PATH"; only -v and -V merely
+      ;; report and stay in the builtin. Excluding -p here sent `command -p cmd'
+      ;; into the builtin, which throws to a tag only this path establishes --
+      ;; crashing with "attempt to THROW to a tag that does not exist".
       ((and (string= (first words) "command")
             (rest words)
-            (not (member (second words) '("-v" "-V" "-p") :test #'string=)))
+            (not (member (second words) '("-v" "-V") :test #'string=)))
        (exec-command-bypass sh node (rest words)))
       ;; function call
       ((gethash (first words) (shell-functions sh))
@@ -475,9 +507,29 @@ stopped job and return; otherwise return its exit status."
       ;; reclaim the terminal for the shell
       (fg-reclaim-terminal sh))))
 
+(defparameter +standard-path+ "/usr/bin:/bin:/usr/sbin:/sbin"
+  "PATH used by `command -p': a default guaranteed to find the standard
+utilities, regardless of what the caller has done to $PATH.")
+
 (defun exec-command-bypass (sh node cmd-words)
   "Run `command NAME args`: NAME resolves to a builtin or external, never a
 function. Redirections and assignments on NODE still apply."
+  (let ((use-standard-path nil))
+    (loop while (and cmd-words (string= (first cmd-words) "-p"))
+          do (pop cmd-words) (setf use-standard-path t))
+    (when (null cmd-words) (return-from exec-command-bypass 0))
+    (if use-standard-path
+        (let ((saved (multiple-value-list (get-var sh "PATH"))))
+          (unwind-protect
+               (progn (set-var sh "PATH" +standard-path+)
+                      (command-bypass-1 sh node cmd-words))
+            (if (second saved)
+                (setf (gethash "PATH" (shell-vars sh))
+                      (cons (first saved) (third saved)))
+                (remhash "PATH" (shell-vars sh)))))
+        (command-bypass-1 sh node cmd-words))))
+
+(defun command-bypass-1 (sh node cmd-words)
   (let ((name (first cmd-words)))
     (cond
       ((builtin-p name)
@@ -488,7 +540,7 @@ function. Redirections and assignments on NODE still apply."
        ;; reuse NODE's assignments and redirects by spawning directly
        (catch 'not-found
          (let ((pid (spawn-external-words sh node cmd-words)))
-           (return-from exec-command-bypass (wait-for pid))))
+           (return-from command-bypass-1 (wait-for pid))))
        127))))
 
 (defun exec-exec-builtin (sh node exec-words)

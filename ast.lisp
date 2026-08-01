@@ -5,7 +5,11 @@
 
 (in-package #:posh)
 
-(defstruct (node (:constructor nil)))
+(defstruct (node (:constructor nil))
+  ;; Source line this node started on, stamped by the parser. Every
+  ;; constructor is BOA, so this stays at 0 unless someone sets it; the
+  ;; executor uses it to maintain $LINENO.
+  (line 0 :type fixnum))
 
 (defun node-type (node)
   "Return a keyword naming the kind of NODE (:pipeline, :if-clause, ...)."

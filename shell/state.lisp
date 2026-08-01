@@ -74,6 +74,12 @@
       (set-var sh "IFS" (format nil " ~C~C" #\Tab #\Newline)))
     (set-var sh "PS1" (if interactive "$ " ""))
     (set-var sh "PS2" "> ")
+    ;; POSIX-mandated variables the shell itself must provide.
+    (set-var sh "PPID" (princ-to-string (sb-posix:getppid)))
+    ;; getopts starts at the first operand; scripts test and reset OPTIND, so
+    ;; leaving it unset made `[ $OPTIND -eq 1 ]' fail before any getopts call.
+    (unless (nth-value 1 (get-var sh "OPTIND"))
+      (set-var sh "OPTIND" "1"))
     ;; Trust an inherited $PWD only if it really names our current directory;
     ;; otherwise start from the physical path.
     (let ((inherited (nth-value 0 (get-var sh "PWD"))))
