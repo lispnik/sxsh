@@ -66,12 +66,19 @@ jobs:
           set -eux
           ocicl version
           ocicl setup
-          # printf, not a heredoc: a heredoc terminator indented to match the
-          # YAML block never closes, which silently swallows the rest of the step
+          # `ocicl setup` prints TWO forms and both are required: the load
+          # brings in ASDF, and initialize-source-registry is what puts the
+          # current directory on the search path so this project's .asd is
+          # found. With only the first, ASDF reports `Component "sxsh" not
+          # found'. printf rather than a heredoc, whose terminator cannot be
+          # indented to match the YAML block.
           printf '%s\n' \
             '#-ocicl' \
             '(when (probe-file #P"~/.local/share/ocicl/ocicl-runtime.lisp")' \
             '  (load #P"~/.local/share/ocicl/ocicl-runtime.lisp"))' \
+            '(asdf:initialize-source-registry' \
+            '  (list :source-registry (list :directory (uiop:getcwd))' \
+            '        :inherit-configuration))' \
             >> "$HOME/.sbclrc"
           cat "$HOME/.sbclrc"
           sbcl --non-interactive --eval '(format t "~&asdf ~A~%" (asdf:asdf-version))'
