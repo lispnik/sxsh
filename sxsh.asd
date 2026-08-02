@@ -30,6 +30,7 @@
                              (:file "redir")
                              (:file "deparse")
                              (:file "jobs")
+                             (:file "term")
                              (:file "builtins")
                              (:file "exec")
                              (:file "driver"))))

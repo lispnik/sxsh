@@ -647,6 +647,37 @@ Three constraints on that fork, each learned the hard way:
   `jobs` calls waitpid on its own siblings, gets ECHILD, and reports every running job as Done.
   Their output is a job table, so running them inline risks no deadlock.
 
+### The terminal must never be left in raw mode
+
+`shell/term.lisp` is the raw-mode layer under the line editor. One invariant governs it: **no
+path may return with the terminal still raw.** A shell that exits raw hands the user a session
+with no echo and no line discipline, and it outlives the shell. Every entry goes through
+`with-raw-terminal`, whose cleanup runs on any exit including a thrown condition, and
+`*saved-termios*` lets the outermost handler restore even if that fails. `test/term-pty.py`
+tests the thrown-condition path specifically, not just the normal one.
+
+Four things that are easy to get wrong here, all verified rather than assumed:
+
+- **Two `tcgetattr` calls, never one.** sb-posix has no `copy-termios` and no `make-termios`, so
+  mutating the object you intend to restore from destroys the only record of the original
+  settings — silently, and permanently for that terminal.
+- **A zero-byte read is EOF and is never retried.** If VMIN/VTIME were misconfigured, a retry
+  loop would spin at 100% CPU; treating 0 as EOF turns that into a clean exit.
+- **EINTR is not EOF.** A signal arriving mid-read makes `unix-read` fail; reporting that as end
+  of input would make every Ctrl-C quit the shell. Same trap `fd-read-line` documents.
+- **`ISIG` is deliberately kept.** Ctrl-C stays a real SIGINT to the process group — far less
+  code than handling `VINTR` ourselves, and identical behaviour whether or not the editor runs.
+
+`TIOCGWINSZ` is in neither `sb-posix` nor `sb-unix` and is platform-specific (`#x40087468` on
+macOS, `#x5413` on Linux) — the same class of constant as `+wcontinued+`. The width is clamped
+to 20..1000 because a failed ioctl leaves the struct untouched and its contents must not become
+the wrap width.
+
+One subtlety when testing key decoding: **an ESC followed immediately by another byte IS a Meta
+prefix**, and decoding it as one is correct. Testing a *lone* ESC requires real idle time after
+it — which is exactly the condition the poll timeout in `read-key` exists to detect. A test that
+sends `\x1b\r` back to back is testing Meta-Return, not a bare escape.
+
 ### Interactive behaviour can only be tested through a pty
 
 History is recorded only at an interactive prompt, and a shell is only interactive when it has a
