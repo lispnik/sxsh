@@ -325,13 +325,20 @@ so builtins in non-final pipeline stages run in-process writing to the pipe."
     (setf stages (nreverse stages))
     ;; Reap every spawned child so none are left as zombies; remember the
     ;; status of the FINAL stage specifically -- that is the pipeline's status.
-    (let ((final 0) (last-index (1- n)))
+    (let ((final 0) (last-index (1- n)) (rightmost-failure nil))
       (loop for stage in stages for i from 0 do
-        (ecase (car stage)
-          (:pid (let ((st (wait-for (cdr stage))))
-                  (when (= i last-index) (setf final st))))
-          (:status (when (= i last-index) (setf final (cdr stage))))))
-      final)))
+        (let ((st (ecase (car stage)
+                    (:pid (wait-for (cdr stage)))
+                    (:status (cdr stage)))))
+          (when (/= st 0) (setf rightmost-failure st))
+          (when (= i last-index) (setf final st))))
+      ;; bash `set -o pipefail': the pipeline's status is that of the last
+      ;; stage to fail, not of the last stage. Without it a failing producer is
+      ;; invisible -- `false | cat' succeeds -- which is why build scripts
+      ;; reach for it.
+      (if (and (opt sh :pipefail) rightmost-failure)
+          rightmost-failure
+          final))))
 
 (defun spawn-stage (sh cmd stdin stdout close-in-child)
   "Run one pipeline stage. Returns (values pid nil) for external commands, or
@@ -689,6 +696,11 @@ otherwise return a list of temporary K=V for a command environment."
                                                          :assignment t))
                            "")))
              (setf val (or val ""))
+             ;; bash `name+=value' appends to the existing value.
+             (when (assignment-append a)
+               (setf val (concatenate 'string
+                                      (or (nth-value 0 (get-var sh name)) "")
+                                      val)))
              (cond
                (to-shell (set-var sh name val))
                (t
@@ -742,6 +754,10 @@ in-process."
                                                         :assignment t))
                           "")
                       "")))
+        (when (assignment-append a)
+          (setf val (concatenate 'string
+                                 (or (nth-value 0 (get-var sh name)) "")
+                                 val)))
         ;; Push before setting, so an earlier assignment is visible to a later
         ;; one (`a=1 b=$a cmd') while still restoring to the original value.
         (push (cons name (multiple-value-list (get-var sh name))) saved)

@@ -241,8 +241,11 @@ We snapshot the lexer, read a token, then restore."
     (loop
       (cond
         ((eq (cur-type p) :assignment-word)
-         (multiple-value-bind (name value) (assignment-word-split (cur-text p))
-           (push (make-assignment name (and (plusp (length value)) (make-word value)))
+         (multiple-value-bind (name value appendp)
+             (assignment-word-split (cur-text p))
+           (push (make-assignment name
+                                  (and (plusp (length value)) (make-word value))
+                                  appendp)
                  assignments))
          (advance p))
         ((or (redirect-op-token-p (cur-type p)) (eq (cur-type p) :io-number))

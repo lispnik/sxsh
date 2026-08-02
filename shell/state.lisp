@@ -55,6 +55,13 @@
   ;; every shell that has `local': a function called from here still sees this
   ;; function's locals, so this is a save/restore stack, not a lexical chain.
   (local-frames '())
+  ;; Wall-clock base for bash's $SECONDS; assigning to SECONDS moves it.
+  (start-time (get-universal-time))
+  ;; Names whose bash dynamic behaviour has been destroyed by `unset'. In bash
+  ;; RANDOM and SECONDS are special until unset, after which they are ordinary
+  ;; variables for the life of the shell -- assigning to them does not bring
+  ;; the magic back.
+  (dynamic-off (make-hash-table :test 'equal))
   ;; control-flow signals for break/continue/return handled via catch tags
   )
 
@@ -79,6 +86,9 @@ configure run reported success.")
 (defun make-shell (&key (interactive nil))
   (let ((sh (%make-shell :interactive interactive
                          :pid (sb-posix:getpid))))
+    ;; Without this the saved image starts from the same random state every
+    ;; run, so $RANDOM would produce an identical sequence in every shell.
+    (setf *random-state* (make-random-state t))
     ;; seed variables from the real environment, marked exported
     (dolist (kv (sb-ext:posix-environ))
       (let ((eq (position #\= kv)))
@@ -220,6 +230,21 @@ ignored rather than believed."
 (defun set-var (sh name value &key export)
   (when (readonly-p sh name)
     (error 'readonly-violation :name name))
+  ;; bash: assigning to RANDOM SEEDS the generator rather than replacing it,
+  ;; and assigning to SECONDS moves its origin. Both stay dynamic afterwards,
+  ;; so neither value is stored -- `RANDOM=5; echo $RANDOM' prints a random
+  ;; number, not 5.
+  (unless (nth-value 1 (gethash name (shell-dynamic-off sh)))
+    (cond
+      ((string= name "RANDOM")
+       (setf *random-state* (sb-ext:seed-random-state
+                             (or (ignore-errors (parse-integer value)) 0)))
+       (return-from set-var value))
+      ((string= name "SECONDS")
+       (setf (shell-start-time sh)
+             (- (get-universal-time)
+                (or (ignore-errors (parse-integer value)) 0)))
+       (return-from set-var value))))
   (let ((cell (gethash name (shell-vars sh))))
     (setf (gethash name (shell-vars sh))
           ;; `set -a' (allexport) marks every assignment for export.
@@ -274,6 +299,8 @@ that is relying on the least portable of the three behaviours."
 (defun unset-var (sh name)
   (when (readonly-p sh name)
     (error 'readonly-violation :name name))
+  ;; Unsetting a dynamic variable makes it ordinary from here on, as in bash.
+  (setf (gethash name (shell-dynamic-off sh)) t)
   (remhash name (shell-vars sh)))
 
 (defun exported-environ (sh)

@@ -317,6 +317,32 @@ into four groups:
 Do not "fix" these against dash. If the count moves, triage the delta rather
 than assuming a regression.
 
+### bash extensions are in scope, tracked by `make bashisms`
+
+sxsh targets POSIX first, but the goal is to support bash's extensions **in addition**.
+`test/bashisms.sh` is the scoreboard: ~57 cases, each run under sxsh and under a modern bash
+and compared on output+status. It is a scoreboard, never a gate.
+
+Take the expectation from bash, not from what you assume bash does. Two examples that caught
+me: `RANDOM=5` **seeds** bash's generator rather than assigning to it (so `echo $RANDOM` after
+it prints a random number, not 5), and `unset RANDOM` destroys the dynamic behaviour
+permanently, after which it is an ordinary variable and assignment does stick.
+
+Done so far: `${x/pat/rep}` and its `//`, `/#`, `/%` forms; `${x^}` `${x^^}` `${x,}` `${x,,}`
+with optional pattern; `${!x}` indirection and `${!prefix*}`; `name+=value`; `set -o pipefail`;
+`$RANDOM` and `$SECONDS`. Plus what was already there: `${x:o:l}`, `**`, `$'...'`, `echo -e`,
+`printf %*d`, `type -a`, `local`.
+
+Still missing, roughly in the order worth doing: here-strings `<<<`, `&>` / `&>>`, the
+`function` keyword and brace expansion (all small parser work); `printf -v` and `%q`; `read`'s
+`-n -N -d -t -u -s` flags; `for ((;;))` and `((expr))`; then the two big ones, `[[ ]]` with
+`=~`, and arrays -- which drag in `declare`/`local` options, `PIPESTATUS`, `read -a`, `mapfile`
+and namerefs, and which touch the variable model everywhere, so they want their own tranche.
+
+Note the tension with the previous section: every extension added here is one more thing a
+strict mode would have to gate, and one more divergence `make posix-yash` will report. That is
+the intended trade, not a regression -- but keep the two scoreboards in view together.
+
 ### yash is the strictest reference, and the only one that rejects extensions
 
 `make posix-yash` runs the differential suite against yash (`brew install yash` / `apt install

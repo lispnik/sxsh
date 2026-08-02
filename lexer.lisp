@@ -288,13 +288,19 @@ Detects assignment-word shape as a side product via classify."
 
 (defun assignment-word-split (text)
   "If TEXT has the form NAME=... (with NAME a valid name, no quoting in NAME),
-return (values name value-string); else NIL. The '=' must appear before any
-quote/expansion so that e.g. `a=b` is an assignment but `a'='b` is a word."
+return (values name value-string append-p); else NIL. The '=' must appear
+before any quote/expansion so that e.g. `a=b` is an assignment but `a'='b` is
+a word.
+
+APPEND-P is true for bash's `NAME+=value', which appends to the current value
+instead of replacing it. The `+' belongs to the operator, not the name, so
+`a+=b' assigns to `a'."
   (let ((eq (position #\= text)))
     (when (and eq (plusp eq))
-      (let ((name (subseq text 0 eq)))
+      (let* ((appendp (and (> eq 1) (char= (char text (1- eq)) #\+)))
+             (name (subseq text 0 (if appendp (1- eq) eq))))
         (when (valid-name-p name)
-          (values name (subseq text (1+ eq))))))))
+          (values name (subseq text (1+ eq)) appendp))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; The main entry: NEXT-TOKEN

@@ -390,6 +390,11 @@ LITERAL-QUOTED-P is T when the result must never be split (e.g. \"$@\" join)."
                  do (incf k))
            (let ((vname (subseq raw j k)))
              (multiple-value-bind (val found) (get-var sh vname)
+               ;; $RANDOM / $SECONDS have no entry in the table until someone
+               ;; assigns one, so they are resolved on the miss path.
+               (unless found
+                 (let ((dyn (dynamic-var sh vname)))
+                   (when dyn (setf val dyn found t))))
                (when (and (not found) (opt sh :nounset))
                  (error 'shell-unset-var :name vname))
                (values (or val "") k nil)))))
@@ -455,8 +460,36 @@ splitting, joined \"$*\" with nothing, and made `read' split on spaces only."
 (defun expand-braced-param (sh body)
   "Handle ${name}, ${#name}, ${name:-w} ${name:=w} ${name:?w} ${name:+w}
 (and the non-colon variants), and ${name#pat} ${name##pat} ${name%pat}
-${name%%pat}. Returns (values string quoted-p)."
+${name%%pat}. Returns (values string quoted-p).
+
+Also the bash extensions, which POSIX does not have: ${name/pat/rep} and its
+//, /# and /% variants, ${name^} ${name^^} ${name,} ${name,,} for case
+mapping, ${!name} for indirection and ${!prefix*} / ${!prefix@} for matching
+variable names."
   (when (string= body "") (return-from expand-braced-param (values "" nil)))
+  ;; ${!name} indirection, and ${!prefix*} / ${!prefix@} name listing. Checked
+  ;; before the length branch so that ${!x} is not read as a name of "!x".
+  (when (and (char= (char body 0) #\!) (> (length body) 1))
+    (let ((rest (subseq body 1)))
+      (return-from expand-braced-param
+        (cond
+          ;; ${!prefix*} and ${!prefix@}: the NAMES that start with prefix,
+          ;; sorted, space separated.
+          ((and (> (length rest) 1)
+                (member (char rest (1- (length rest))) '(#\* #\@)))
+           (let ((prefix (subseq rest 0 (1- (length rest))))
+                 (names '()))
+             (maphash (lambda (k v)
+                        (declare (ignore v))
+                        (when (and (>= (length k) (length prefix))
+                                   (string= prefix k :end2 (length prefix)))
+                          (push k names)))
+                      (shell-vars sh))
+             (values (format nil "~{~A~^ ~}" (sort names #'string<)) nil)))
+          ;; ${!name}: the value of the variable NAMED by name.
+          (t (values (or (nth-value 0 (get-var sh (or (param-value sh rest) "")))
+                         "")
+                     nil))))))
   ;; length: ${#name}
   (when (and (char= (char body 0) #\#) (> (length body) 1))
     (let ((name (subseq body 1)))
@@ -489,6 +522,26 @@ ${name%%pat}. Returns (values string quoted-p)."
                        (not (member (char rest 1) '(#\- #\= #\? #\+)))))
           (return-from expand-braced-param
             (values (substring-expand sh name (subseq rest 1)) nil)))
+        ;; bash: ${name/pat/rep}. Handled before the operator table because
+        ;; the pattern may itself contain any of those operator characters.
+        (when (and (plusp (length rest)) (char= (char rest 0) #\/))
+          (return-from expand-braced-param
+            (values (substitute-expand sh (or (param-value sh name) "")
+                                       (subseq rest 1))
+                    nil)))
+        ;; bash: ${name^} ${name^^} ${name,} ${name,,} case mapping. The
+        ;; doubled form maps every character, the single form only the first.
+        (when (and (plusp (length rest))
+                   (member (char rest 0) '(#\^ #\,)))
+          (let* ((ch (char rest 0))
+                 (allp (and (> (length rest) 1) (char= (char rest 1) ch)))
+                 (pat (subseq rest (if allp 2 1)))
+                 (fn (if (char= ch #\^) #'char-upcase #'char-downcase)))
+            (return-from expand-braced-param
+              (values (map-case (or (param-value sh name) "") fn allp
+                                (if (string= pat "") nil
+                                    (expand-nested-pattern sh pat)))
+                      nil))))
         ;; detect operator at start of REST
         (dolist (o ops)
           (when (and (>= (length rest) (length o))
@@ -588,7 +641,21 @@ separator). Returns NIL if none."
                             (princ-to-string (shell-last-bg-pid sh)) ""))
     ((and (plusp (length name)) (every #'digit-char-p name))
      (positional-ref sh (parse-integer name)))
-    (t (nth-value 0 (get-var sh name)))))
+    (t (multiple-value-bind (val found) (get-var sh name)
+         (if found val (dynamic-var sh name))))))
+
+(defun dynamic-var (sh name)
+  "bash's dynamic variables: $RANDOM and $SECONDS.
+
+Only consulted when nothing has been assigned to the name. Assigning replaces
+the dynamic behaviour, as in bash -- `RANDOM=5; echo $RANDOM' prints 5."
+  (when (nth-value 1 (gethash name (shell-dynamic-off sh)))
+    (return-from dynamic-var nil))
+  (cond
+    ((string= name "RANDOM") (princ-to-string (random 32768)))
+    ((string= name "SECONDS")
+     (princ-to-string (floor (- (get-universal-time) (shell-start-time sh)))))
+    (t nil)))
 
 (defun nonempty (v) (and v (plusp (length v))))
 
@@ -616,6 +683,74 @@ separator). Returns NIL if none."
     (dolist (start candidates s)
       (when (shell-pattern-match pat (subseq s start))
         (return-from remove-suffix (subseq s 0 start))))))
+
+(defun map-case (s fn allp pattern)
+  "bash ${x^} / ${x^^} / ${x,} / ${x,,}: apply FN to characters of S.
+
+When ALLP, every character is mapped; otherwise only the first. PATTERN, if
+given, restricts mapping to characters matching it -- `${v^^[aeiou]}' upcases
+only vowels. A nil PATTERN matches everything."
+  (let ((out (copy-seq s)) (done nil))
+    (dotimes (i (length out) out)
+      (unless (and done (not allp))
+        (when (or (null pattern)
+                  (shell-pattern-match pattern (string (char out i))))
+          (setf (char out i) (funcall fn (char out i)))
+          (setf done t))))))
+
+(defun substitute-expand (sh value spec)
+  "bash ${name/pat/rep}: replace the first match of PAT in VALUE with REP.
+
+SPEC is everything after the first `/'. A leading `/' means replace every
+match, `#' anchors the pattern to the start and `%' to the end. The
+replacement is optional -- ${v/pat} deletes the match.
+
+The pattern is matched longest-first at each position, which is what bash
+does: `v=aaa; ${v/a*/X}' gives X, not Xaa."
+  (let ((allp nil) (anchor nil) (i 0))
+    (when (and (< i (length spec)) (char= (char spec i) #\/))
+      (setf allp t) (incf i))
+    (when (and (< i (length spec)) (member (char spec i) '(#\# #\%)))
+      (setf anchor (char spec i)) (incf i))
+    ;; Split on the first unescaped, unquoted `/' -- the rest is the
+    ;; replacement. A `\/' inside the pattern is a literal slash.
+    (let ((pat-end nil) (j i))
+      (loop while (< j (length spec)) do
+        (cond ((and (char= (char spec j) #\\) (< (1+ j) (length spec)))
+               (incf j 2))
+              ((char= (char spec j) #\/) (setf pat-end j) (return))
+              (t (incf j))))
+      (let* ((raw-pat (subseq spec i (or pat-end (length spec))))
+             (rep (if pat-end (expand-nested sh (subseq spec (1+ pat-end))) ""))
+             (pat (expand-nested-pattern sh raw-pat)))
+        (when (string= raw-pat "") (return-from substitute-expand value))
+        (substitute-matches value pat rep allp anchor)))))
+
+(defun substitute-matches (s pat rep allp anchor)
+  (let ((out (make-string-output-stream))
+        (i 0) (n (length s)) (replaced nil))
+    (loop while (<= i n) do
+      (let ((end nil))
+        ;; Longest match wins at this position, matching bash.
+        (unless (and replaced (not allp))
+          (when (or (null anchor)
+                    (and (char= anchor #\#) (= i 0))
+                    (char= anchor #\%))
+            (loop for e from n downto i do
+              (when (and (or (not (char= (or anchor #\Nul) #\%)) (= e n))
+                         (shell-pattern-match pat (subseq s i e)))
+                (setf end e) (return)))))
+        (cond
+          ;; An empty match must not loop forever: emit a character and move on.
+          ((and end (> end i))
+           (write-string rep out) (setf i end replaced t))
+          ((and end (= end i) (not replaced))
+           (write-string rep out) (setf replaced t)
+           (when (< i n) (write-char (char s i) out))
+           (incf i))
+          (t (when (< i n) (write-char (char s i) out))
+             (incf i)))))
+    (get-output-stream-string out)))
 
 (defun expand-nested-pattern (sh word)
   "Expand the pattern operand of ${var#pat} and friends, then render it as a

@@ -90,6 +90,10 @@ git-tests: $(BIN)
 # every line of output is a real lead.
 #   make git-tests GIT_TESTS="t0000-basic t3600-rm"
 #   test/git-suite.py --list        # everything available
+## bashisms: scoreboard of bash extensions supported so far (not a gate)
+bashisms: $(BIN)
+	@./test/bashisms.sh ./$(BIN) $(REF_SHELL)
+
 ## fuzz: throw mutated and random input at the parser (add --exec to go deeper)
 fuzz: $(BIN)
 	$(PYTHON) test/fuzz-parser.py $(FUZZ_ARGS)

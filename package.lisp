@@ -28,7 +28,7 @@
    #:pipeline #:pipeline-commands #:pipeline-bang #:pipeline-timed
    #:simple-command #:simple-command-assignments
    #:simple-command-words #:simple-command-redirects
-   #:assignment #:assignment-name #:assignment-value
+   #:assignment #:assignment-name #:assignment-value #:assignment-append
    #:redirect #:redirect-op #:redirect-fd #:redirect-target #:redirect-heredoc
    #:subshell #:subshell-body #:subshell-redirects
    #:brace-group #:brace-group-body #:brace-group-redirects

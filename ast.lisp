@@ -22,9 +22,11 @@
   (text "" :type string))
 
 ;;; name=value assignment prefix
-(defstruct (assignment (:include node) (:constructor make-assignment (name value)))
+(defstruct (assignment (:include node)
+                       (:constructor make-assignment (name value &optional append)))
   (name "" :type string)
-  value)                                ; a WORD or NIL for `name=`
+  value                                 ; a WORD or NIL for `name=`
+  append)                               ; bash `name+=value': append, not replace
 
 ;;; Redirection. OP is a keyword: :< :> :>> :<< :<<- :<& :>& :<> :>|
 ;;; FD is the optional left-hand file descriptor (integer) or NIL.

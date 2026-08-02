@@ -632,6 +632,56 @@ after=[U]'                              0 'f() { echo "in=$V"; }; V=x f; echo "a
 check assign-left-right '1'             0 'a=1 b=$a /bin/sh -c "echo \$b"'
 check assign-in-env     'V=x'           0 'V=x env | grep "^V=" | head -1'
 
+# --- bash extensions (tranche 1) -------------------------------------------
+# Not POSIX. Verified against bash case by case; see CLAUDE.md for the
+# inventory of what is done and what is still missing.
+
+# ${x/pat/rep} and friends
+check bx-subst-first    'baa'           0 'v=aaa; echo ${v/a/b}'
+check bx-subst-all      'bbb'           0 'v=aaa; echo ${v//a/b}'
+check bx-subst-head     'Xaa'           0 'v=aaa; echo ${v/#a/X}'
+check bx-subst-tail     'aaX'           0 'v=aaa; echo ${v/%a/X}'
+check bx-subst-delete   'ac'            0 'v=abc; echo ${v/b}'
+check bx-subst-dots     'a-b-c'         0 'v=a.b.c; echo ${v//./-}'
+check bx-subst-longest  'X'             0 'v=aaa; echo ${v/a*/X}'
+check bx-subst-class    'aXc'           0 'v=abc; echo ${v/[bc]/X}'
+check bx-subst-var-pat  'aXc'           0 'v=abc; p=b; echo ${v/$p/X}'
+check bx-subst-slash    'x-y'           0 'v=x/y; echo ${v/\//-}'
+# ${x^^} case mapping
+check bx-upper-all      'AB'            0 'v=ab; echo "${v^^}"'
+check bx-lower-all      'ab'            0 'v=AB; echo "${v,,}"'
+check bx-upper-first    'Ab'            0 'v=ab; echo "${v^}"'
+check bx-lower-first    'aB'            0 'v=AB; echo "${v,}"'
+check bx-upper-pattern  'hEllO'         0 'v=hello; echo "${v^^[eo]}"'
+check bx-case-empty     '[]'            0 'v=; echo "[${v^^}]"'
+# ${!x} indirection and ${!prefix*}
+check bx-indirect       'z'             0 'x=y; y=z; echo ${!x}'
+check bx-indirect-unset '[]'            0 'x=nosuch_zz; echo "[${!x}]"'
+check bx-prefix-names   'pfxa pfxb'     0 'pfxa=1; pfxb=2; echo ${!pfx*}'
+# name+=value
+check bx-append         'ab'            0 'v=a; v+=b; echo $v'
+check bx-append-unset   'x'             0 'v+=x; echo $v'
+check bx-append-quoted  'a b'           0 'v=a; v+=" b"; echo "$v"'
+check bx-append-prefix  'abc'           0 'v=a; v+=b v2=c; echo "$v$v2"'
+check bx-append-notword 'a+=b'          0 'echo a+=b'
+# set -o pipefail
+check bx-pipefail-first '1'             0 'set -o pipefail; false | true; echo $?'
+check bx-pipefail-last  '1'             0 'set -o pipefail; true | false; echo $?'
+check bx-pipefail-off   '0'             0 'false | true; echo $?'
+check bx-pipefail-rightmost '4'         0 'set -o pipefail; sh -c "exit 3" | sh -c "exit 4"; echo $?'
+check bx-pipefail-clear '0'             0 'set -o pipefail; set +o pipefail; false | true; echo $?'
+check bx-pipefail-ok    '0'             0 'set -o pipefail; true | true; echo $?'
+# $RANDOM / $SECONDS. Assigning to RANDOM seeds it rather than replacing it,
+# and unsetting either one destroys the dynamic behaviour permanently.
+check bx-random-range   'y'             0 'test "$RANDOM" -ge 0 && test "$RANDOM" -lt 32768 && echo y'
+check bx-random-seeded  'y'             0 'RANDOM=5; test "$RANDOM" -ge 0 && echo y'
+check bx-random-unset   '[]'            0 'unset RANDOM; echo "[$RANDOM]"'
+# after unset it is an ordinary variable, so the assignment sticks as a value
+check bx-random-reseed  '[5]'           0 'unset RANDOM; RANDOM=5; echo "[$RANDOM]"'
+check bx-seconds        'y'             0 'test "$SECONDS" -ge 0 && echo y'
+check bx-seconds-assign '99'            0 'SECONDS=99; echo $SECONDS'
+check bx-seconds-unset  '[]'            0 'unset SECONDS; echo "[$SECONDS]"'
+
 # --- stdin / REPL mode ----------------------------------------------------
 got=$(printf 'echo from-stdin\nexit 0\n' | "$SXSH" 2>/dev/null)
 if printf '%s' "$got" | grep -q 'from-stdin'; then
