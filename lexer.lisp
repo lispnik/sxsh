@@ -330,6 +330,43 @@ instead of replacing it. The `+' belongs to the operator, not the name, so
 ;;; The main entry: NEXT-TOKEN
 ;;; ---------------------------------------------------------------------------
 
+(defun dbracket-end (lx)
+  "True if a `[[' at point has a matching `]]'."
+  (let ((s (lexer-string lx)) (i (+ (lexer-pos lx) 2)) (n (lexer-len lx)))
+    (loop while (< i n) do
+      (cond
+        ((and (char= (char s i) #\]) (< (1+ i) n) (char= (char s (1+ i)) #\]))
+         (return-from dbracket-end t))
+        ((char= (char s i) #\')
+         (let ((j (position #\' s :start (1+ i)))) (setf i (if j (1+ j) n))))
+        ((char= (char s i) #\")
+         (let ((j (1+ i)))
+           (loop while (< j n) do
+             (cond ((char= (char s j) #\\) (incf j 2))
+                   ((char= (char s j) #\") (return))
+                   (t (incf j))))
+           (setf i (min n (1+ j)))))
+        (t (incf i))))
+    nil))
+
+(defun scan-dbracket (lx)
+  "Consume `[[ ... ]]' and return the inner text."
+  (lx-advance lx) (lx-advance lx)        ; [[
+  (let ((out (make-array 0 :element-type 'character
+                           :adjustable t :fill-pointer t)))
+    (loop
+      (when (lx-eof-p lx)
+        (parse-error* (lexer-line lx) (lexer-column lx) "unterminated [[ ]]"))
+      (let ((c (lx-peek lx)))
+        (cond
+          ((and (char= c #\]) (eql (lx-peek lx 1) #\]))
+           (lx-advance lx) (lx-advance lx)
+           (return))
+          ((char= c #\') (scan-single-quote lx out))
+          ((char= c #\") (scan-double-quote lx out))
+          (t (vector-push-extend (lx-advance lx) out)))))
+    (coerce out 'string)))
+
 (defun arith-command-end (lx)
   "True if a `((' at point has a matching `))'. Scans a copy of the position so
 the caller is unaffected."
@@ -392,6 +429,15 @@ are returned as :assignment-word."
         ;; { and } as standalone tokens only matter to the parser as reserved
         ;; words; lexically they are word constituents. But when they stand
         ;; alone we still emit words and let the parser test reserved-ness.
+        ;; bash `[[ ... ]]'. Scanned whole, like `((', because the contents
+        ;; are not ordinary words: no field splitting or globbing happens
+        ;; inside, and `<' `>' are comparisons rather than redirections.
+        ((and (char= c #\[) (eql (lx-peek lx 1) #\[)
+              (or (null (lx-peek lx 2)) (blank-char-p (lx-peek lx 2))
+                  (char= (lx-peek lx 2) #\Newline))
+              (dbracket-end lx))
+         (let ((text (scan-dbracket lx)))
+           (make-token :dlbracket text line col)))
         ;; bash `((expr))' arithmetic command / `for ((init;cond;step))'.
         ;; Recognised only in command position, and only when a matching `))'
         ;; exists -- otherwise `((a); (b))' would stop being a subshell whose

@@ -384,9 +384,28 @@ Four things this broke or nearly broke, all worth knowing before touching it aga
 Arrays are never exported: there is nowhere in the environment to put subscripts, and bash does
 not export them either.
 
+Tranche 6 added `[[ ]]`, including `=~`.
+
+**`[[ ]]` is not `test` with different spelling**, which is why it is a separate node rather
+than sugar. Inside it there is no field splitting and no pathname expansion, `<` and `>` are
+string comparisons rather than redirections, the right operand of `=`/`==`/`!=` is a **pattern**
+whose metacharacters are live unless quoted in the source, and `=~` is a regular expression.
+The lexer therefore scans `[[ ... ]]` whole (like `((`) and the words are split at execution
+time, where expansion happens. File and arithmetic comparisons delegate to `eval-test` so the
+two can never drift apart.
+
+`shell/regex.lisp` is a small backtracking POSIX ERE engine, written rather than depended on:
+the project has no external libraries -- only sb-posix, which ships with SBCL -- and pulling in
+a regex library for one operator would change the build story for CI and for anyone cloning.
+Capture groups had to be tracked regardless, since bash exposes them as `$BASH_REMATCH`. It
+supports the ERE set (`. [] * + ? {n,m} | () ^ $`, character classes) but **not** backreferences,
+which are not in POSIX ERE either. Note two details: a group's span is undone on backtracking,
+or a group matched inside a rejected branch leaks into `BASH_REMATCH`; and a quoted section of
+the `=~` operand is escaped rather than quote-removed, so `[[ $x =~ "a.c" ]]` wants a literal
+dot.
+
 Still missing: `select`; `shopt` and extglob; process substitution; `trap ERR`/`DEBUG`;
-`coproc`; a subscript containing whitespace (`m[a b]=v`, which the lexer splits); and the last
-big one, `[[ ]]` with `=~`
+`coproc`; and a subscript containing whitespace (`m[a b]=v`, which the lexer splits)
 -- which drag in `declare`/`local` options, `PIPESTATUS`, `read -a`, `mapfile` and namerefs, and
 which touch the variable model everywhere, so they want their own tranche.
 

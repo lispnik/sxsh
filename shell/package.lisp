@@ -13,6 +13,7 @@
                 #:simple-command-words #:simple-command-redirects
                 #:assignment #:assignment-name #:assignment-value
                 #:assignment-append
+                #:cond-expr #:cond-expr-text #:cond-expr-redirects
                 #:arith-command #:arith-command-expr #:arith-command-redirects
                 #:arith-for #:arith-for-init #:arith-for-cond #:arith-for-step
                 #:arith-for-body #:arith-for-redirects
@@ -56,5 +57,6 @@
     (case-clause :case)
     (function-def :func)
     (arith-command :arith)
+    (cond-expr :cond)
     (arith-for :arith-for)
     (t (error "unknown AST node ~S" node))))

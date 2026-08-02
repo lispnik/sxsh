@@ -37,6 +37,13 @@
   target
   heredoc)                              ; (delimiter body quoted-p strip-p) once collected
 
+;;; bash `[[ ... ]]' -- conditional expression, kept as raw text and parsed
+;;; at execution time, where expansion happens
+(defstruct (cond-expr (:include node)
+                      (:constructor make-cond-expr (text redirects)))
+  (text "" :type string)
+  redirects)
+
 ;;; bash `((expr))' -- evaluate arithmetic, status 0 if non-zero
 (defstruct (arith-command (:include node)
                           (:constructor make-arith-command (expr redirects)))

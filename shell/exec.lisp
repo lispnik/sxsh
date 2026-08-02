@@ -152,6 +152,7 @@ because the trap's own `echo' overwrote the 3."
                 (:case     (exec-case sh node))
                 (:func     (exec-func-def sh node))
                 (:arith    (exec-arith-command sh node))
+                (:cond     (exec-cond-expr sh node))
                 (:arith-for (exec-arith-for sh node)))
             (shell-unset-var (e)
               (format *error-output* "sxsh: ~A~%" e)
@@ -1541,3 +1542,136 @@ temp file so large output can't deadlock on a bounded pipe buffer."
                      (string-right-trim '(#\Newline) (subseq buf 0 k))))
                  ""))
         (ignore-errors (delete-file path))))))
+
+;;; ---------------------------------------------------------------------------
+;;; bash [[ ... ]]
+;;;
+;;; Not `test' with extra spelling. Inside [[ ]] there is no field splitting
+;;; and no pathname expansion, `<' and `>' are string comparisons rather than
+;;; redirections, the right operand of = / == / != is a PATTERN, and =~ is a
+;;; regular expression whose capture groups land in $BASH_REMATCH. That is why
+;;; the lexer hands us the raw text and the words are split here.
+;;; ---------------------------------------------------------------------------
+
+(defparameter +cond-unary-ops+
+  '("-e" "-f" "-d" "-r" "-w" "-x" "-s" "-L" "-h" "-p" "-S" "-b" "-c" "-g" "-u"
+    "-k" "-z" "-n" "-v" "-o" "-t")
+  "Unary operators accepted inside [[ ]].")
+
+(defparameter +cond-binary-ops+
+  '("=" "==" "!=" "=~" "<" ">" "-eq" "-ne" "-lt" "-le" "-gt" "-ge"
+    "-nt" "-ot" "-ef")
+  "Binary operators accepted inside [[ ]].")
+
+(defun exec-cond-expr (sh node)
+  (exec-with-redirects
+   sh (cond-expr-redirects node)
+   (lambda ()
+     (let ((words (split-array-words (cond-expr-text node))))
+       (multiple-value-bind (value rest) (cond-parse-or sh words)
+         (declare (ignore rest))
+         (if value 0 1))))))
+
+(defun cond-parse-or (sh words)
+  (multiple-value-bind (left rest) (cond-parse-and sh words)
+    (loop while (and rest (string= (first rest) "||"))
+          do (multiple-value-bind (right more) (cond-parse-and sh (rest rest))
+               ;; No short-circuit on evaluation order here: both sides are
+               ;; pure tests, so evaluating the right side is harmless and
+               ;; keeps the parse simple.
+               (setf left (or left right) rest more)))
+    (values left rest)))
+
+(defun cond-parse-and (sh words)
+  (multiple-value-bind (left rest) (cond-parse-unary sh words)
+    (loop while (and rest (string= (first rest) "&&"))
+          do (multiple-value-bind (right more) (cond-parse-unary sh (rest rest))
+               (setf left (and left right) rest more)))
+    (values left rest)))
+
+(defun cond-parse-unary (sh words)
+  (cond
+    ((null words) (values nil nil))
+    ((string= (first words) "!")
+     (multiple-value-bind (v rest) (cond-parse-unary sh (rest words))
+       (values (not v) rest)))
+    ((string= (first words) "(")
+     (multiple-value-bind (v rest) (cond-parse-or sh (rest words))
+       (values v (if (and rest (string= (first rest) ")")) (rest rest) rest))))
+    (t (cond-parse-primary sh words))))
+
+(defun cond-parse-primary (sh words)
+  (let ((w (first words)))
+    (cond
+      ;; unary operator
+      ((and (member w +cond-unary-ops+ :test #'string=) (rest words))
+       (values (cond-unary sh w (cond-word sh (second words)))
+               (cddr words)))
+      ;; binary operator
+      ((and (rest words) (member (second words) +cond-binary-ops+ :test #'string=))
+       (values (cond-binary sh (second words) (first words) (third words))
+               (cdddr words)))
+      ;; a bare word is true when non-empty
+      (t (values (plusp (length (cond-word sh w))) (rest words))))))
+
+(defun cond-word (sh raw)
+  "Expand one operand: parameter/command/arithmetic expansion and quote
+removal, but NO field splitting or globbing -- that is the whole point of the
+[[ ]] form."
+  (if raw (xchars->string (expand-pass sh raw)) ""))
+
+(defun cond-unary (sh op operand)
+  (cond
+    ((string= op "-z") (zerop (length operand)))
+    ((string= op "-n") (plusp (length operand)))
+    ;; -v tests whether the NAME is set, so the operand is a name, not a value
+    ((string= op "-v") (nth-value 1 (get-var sh operand)))
+    ((string= op "-o") (opt sh (option-keyword operand)))
+    (t
+     ;; Everything else is a file test; reuse the `test' evaluator so the
+     ;; two can never drift apart.
+     (handler-case (eval-test (list op operand)) (error () nil)))))
+
+(defun option-keyword (name)
+  (let ((entry (option-by-name name)))
+    (and entry (third entry))))
+
+(defun cond-binary (sh op left right)
+  (let ((l (cond-word sh left)))
+    (cond
+      ;; Pattern match, not string equality: the right side is a glob whose
+      ;; metacharacters are live unless they were quoted in the source.
+      ((member op '("=" "==") :test #'string=)
+       (shell-pattern-match (xchars->pattern (expand-pass sh right)) l))
+      ((string= op "!=")
+       (not (shell-pattern-match (xchars->pattern (expand-pass sh right)) l)))
+      ;; Regex, with the capture groups exposed as $BASH_REMATCH.
+      ((string= op "=~")
+       (let* ((pattern (cond-regex-operand sh right))
+              (m (regex-match pattern l)))
+         (when m
+           (set-var sh "BASH_REMATCH" (array-from-list m)))
+         (and m t)))
+      ;; String ordering. bash compares by the current locale; we use the
+      ;; code-point order, which agrees for the C locale.
+      ((string= op "<") (string< l (cond-word sh right)))
+      ((string= op ">") (string> l (cond-word sh right)))
+      ;; Arithmetic and file comparisons: hand to the `test' evaluator.
+      (t (handler-case (eval-test (list l op (cond-word sh right)))
+           (error () nil))))))
+
+(defun cond-regex-operand (sh raw)
+  "Expand the right side of =~ WITHOUT quote removal of regex metacharacters.
+
+A quoted section is matched literally -- `[[ $x =~ \"a.c\" ]]' wants a real
+dot -- so quoted characters that mean something to the engine are escaped
+rather than dropped."
+  (with-output-to-string (out)
+    (dolist (xc (expand-pass sh raw))
+      (case (xchar-class xc)
+        ((:anchor :field-sep))
+        (t (let ((c (xchar-char xc)))
+             (when (and (eq (xchar-class xc) :quoted)
+                        (find c ".*+?[]()|^$\\{}"))
+               (write-char #\\ out))
+             (write-char c out)))))))

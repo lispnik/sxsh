@@ -25,6 +25,7 @@
                              (:file "state")
                              (:file "spawn")
                              (:file "arith")
+                             (:file "regex")
                              (:file "expand")
                              (:file "redir")
                              (:file "deparse")

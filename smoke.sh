@@ -846,6 +846,50 @@ check bx-pipestatus-one '0'             0 'true; echo ${PIPESTATUS[0]}'
 # an array must survive the re-exec used for `{ ... } &'
 check bx-array-async    '1 2 3'         0 'a=(1 2 3); { echo "${a[@]}"; } & wait'
 
+# --- bash extensions (tranche 6: [[ ]]) ------------------------------------
+# [[ ]] is not `test' with extra spelling: no field splitting, no globbing of
+# operands, `<' and `>' compare rather than redirect, the right side of == is
+# a PATTERN, and =~ is a regex with capture groups in $BASH_REMATCH.
+check bx-dbr-eq         'y'             0 '[[ 1 == 1 ]] && echo y'
+check bx-dbr-ne         'n'             0 '[[ a == b ]] || echo n'
+check bx-dbr-neq        'y'             0 '[[ a != b ]] && echo y'
+check bx-dbr-status     '0'             0 '[[ 1 == 1 ]]; echo $?'
+check bx-dbr-status-f   '1'             0 '[[ 1 == 2 ]]; echo $?'
+# the right operand of == is a glob pattern unless quoted
+check bx-dbr-pattern    'y'             0 '[[ abc == a* ]] && echo y'
+check bx-dbr-quoted-pat 'n'             0 '[[ abc == "a*" ]] || echo n'
+check bx-dbr-pat-q      'y'             0 'v=abc; [[ $v == a?c ]] && echo y'
+check bx-dbr-pat-var    'y'             0 'p="a*"; [[ abc == $p ]] && echo y'
+check bx-dbr-single-eq  'y'             0 '[[ abc = a* ]] && echo y'
+# =~ regex, and BASH_REMATCH
+check bx-dbr-re         'y'             0 '[[ abc =~ ^a ]] && echo y'
+check bx-dbr-re-no      'n'             0 '[[ abc =~ ^b ]] || echo n'
+check bx-dbr-re-class   'y'             0 '[[ x123y =~ [0-9]+ ]] && echo y'
+check bx-dbr-re-groups  'aa-bbb'        0 '[[ aabbb =~ ^(a+)(b+)$ ]] && echo "${BASH_REMATCH[1]}-${BASH_REMATCH[2]}"'
+check bx-dbr-re-whole   'b/b'           0 '[[ abc =~ (b) ]] && echo "${BASH_REMATCH[0]}/${BASH_REMATCH[1]}"'
+check bx-dbr-re-dot     'y'             0 '[[ axc =~ a.c ]] && echo y'
+# a quoted regex operand is literal: the dot must not be a wildcard
+check bx-dbr-re-quoted  'y'             0 '[[ "a.c" =~ "a.c" ]] && echo y'
+check bx-dbr-re-var     'y'             0 're="^x"; [[ xyz =~ $re ]] && echo y'
+check bx-dbr-re-email   'y'             0 '[[ me@h.com =~ ^[a-z]+@[a-z]+\.[a-z]+$ ]] && echo y'
+# unary tests, including -v for "is this name set"
+check bx-dbr-v          'y'             0 'x=1; [[ -v x ]] && echo y'
+check bx-dbr-v-unset    'n'             0 '[[ -v nosuch_zz ]] || echo n'
+check bx-dbr-z          'y'             0 '[[ -z "" ]] && echo y'
+check bx-dbr-n          'y'             0 '[[ -n a ]] && echo y'
+check bx-dbr-file       'y'             0 '[[ -d /tmp ]] && echo y'
+check bx-dbr-bang       'y'             0 '[[ ! -z a ]] && echo y'
+check bx-dbr-bare-word  'y'             0 '[[ x ]] && echo y'
+check bx-dbr-bare-empty 'n'             0 '[[ "" ]] || echo n'
+# && || and grouping inside the brackets
+check bx-dbr-and        'y'             0 '[[ 1 == 1 && 2 == 2 ]] && echo y'
+check bx-dbr-or         'y'             0 '[[ 1 == 2 || 3 == 3 ]] && echo y'
+check bx-dbr-group      'y'             0 '[[ ( 1 == 1 ) ]] && echo y'
+check bx-dbr-arith      'y'             0 '[[ 2 -gt 1 ]] && echo y'
+check bx-dbr-strcmp     'y'             0 '[[ a < b ]] && echo y'
+# an unquoted operand is NOT split or globbed, which is the whole point
+check bx-dbr-nosplit    'y'             0 'v="a b"; [[ $v == "a b" ]] && echo y'
+
 # --- stdin / REPL mode ----------------------------------------------------
 got=$(printf 'echo from-stdin\nexit 0\n' | "$SXSH" 2>/dev/null)
 if printf '%s' "$got" | grep -q 'from-stdin'; then

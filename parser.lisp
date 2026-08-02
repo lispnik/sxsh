@@ -220,6 +220,11 @@ It is NOT the keyword when followed by a pipe/operator/terminator (e.g.
     ((reservedp p "while") (parse-while p))
     ((reservedp p "until") (parse-until p))
     ((reservedp p "case")  (parse-case p))
+    ;; bash `[[ ... ]]' conditional expression
+    ((eq (cur-type p) :dlbracket)
+     (let ((text (cur-text p)))
+       (advance p)
+       (make-cond-expr text (parse-redirect-list p))))
     ;; bash `((expr))' as a command
     ((eq (cur-type p) :dlparen)
      (let ((expr (cur-text p)))
