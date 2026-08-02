@@ -113,6 +113,11 @@ PATH=~/a:~/b rule)."
                (emit-anchor)             ; $'' is still a field
                (dolist (ch (coerce str 'list)) (emit ch :quoted))
                (setf i next start-of-field nil)))
+            ;; ${a[@]} unquoted: one field per element, then IFS splitting
+            ((braced-array-at-p sh raw i n)
+             (multiple-value-bind (arr next) (braced-array-at-p sh raw i n)
+               (emit-array-elements arr #'emit #'emit-field-sep :split)
+               (setf i next start-of-field nil)))
             ;; $@ / $* need special multi-field handling (see emit-at-params)
             ((and (char= c #\$) (< (1+ i) n) (char= (char raw (1+ i)) #\@))
              (emit-at-params sh #'emit #'emit-field-sep nil :split)
@@ -241,6 +246,11 @@ EMIT-FIELD-SEP, when provided, emits an explicit field boundary (used for
                  (funcall emit (char raw (1+ i)) :quoted))
                (incf i 2))
              (progn (funcall emit #\\ :quoted) (incf i))))
+        ;; "${a[@]}" : one field per array element, each quoted
+        ((and emit-field-sep (braced-array-at-p sh raw i n))
+         (multiple-value-bind (arr next) (braced-array-at-p sh raw i n)
+           (emit-array-elements arr emit emit-field-sep :quoted)
+           (setf i next)))
         ;; "$@" : one field per positional parameter, each quoted
         ((and (char= c #\$) (< (1+ i) n) (char= (char raw (1+ i)) #\@) emit-field-sep)
          (emit-at-params sh emit emit-field-sep t :quoted)
@@ -303,6 +313,27 @@ There is no field splitting or pathname expansion here either."
                (setf i next)))
             (t (emit c) (incf i))))))
     (nreverse out)))
+
+(defun braced-array-at-p (sh raw i n)
+  "If RAW at I is `${name[@]}', return (values array end-index); else NIL.
+
+Only the `[@]' form gets per-element fields; `[*]' joins, exactly as `$@' and
+`$*' differ. Recognised here rather than in EXPAND-BRACED-PARAM because only
+the caller can emit field separators."
+  (when (and (< (+ i 1) n) (char= (char raw i) #\$) (char= (char raw (1+ i)) #\{))
+    (let ((close (position #\} raw :start (+ i 2))))
+      (when close
+        (let ((body (subseq raw (+ i 2) close)))
+          (multiple-value-bind (base sub) (split-subscript body)
+            (let ((arr (and sub (string= sub "@") (var-array sh base))))
+              (when arr (values arr (1+ close))))))))))
+
+(defun emit-array-elements (arr emit emit-field-sep class)
+  "Emit each element of ARR as its own field, like EMIT-AT-PARAMS does for $@."
+  (loop for v in (array-values arr)
+        for first = t then nil
+        do (unless first (funcall emit-field-sep))
+           (dolist (ch (coerce v 'list)) (funcall emit ch class))))
 
 (defun emit-at-params (sh emit emit-field-sep quoted-p class)
   "Emit the positional parameters as separate fields, inserting a field
@@ -486,6 +517,11 @@ variable names."
                           (push k names)))
                       (shell-vars sh))
              (values (format nil "~{~A~^ ~}" (sort names #'string<)) nil)))
+          ;; ${!a[@]} / ${!a[*]}: the SUBSCRIPTS in use, not the values.
+          ((multiple-value-bind (base sub) (split-subscript rest)
+             (let ((arr (var-array sh base)))
+               (and arr sub (member sub '("@" "*") :test #'string=)
+                    (values (format nil "~{~A~^ ~}" (array-keys arr)) nil)))))
           ;; ${!name}: the value of the variable NAMED by name.
           (t (values (or (nth-value 0 (get-var sh (or (param-value sh rest) "")))
                          "")
@@ -497,7 +533,16 @@ variable names."
         (values (princ-to-string
                  (cond ((string= name "@") (length (shell-positional sh)))
                        ((string= name "*") (length (shell-positional sh)))
-                       (t (length (or (nth-value 0 (get-var sh name)) "")))))
+                       (t (multiple-value-bind (base sub) (split-subscript name)
+                            (let ((arr (var-array sh base)))
+                              (cond
+                                ;; ${#a[@]} / ${#a[*]}: how many elements
+                                ((and arr sub (member sub '("@" "*") :test #'string=))
+                                 (length (array-keys arr)))
+                                ;; ${#a[i]}: length of one element
+                                ((and arr sub)
+                                 (length (or (array-get arr (array-subscript sh arr sub)) "")))
+                                (t (length (or (nth-value 0 (get-var sh name)) "")))))))))
                 nil))))
   ;; find operator
   (let* ((ops '("##" "#" "%%" "%" ":-" ":=" ":?" ":+" "-" "=" "?" "+"))
@@ -513,6 +558,11 @@ variable names."
         ((and (plusp n) (digit-char-p (char body 0)))
          (loop while (and (< k n) (digit-char-p (char body k))) do (incf k)))
         ((plusp n) (setf k 1)))         ; special single-char param
+      ;; An array subscript belongs to the name: `${a[1]#x}' must see the
+      ;; name as `a[1]', not `a'.
+      (when (and (< k n) (char= (char body k) #\[))
+        (let ((close (position #\] body :start k :from-end t)))
+          (when close (setf k (1+ close)))))
       (let ((name (subseq body 0 k)) (rest (subseq body k)))
         ;; Substring expansion: ${name:offset} / ${name:offset:length}.
         ;; A ':' NOT followed by one of - = ? + introduces a substring, with
@@ -641,8 +691,32 @@ separator). Returns NIL if none."
                             (princ-to-string (shell-last-bg-pid sh)) ""))
     ((and (plusp (length name)) (every #'digit-char-p name))
      (positional-ref sh (parse-integer name)))
-    (t (multiple-value-bind (val found) (get-var sh name)
-         (if found val (dynamic-var sh name))))))
+    (t (multiple-value-bind (base sub) (split-subscript name)
+         (let ((arr (var-array sh base)))
+           (cond
+             ;; ${a[@]} / ${a[*]} joined; the field-splitting form is handled
+             ;; earlier, in EXPAND-PASS, where separators can be emitted.
+             ((and arr sub (string= sub "@"))
+              (format nil "~{~A~^ ~}" (array-values arr)))
+             ((and arr sub (string= sub "*"))
+              (format nil (format nil "~~{~~A~~^~A~~}" (ifs-first sh))
+                      (array-values arr)))
+             ((and arr sub) (array-get arr (array-subscript sh arr sub)))
+             ;; A subscript on a non-array: [0] is the scalar itself.
+             (sub (and (member sub '("0" "@" "*") :test #'string=)
+                       (nth-value 0 (get-var sh base))))
+             (t (multiple-value-bind (val found) (get-var sh name)
+                  (if found val (dynamic-var sh name))))))))))
+
+(defun array-subscript (sh arr sub)
+  "Evaluate a subscript: arithmetic for an indexed array, a word for assoc.
+A negative index counts from the end, as in bash."
+  (if (eq (sh-array-kind arr) :assoc)
+      (xchars->string (expand-pass sh sub))
+      (let ((i (eval-arith sh sub)))
+        (if (minusp i)
+            (+ (array-next-index arr) i)
+            i))))
 
 (defun dynamic-var (sh name)
   "bash's dynamic variables: $RANDOM and $SECONDS.

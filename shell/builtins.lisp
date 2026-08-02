@@ -457,13 +457,91 @@ arguments. Returns (values text status)."
     (loop while (and names (member (first names) '("-f" "-v") :test #'string=))
           do (setf mode (if (string= (pop names) "-f") :func :var)))
     (dolist (a names)
-      (case mode
-        (:func (remhash a (shell-functions sh)))
-        (:var  (ignore-errors (unset-var sh a)))
-        (:auto (if (gethash a (shell-functions sh))
-                   (remhash a (shell-functions sh))
-                   (ignore-errors (unset-var sh a)))))))
+      ;; bash `unset a[i]' removes one element and leaves the array; the
+      ;; subscript makes the array sparse rather than renumbering.
+      (multiple-value-bind (base sub) (split-subscript a)
+        (let ((arr (and sub (not (eq mode :func)) (var-array sh base))))
+          (cond
+            (arr (if (member sub '("@" "*") :test #'string=)
+                     (ignore-errors (unset-var sh base))
+                     (array-unset arr (array-subscript sh arr sub))))
+            (t (case mode
+                 (:func (remhash a (shell-functions sh)))
+                 (:var  (ignore-errors (unset-var sh a)))
+                 (:auto (if (gethash a (shell-functions sh))
+                            (remhash a (shell-functions sh))
+                            (ignore-errors (unset-var sh a)))))))))))
   0)
+
+(defun declare-flags (args)
+  "Split leading -x/+x option words off ARGS. Returns (values flags rest)."
+  (let ((flags '()))
+    (loop while (and args (> (length (first args)) 1)
+                     (member (char (first args) 0) '(#\- #\+)))
+          do (let ((a (pop args)))
+               (loop for i from 1 below (length a)
+                     do (push (char a i) flags))))
+    (values flags args)))
+
+(defun declare-builtin (sh args localp)
+  "bash `declare'/`typeset'/`local' with -a, -A, -i, -r, -x.
+
+Only the flags that change storage are acted on: -A must create the variable
+as associative BEFORE anything is assigned, because an assoc subscript is a
+word while an indexed one is arithmetic. -i is accepted and recorded as a
+no-op beyond evaluating the RHS arithmetically."
+  (multiple-value-bind (flags rest) (declare-flags args)
+    (when (and localp (not (in-function-p sh)))
+      (format *error-output* "local: can only be used in a function~%")
+      (return-from declare-builtin 1))
+    (dolist (a rest 0)
+      (let ((eq (position #\= a)))
+        (let* ((name (if eq (subseq a 0 eq) a))
+               (value (and eq (subseq a (1+ eq))))
+               (appendp (and eq (> eq 0) (char= (char a (1- eq)) #\+))))
+          (when appendp (setf name (subseq name 0 (1- (length name)))))
+          (when localp (declare-local sh (nth-value 0 (split-subscript name))))
+          (cond
+            ;; -A/-a with no value: create an empty array of the right kind.
+            ((and (null value) (or (member #\A flags) (member #\a flags)))
+             (set-var sh name (make-sh-array (if (member #\A flags)
+                                                 :assoc :indexed))))
+            (value
+             (when (and (member #\A flags) (not (var-array sh name)))
+               (set-var sh name (make-sh-array :assoc)))
+             (assign-one sh name value appendp))
+            (t nil))
+          ;; -i is an ATTRIBUTE, not a one-off: every LATER assignment to the
+          ;; name is evaluated arithmetically too, which is the whole point of
+          ;; `declare -i n; n=3+4'.
+          (when (member #\i flags)
+            (setf (gethash (nth-value 0 (split-subscript name))
+                           (shell-int-vars sh))
+                  t)
+            (when value (assign-one sh name value appendp)))
+          (when (member #\x flags) (export-var sh name))
+          (when (member #\r flags) (mark-readonly sh name)))))))
+
+(define-builtin "declare" (sh args out)
+  (declare-builtin sh args nil))
+(setf (gethash "typeset" *builtins*) (gethash "declare" *builtins*))
+
+(define-builtin "mapfile" (sh args out)
+  ;; bash mapfile/readarray: read lines into an indexed array.
+  (multiple-value-bind (flags rest) (declare-flags args)
+    (declare (ignore flags))
+    (let ((name (or (first rest) "MAPFILE"))
+          (lines '()))
+      (loop (multiple-value-bind (line missing) (fd-read-line 0)
+              (declare (ignore missing))
+              (when (eq line :eof) (return))
+              ;; bash keeps the trailing newline unless -t is given, and -t is
+              ;; the overwhelmingly common use, so both forms are stored the
+              ;; same way here: with the newline, matching the default.
+              (push (concatenate 'string line (string #\Newline)) lines)))
+      (set-var sh name (array-from-list (nreverse lines)))
+      0)))
+(setf (gethash "readarray" *builtins*) (gethash "mapfile" *builtins*))
 
 (define-builtin "shift" (sh args out)
   (let ((n (if args (parse-integer (first args)) 1))
@@ -496,7 +574,8 @@ arguments. Returns (values text status)."
   ;; character count, -d an alternate delimiter, -u a file descriptor, -t a
   ;; timeout.
   (let ((raw-mode nil) (silent nil) (prompt nil) (names args)
-        (fd 0) (delim #\Newline) (max nil) (exact nil) (timeout nil))
+        (fd 0) (delim #\Newline) (max nil) (exact nil) (timeout nil)
+        (array-name nil))
     (labels ((opt-arg (opt)
                ;; -n3 and -n 3 are both accepted, as in bash.
                (if (> (length opt) 2) (subseq opt 2) (pop names))))
@@ -518,6 +597,7 @@ arguments. Returns (values text status)."
                           (setf delim (if (plusp (length d))
                                           (char d 0)
                                           (code-char 0)))))
+                   (#\a (pop names) (setf array-name (opt-arg opt)))
                    (#\u (pop names)
                         (setf fd (or (ignore-errors (parse-integer (opt-arg opt))) 0)))
                    (#\t (pop names)
@@ -550,6 +630,11 @@ arguments. Returns (values text status)."
       ;; newline instead of looping on the last record.
       (let ((status (if eof-no-newline 1 0)))
         (cond
+          ;; -a: split on IFS and store the fields in an indexed array.
+          (array-name
+           (set-var sh array-name
+                    (array-from-list (split-on-ifs line (current-ifs sh) nil escaped)))
+           status)
           ;; -N takes the bytes verbatim: no IFS trimming or splitting at all.
           (exact
            (if names
@@ -720,7 +805,8 @@ are never delimiters, so `read x y' on `a\\ b c' gives x=\"a b\" and y=\"c\"."
         (skip-ws)                       ; leading IFS whitespace is discarded
         (loop
           (when (>= i n) (return))
-          (when (>= (1+ count) maxfields) (return))
+          ;; NIL means unlimited -- `read -a' wants every field, not N of them.
+          (when (and maxfields (>= (1+ count) maxfields)) (return))
           (let ((start i))
             (loop while (and (< i n) (not (ifs-char-p (char line i) i)))
                   do (incf i))
@@ -969,6 +1055,10 @@ be re-read to restore the current settings."
     ((not (in-function-p sh))
      (format *error-output* "local: can only be used in a function~%")
      1)
+    ;; `local -a/-A/-i/-r/-x' is `declare' with function scoping.
+    ((and args (> (length (first args)) 1)
+          (member (char (first args) 0) '(#\- #\+)))
+     (declare-builtin sh args t))
     (t
      (let ((status 0))
        (dolist (a args status)

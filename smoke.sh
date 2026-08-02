@@ -796,6 +796,56 @@ check bx-subshell-nest  'a
 b'                                      0 '( (echo a); (echo b) )'
 check bx-subshell-deep  'n'             0 '( ( echo n ) )'
 
+# --- bash extensions (tranche 5: arrays) -----------------------------------
+# Arrays are sparse, so both flavours are hash tables: `a[5]=x' on an empty
+# array leaves 0-4 genuinely absent rather than empty.
+check bx-array-index    '2'             0 'a=(1 2 3); echo ${a[1]}'
+check bx-array-all      '1 2 3'         0 'a=(1 2 3); echo "${a[@]}"'
+check bx-array-star     '1 2 3'         0 'a=(1 2 3); echo "${a[*]}"'
+check bx-array-count    '3'             0 'a=(1 2 3); echo ${#a[@]}'
+check bx-array-keys     '0 1 2'         0 'a=(1 2 3); echo ${!a[@]}'
+check bx-array-scalar   '1'             0 'a=(1 2 3); echo $a'
+check bx-array-negative '3'             0 'a=(1 2 3); echo ${a[-1]}'
+check bx-array-elem-len '3'             0 'a=(x abc); echo ${#a[1]}'
+# quoting inside a literal must survive: the RHS reaches the executor RAW,
+# because pre-expanding it would strip the quotes and split "b c" in two
+check bx-array-quoted   '[1]
+[b c]
+[3]'                                    0 'a=(1 "b c" 3); for x in "${a[@]}"; do echo "[$x]"; done'
+check bx-array-quoted-n '2'             0 'a=(1 "b c"); echo ${#a[@]}'
+check bx-array-split    '2'             0 'x="1 2"; a=($x); echo ${#a[@]}'
+check bx-array-nosplit  '1'             0 'x="1 2"; a=("$x"); echo ${#a[@]}'
+# append, element assignment, sparseness, unset
+check bx-array-append   '1 2 3 4 5'     0 'a=(1 2 3); a+=(4 5); echo "${a[@]}"'
+check bx-array-elem-set '0 5'           0 'a=(1); a[5]=z; echo "${!a[@]}"'
+check bx-array-sparse-n '2'             0 'a=(1); a[5]=z; echo ${#a[@]}'
+check bx-array-unset-el '0 2'           0 'a=(1 2 3); unset "a[1]"; echo "${!a[@]}"'
+check bx-array-unset-all '[]'           0 'a=(1 2 3); unset a; echo "[${a[@]}]"'
+check bx-array-explicit '0 2 / y x'     0 'a=([2]=x [0]=y); echo "${!a[@]} / ${a[@]}"'
+# associative arrays
+check bx-assoc          'v'             0 'declare -A m; m[k]=v; echo ${m[k]}'
+check bx-assoc-literal  '12'            0 'declare -A m; m=([a]=1 [b]=2); echo "${m[a]}${m[b]}"'
+check bx-assoc-keys     'x'             0 'declare -A m; m[x]=1; echo "${!m[@]}"'
+check bx-assoc-count    '1'             0 'declare -A m; m[k]=v; echo ${#m[@]}'
+# declare/local attributes. -i is an ATTRIBUTE: later assignments too.
+check bx-declare-i      '7'             0 'declare -i n; n=3+4; echo $n'
+check bx-declare-i-init '2'             0 'declare -i n=1+1; echo $n'
+check bx-declare-i-later '5'            0 'declare -i n; n=2; n=n+3; echo $n'
+check bx-local-i        '4'             0 'f() { local -i n=2+2; echo $n; }; f'
+check bx-local-array    '2'             0 'f() { local -a arr; arr=(1 2); echo ${#arr[@]}; }; f'
+check bx-local-array-scope '1 2
+9'                                      0 'f() { local -a arr=(1 2); echo "${arr[@]}"; }; arr=(9); f; echo "${arr[@]}"'
+# read -a, mapfile, PIPESTATUS
+check bx-read-a         '2'             0 'echo "1 2 3" | { read -a arr; echo ${arr[1]}; }'
+check bx-read-a-count   '3'             0 'echo "1 2 3" | { read -a arr; echo ${#arr[@]}; }'
+check bx-mapfile        '2'             0 'printf "a\nb\n" | { mapfile arr; echo ${#arr[@]}; }'
+check bx-readarray      'a'             0 'printf "a\nb\n" | { readarray arr; echo -n "${arr[0]}"; }'
+check bx-pipestatus     '1'             0 'false | true; echo ${PIPESTATUS[0]}'
+check bx-pipestatus-all '3 4'           0 'sh -c "exit 3" | sh -c "exit 4"; echo "${PIPESTATUS[@]}"'
+check bx-pipestatus-one '0'             0 'true; echo ${PIPESTATUS[0]}'
+# an array must survive the re-exec used for `{ ... } &'
+check bx-array-async    '1 2 3'         0 'a=(1 2 3); { echo "${a[@]}"; } & wait'
+
 # --- stdin / REPL mode ----------------------------------------------------
 got=$(printf 'echo from-stdin\nexit 0\n' | "$SXSH" 2>/dev/null)
 if printf '%s' "$got" | grep -q 'from-stdin'; then

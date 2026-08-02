@@ -62,6 +62,9 @@
   ;; variables for the life of the shell -- assigning to them does not bring
   ;; the magic back.
   (dynamic-off (make-hash-table :test 'equal))
+  ;; Names declared with `declare -i': every assignment to one is evaluated
+  ;; as an arithmetic expression rather than stored verbatim.
+  (int-vars (make-hash-table :test 'equal))
   ;; control-flow signals for break/continue/return handled via catch tags
   )
 
@@ -213,11 +216,76 @@ ignored rather than believed."
 ;;; variable access
 ;;; ---------------------------------------------------------------------------
 
+;;; ---------------------------------------------------------------------------
+;;; Arrays (bash; not POSIX)
+;;;
+;;; A variable cell is (VALUE . EXPORTED-P) where VALUE is normally a string.
+;;; For an array it is an SH-ARRAY instead, so nothing that only reads scalars
+;;; needs to change -- GET-VAR keeps returning a string. Both flavours use a
+;;; hash table because bash arrays are sparse: `a[5]=x' on an empty array
+;;; leaves indices 0-4 genuinely absent, not empty strings.
+;;; ---------------------------------------------------------------------------
+
+(defstruct (sh-array (:constructor %make-sh-array (kind)))
+  (kind :indexed)                       ; :indexed or :assoc
+  (table (make-hash-table :test 'equal)))
+
+(defun make-sh-array (&optional (kind :indexed)) (%make-sh-array kind))
+
+(defun array-key (arr key)
+  "Normalise a subscript: integers for an indexed array, strings for assoc."
+  (if (eq (sh-array-kind arr) :assoc)
+      (princ-to-string key)
+      (if (integerp key) key (or (ignore-errors (parse-integer key)) 0))))
+
+(defun array-get (arr key)
+  (gethash (array-key arr key) (sh-array-table arr)))
+
+(defun array-set (arr key value)
+  (setf (gethash (array-key arr key) (sh-array-table arr)) value))
+
+(defun array-unset (arr key)
+  (remhash (array-key arr key) (sh-array-table arr)))
+
+(defun array-keys (arr)
+  "Subscripts in order: numeric for an indexed array, insertion-independent
+lexicographic for an associative one (bash's order is unspecified there)."
+  (let ((keys '()))
+    (maphash (lambda (k v) (declare (ignore v)) (push k keys))
+             (sh-array-table arr))
+    (if (eq (sh-array-kind arr) :assoc)
+        (sort keys #'string<)
+        (sort keys #'<))))
+
+(defun array-values (arr)
+  (mapcar (lambda (k) (array-get arr k)) (array-keys arr)))
+
+(defun array-from-list (values &optional (kind :indexed))
+  (let ((arr (make-sh-array kind)))
+    (loop for v in values for i from 0 do (array-set arr i v))
+    arr))
+
+(defun array-next-index (arr)
+  "Where an append lands: one past the highest index, 0 when empty."
+  (let ((keys (array-keys arr)))
+    (if keys (1+ (reduce #'max keys)) 0)))
+
+(defun var-array (sh name)
+  "The SH-ARRAY stored under NAME, or NIL if the value is a scalar/absent."
+  (let ((cell (gethash name (shell-vars sh))))
+    (and cell (sh-array-p (car cell)) (car cell))))
+
+(defun scalar-of (value)
+  "The scalar view of a cell value. bash: `$a' on an array is `${a[0]}'."
+  (if (sh-array-p value)
+      (or (array-get value 0) "")
+      value))
+
 (defun get-var (sh name)
   "Return (values value found-p exported-p)."
   (multiple-value-bind (cell found) (gethash name (shell-vars sh))
     (if found
-        (values (car cell) t (cdr cell))
+        (values (scalar-of (car cell)) t (cdr cell))
         (values nil nil nil))))
 
 (define-condition readonly-violation (error)
@@ -307,7 +375,9 @@ that is relying on the least portable of the three behaviours."
   "Build the child environment (list of K=V) from exported variables."
   (let ((out '()))
     (maphash (lambda (k cell)
-               (when (cdr cell)
+               ;; bash cannot export an array through the environment, and
+               ;; neither can we -- there is nowhere to put the subscripts.
+               (when (and (cdr cell) (not (sh-array-p (car cell))))
                  (push (format nil "~A=~A" k (car cell)) out)))
              (shell-vars sh))
     out))

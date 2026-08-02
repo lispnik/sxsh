@@ -327,13 +327,17 @@ so builtins in non-final pipeline stages run in-process writing to the pipe."
     (setf stages (nreverse stages))
     ;; Reap every spawned child so none are left as zombies; remember the
     ;; status of the FINAL stage specifically -- that is the pipeline's status.
-    (let ((final 0) (last-index (1- n)) (rightmost-failure nil))
+    (let ((final 0) (last-index (1- n)) (rightmost-failure nil) (all '()))
       (loop for stage in stages for i from 0 do
         (let ((st (ecase (car stage)
                     (:pid (wait-for (cdr stage)))
                     (:status (cdr stage)))))
+          (push st all)
           (when (/= st 0) (setf rightmost-failure st))
           (when (= i last-index) (setf final st))))
+      ;; bash $PIPESTATUS: one element per stage, in order.
+      (set-var sh "PIPESTATUS"
+               (array-from-list (mapcar #'princ-to-string (nreverse all))))
       ;; bash `set -o pipefail': the pipeline's status is that of the last
       ;; stage to fail, not of the last stage. Without it a failing producer is
       ;; invisible -- `false | cat' succeeds -- which is why build scripts
@@ -503,7 +507,17 @@ the same name may legitimately reappear once we have moved on to a later word."
     (push (subseq s start) out)
     (nreverse out)))
 
+(defun set-single-pipestatus (sh status)
+  "bash keeps $PIPESTATUS meaningful for a lone command too: one element."
+  (set-var sh "PIPESTATUS" (array-from-list (list (princ-to-string status))))
+  status)
+
 (defun exec-simple (sh node)
+  ;; PIPESTATUS is set from the result, AFTER the words have been expanded --
+  ;; so `echo ${PIPESTATUS[0]}' still reports the previous command.
+  (set-single-pipestatus sh (exec-simple-1 sh node)))
+
+(defun exec-simple-1 (sh node)
   ;; Reset the command-substitution status tracker; any $(...) expanded while
   ;; building this command's words or assignments will set it.
   (setf (shell-last-cmdsub-status sh) nil)
@@ -552,10 +566,10 @@ the same name may legitimately reappear once we have moved on to a later word."
              ;; terminal, wait, then reclaim -- so Ctrl-Z/Ctrl-C hit the child.
              (let ((pid (spawn-external sh node :words words
                                                :setpgroup t :pgroup 0)))
-               (return-from exec-simple
+               (return-from exec-simple-1
                  (wait-foreground sh pid (ignore-errors (deparse node)))))
              (let ((pid (spawn-external sh node :words words)))
-               (return-from exec-simple (wait-for pid)))))))
+               (return-from exec-simple-1 (wait-for pid)))))))
          (cond ((eq thrown :redirect-error) 1)
                ((and (consp thrown) (eq (first thrown) :command-error))
                 (second thrown))
@@ -686,6 +700,141 @@ reusing NODE's assignments and redirections."
             ps4 (append assigns words))
     (finish-output *error-output*)))
 
+(defun split-subscript (name)
+  "Split `a[i]' into (values \"a\" \"i\"); a plain name yields (values name nil)."
+  (let ((open (position #\[ name)))
+    (if (and open (plusp open) (char= (char name (1- (length name))) #\]))
+        (values (subseq name 0 open) (subseq name (1+ open) (1- (length name))))
+        (values name nil))))
+
+(defun array-literal-p (value)
+  "True if an assignment RHS is a parenthesised array literal."
+  (let ((v (string-trim " " value)))
+    (and (>= (length v) 2)
+         (char= (char v 0) #\()
+         (char= (char v (1- (length v))) #\)))))
+
+(defun expand-array-literal (sh value)
+  "Expand `(a b c)' into a list of elements, or an alist for `([k]=v ...)'.
+
+Returns (values plain-elements indexed-pairs). Each element is expanded with
+field splitting and globbing, exactly like command words -- `a=($x)' with
+x=\"1 2\" gives two elements, which is the usual idiom for splitting a string."
+  (let* ((v (string-trim " " value))
+         (inner (subseq v 1 (1- (length v))))
+         (plain '()) (pairs '()))
+    (dolist (w (split-array-words inner))
+      (multiple-value-bind (key val) (array-literal-entry w)
+        (if key
+            (push (cons (single-expand sh key)
+                        (or (first (expand-word-to-fields sh val :split nil))
+                            ""))
+                  pairs)
+            (dolist (f (expand-word-to-fields sh w)) (push f plain)))))
+    (values (nreverse plain) (nreverse pairs))))
+
+(defun array-literal-entry (w)
+  "For `[k]=v' return (values \"k\" \"v\"), else (values nil nil)."
+  (if (and (plusp (length w)) (char= (char w 0) #\[))
+      (let ((close (position #\] w)))
+        (if (and close (< (1+ close) (length w)) (char= (char w (1+ close)) #\=))
+            (values (subseq w 1 close) (subseq w (+ close 2)))
+            (values nil nil)))
+      (values nil nil)))
+
+(defun split-array-words (s)
+  "Split an array literal's body on unquoted whitespace, keeping quoting and
+substitutions intact for the later expansion pass."
+  (let ((words '()) (buf (make-string-output-stream)) (i 0) (n (length s))
+        (any nil))
+    (flet ((flush () (let ((w (get-output-stream-string buf)))
+                       (when (or any (plusp (length w))) (push w words))
+                       (setf any nil))))
+      (loop while (< i n) do
+        (let ((c (char s i)))
+          (cond
+            ((member c '(#\Space #\Tab #\Newline)) (flush) (incf i))
+            ((char= c #\\)
+             (write-char c buf)
+             (when (< (1+ i) n) (write-char (char s (1+ i)) buf))
+             (setf any t) (incf i 2))
+            ((char= c #\')
+             (let ((j (position #\' s :start (1+ i))))
+               (write-string (subseq s i (if j (1+ j) n)) buf)
+               (setf any t i (if j (1+ j) n))))
+            ((char= c #\")
+             (let ((j (1+ i)))
+               (loop while (< j n) do
+                 (cond ((char= (char s j) #\\) (incf j 2))
+                       ((char= (char s j) #\") (return))
+                       (t (incf j))))
+               (write-string (subseq s i (min n (1+ j))) buf)
+               (setf any t i (min n (1+ j)))))
+            ((and (char= c #\$) (< (1+ i) n) (char= (char s (1+ i)) #\())
+             (let ((depth 0) (j (1+ i)))
+               (loop while (< j n) do
+                 (cond ((char= (char s j) #\() (incf depth) (incf j))
+                       ((char= (char s j) #\)) (decf depth) (incf j)
+                        (when (zerop depth) (return)))
+                       (t (incf j))))
+               (write-string (subseq s i j) buf)
+               (setf any t i j)))
+            (t (write-char c buf) (setf any t) (incf i)))))
+      (flush))
+    (nreverse words)))
+
+(defun assign-one (sh name value appendp)
+  "Perform one assignment, honouring array syntax on either side.
+
+Four shapes: plain scalar, `a=(...)' whole-array, `a[i]=v' element, and the
+`+=' variants of each."
+  (multiple-value-bind (base sub) (split-subscript name)
+    (cond
+      ;; a=(...)  /  a+=(...)
+      ((array-literal-p value)
+       (multiple-value-bind (plain pairs) (expand-array-literal sh value)
+         (let* ((existing (and appendp (var-array sh base)))
+                (arr (or existing
+                         (make-sh-array
+                          ;; `declare -A' having run first is what makes this
+                          ;; an associative array; otherwise indexed.
+                          (let ((old (var-array sh base)))
+                            (if (and old (eq (sh-array-kind old) :assoc))
+                                :assoc :indexed))))))
+           (let ((next (if existing (array-next-index arr) 0)))
+             (dolist (v plain) (array-set arr next v) (incf next)))
+           (dolist (kv pairs) (array-set arr (car kv) (cdr kv)))
+           (set-var sh base arr)
+           value)))
+      ;; a[i]=v
+      (sub
+       (let ((arr (or (var-array sh base)
+                      (let ((new (make-sh-array :indexed)))
+                        ;; Promote an existing scalar to element 0, as bash does.
+                        (multiple-value-bind (old found) (get-var sh base)
+                          (when (and found old (plusp (length old)))
+                            (array-set new 0 old)))
+                        (set-var sh base new)
+                        new))))
+         (let ((key (if (eq (sh-array-kind arr) :assoc)
+                        (single-expand sh sub)
+                        (eval-arith sh sub))))
+           (array-set arr key
+                      (if appendp
+                          (concatenate 'string (or (array-get arr key) "") value)
+                          value))))
+       value)
+      ;; plain scalar
+      (t
+       (when (nth-value 1 (gethash base (shell-int-vars sh)))
+         (setf value (princ-to-string (eval-arith sh value))))
+       (let ((v (if appendp
+                    (concatenate 'string (or (nth-value 0 (get-var sh base)) "")
+                                 value)
+                    value)))
+         (set-var sh base v)
+         v)))))
+
 (defun apply-assignments (sh assignments &key to-shell)
   "Evaluate NAME=VALUE assignments. When TO-SHELL, set in the shell (persist);
 otherwise return a list of temporary K=V for a command environment."
@@ -694,19 +843,21 @@ otherwise return a list of temporary K=V for a command environment."
          (dolist (a assignments)
            (let* ((name (assignment-name a))
                   (vw (assignment-value a))
-                  (val (if vw
-                           (first (expand-word-to-fields sh (word-text vw)
-                                                         :split nil :glob nil
-                                                         :assignment t))
-                           "")))
+                  (raw (and vw (word-text vw)))
+                  ;; An array literal must reach ASSIGN-ONE unexpanded: the
+                  ;; per-element expansion has to see the original quoting, or
+                  ;; `a=(1 "b c" 3)' loses the quotes and splits into four.
+                  (literalp (and raw (array-literal-p raw)))
+                  (val (cond
+                         ((null vw) "")
+                         (literalp raw)
+                         (t (first (expand-word-to-fields sh raw
+                                                          :split nil :glob nil
+                                                          :assignment t))))))
              (setf val (or val ""))
-             ;; bash `name+=value' appends to the existing value.
-             (when (assignment-append a)
-               (setf val (concatenate 'string
-                                      (or (nth-value 0 (get-var sh name)) "")
-                                      val)))
              (cond
-               (to-shell (set-var sh name val))
+               ;; ASSIGN-ONE handles the array shapes and `+=' itself.
+               (to-shell (assign-one sh name val (assignment-append a)))
                (t
                 ;; POSIX evaluates these left to right, and an earlier one is
                 ;; visible to a later one: `a=1 b=$a cmd' must give b=1. Bind
@@ -752,20 +903,18 @@ in-process."
     (dolist (a assignments saved)
       (let* ((name (assignment-name a))
              (vw (assignment-value a))
-             (val (or (if vw
-                          (first (expand-word-to-fields sh (word-text vw)
-                                                        :split nil :glob nil
-                                                        :assignment t))
-                          "")
-                      "")))
-        (when (assignment-append a)
-          (setf val (concatenate 'string
-                                 (or (nth-value 0 (get-var sh name)) "")
-                                 val)))
+             (raw (and vw (word-text vw)))
+             (val (cond
+                    ((null vw) "")
+                    ((array-literal-p raw) raw)
+                    (t (or (first (expand-word-to-fields sh raw
+                                                         :split nil :glob nil
+                                                         :assignment t))
+                           "")))))
         ;; Push before setting, so an earlier assignment is visible to a later
         ;; one (`a=1 b=$a cmd') while still restoring to the original value.
         (push (cons name (multiple-value-list (get-var sh name))) saved)
-        (set-var sh name val)))))
+        (assign-one sh name val (assignment-append a))))))
 
 (defun restore-assignments (sh saved)
   (dolist (entry saved)
@@ -1225,7 +1374,21 @@ they travel in the child's environment."
     (maphash (lambda (k cell)
                (when (and (not (cdr cell))         ; not exported
                           (assignable-name-p k))
-                 (format s "~A=~A~%" k (shell-quote (car cell)))))
+                 ;; An array cannot travel as a scalar: emit it as a literal
+                 ;; so the child rebuilds it, subscripts and all. Without this
+                 ;; SHELL-QUOTE was handed a struct.
+                 (let ((v (car cell)))
+                   (if (sh-array-p v)
+                       (progn
+                         (when (eq (sh-array-kind v) :assoc)
+                           (format s "declare -A ~A~%" k))
+                         (format s "~A=(~{~A~^ ~})~%" k
+                                 (mapcar (lambda (key)
+                                           (format nil "[~A]=~A"
+                                                   (shell-quote (princ-to-string key))
+                                                   (shell-quote (or (array-get v key) ""))))
+                                         (array-keys v))))
+                       (format s "~A=~A~%" k (shell-quote v))))))
              (shell-vars sh))
     (maphash (lambda (k def)
                (declare (ignore k))

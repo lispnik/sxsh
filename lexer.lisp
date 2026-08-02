@@ -290,6 +290,24 @@ Detects assignment-word shape as a side product via classify."
          (or (alpha-char-p c0) (char= c0 #\_)))
        (every (lambda (c) (or (alphanumericp c) (char= c #\_))) s)))
 
+(defun array-literal-assignment-p (text)
+  "True if TEXT is `NAME=' or `NAME+=' or `NAME[sub]=', i.e. the head of an
+array literal assignment."
+  (let ((eq (position #\= text)))
+    (and eq (plusp eq) (= eq (1- (length text)))
+         (let ((name (subseq text 0 eq)))
+           (when (and (plusp (length name))
+                      (char= (char name (1- (length name))) #\+))
+             (setf name (subseq name 0 (1- (length name)))))
+           (or (valid-name-p name) (subscripted-name-p name))))))
+
+(defun subscripted-name-p (text)
+  "True for `NAME[subscript]', the left side of an element assignment."
+  (let ((open (position #\[ text)))
+    (and open (plusp open)
+         (char= (char text (1- (length text))) #\])
+         (valid-name-p (subseq text 0 open)))))
+
 (defun assignment-word-split (text)
   "If TEXT has the form NAME=... (with NAME a valid name, no quoting in NAME),
 return (values name value-string append-p); else NIL. The '=' must appear
@@ -303,7 +321,9 @@ instead of replacing it. The `+' belongs to the operator, not the name, so
     (when (and eq (plusp eq))
       (let* ((appendp (and (> eq 1) (char= (char text (1- eq)) #\+)))
              (name (subseq text 0 (if appendp (1- eq) eq))))
-        (when (valid-name-p name)
+        ;; NAME or NAME[subscript]; the subscript stays part of the name and
+        ;; is split off by the executor, which is where it gets expanded.
+        (when (or (valid-name-p name) (subscripted-name-p name))
           (values name (subseq text (1+ eq)) appendp))))))
 
 ;;; ---------------------------------------------------------------------------
@@ -403,6 +423,19 @@ are returned as :assignment-word."
 
 (defun scan-word-token (lx line col &key accept-assignment)
   (let* ((text (scan-word lx)))
+    ;; bash array literal `name=(a b c)' / `name+=(a b)'. SCAN-WORD stops at
+    ;; the `(' because it is an operator start, so the parenthesised list has
+    ;; to be pulled into the same word here -- otherwise the assignment and
+    ;; the list arrive as separate tokens and `a=(1 2)' reads as an assignment
+    ;; followed by a subshell.
+    (when (and accept-assignment
+               (eql (lx-peek lx) #\()
+               (array-literal-assignment-p text))
+      (let ((buf (make-array (length text) :element-type 'character
+                                           :adjustable t :fill-pointer t
+                                           :initial-contents text)))
+        (scan-balanced lx buf #\( #\))
+        (setf text (coerce buf 'string))))
     ;; IO_NUMBER: digits directly before a redirection operator, no blanks
     (when (looks-like-io-number text (lx-peek lx))
       (return-from scan-word-token (make-token :io-number text line col)))

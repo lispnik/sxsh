@@ -360,8 +360,33 @@ ambiguity the same way, and `( (a); (b) )` with spaces is unaffected. Note `((ex
 is INVERTED from the value: an arithmetic 0 is false, which is what makes `((i < n))` work as a
 loop condition.
 
-Still missing, roughly in the order worth doing: `select`; `shopt` and extglob; process
-substitution; `trap ERR`/`DEBUG`; then the two big ones, `[[ ]]` with `=~`, and arrays
+Tranche 5 added arrays, indexed and associative. A variable cell is still `(VALUE .
+EXPORTED-P)`; for an array VALUE is an `SH-ARRAY` instead of a string, so nothing that only
+reads scalars had to change -- `get-var` still returns a string, using `scalar-of`, because
+bash's `$a` means `${a[0]}`. Both flavours use a hash table because bash arrays are **sparse**:
+`a[5]=x` on an empty array leaves 0-4 genuinely absent, not empty.
+
+Four things this broke or nearly broke, all worth knowing before touching it again:
+
+- **The RHS of an array literal must reach the executor RAW.** `apply-assignments` expands the
+  value first, which quote-removes it, so `a=(1 "b c" 3)` arrived as `(1 b c 3)` and split into
+  four elements. `array-literal-p` is checked on the raw word text and the expansion is skipped.
+- **`${a[@]}` needs field separators**, which only the caller can emit -- so it is special-cased
+  in `expand-pass` and `expand-double` alongside `$@`, not inside `expand-braced-param`. `[*]`
+  joins, `[@]` splits, exactly as `$*` and `$@` differ.
+- **The async re-exec serialises variables** into a prelude. Arrays cannot travel as scalars, so
+  they are emitted as `name=([k]=v ...)` literals (with a `declare -A` first when associative);
+  otherwise `shell-quote` is handed a struct and every `{ ... } &` test fails.
+- **`declare -i` is an attribute, not a one-off.** Every *later* assignment to the name is
+  evaluated arithmetically too, which is the point of `declare -i n; n=3+4`. It lives in
+  `shell-int-vars`.
+
+Arrays are never exported: there is nowhere in the environment to put subscripts, and bash does
+not export them either.
+
+Still missing: `select`; `shopt` and extglob; process substitution; `trap ERR`/`DEBUG`;
+`coproc`; a subscript containing whitespace (`m[a b]=v`, which the lexer splits); and the last
+big one, `[[ ]]` with `=~`
 -- which drag in `declare`/`local` options, `PIPESTATUS`, `read -a`, `mapfile` and namerefs, and
 which touch the variable model everywhere, so they want their own tranche.
 
