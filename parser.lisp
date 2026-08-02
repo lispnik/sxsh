@@ -303,7 +303,8 @@ We snapshot the lexer, read a token, then restore."
                                   appendp)
                  assignments))
          (advance p))
-        ((or (redirect-op-token-p (cur-type p)) (eq (cur-type p) :io-number))
+        ((or (redirect-op-token-p (cur-type p))
+             (member (cur-type p) '(:io-number :io-varname)))
          (push (parse-redirect p) redirects))
         (t (return))))
     ;; command word + suffix (words and redirects)
@@ -337,10 +338,14 @@ We snapshot the lexer, read a token, then restore."
 ;;; ---------------------------------------------------------------------------
 
 (defun parse-redirect (p)
-  (let ((fd nil))
-    (when (eq (cur-type p) :io-number)
-      (setf fd (parse-integer (cur-text p)))
-      (advance p))
+  (let ((fd nil) (varfd nil))
+    (cond
+      ((eq (cur-type p) :io-number)
+       (setf fd (parse-integer (cur-text p)))
+       (advance p))
+      ((eq (cur-type p) :io-varname)
+       (setf varfd (subseq (cur-text p) 1 (1- (length (cur-text p)))))
+       (advance p)))
     (let ((op-type (cur-type p)))
       (unless (redirect-op-token-p op-type)
         (perr p "expected redirection operator"))
@@ -363,6 +368,7 @@ We snapshot the lexer, read a token, then restore."
         (let* ((target-text (cur-text p))
                (target (make-word target-text))
                (r (make-redirect op-kw fd target)))
+          (setf (redirect-varfd r) varfd)
           (advance p)
           (when heredoc-p
             (queue-heredoc (parser-lexer p) r strip-p target-text))
@@ -371,7 +377,8 @@ We snapshot the lexer, read a token, then restore."
 (defun parse-redirect-list (p)
   "Zero or more trailing redirections after a compound command."
   (let ((redirs '()))
-    (loop while (or (redirect-op-token-p (cur-type p)) (eq (cur-type p) :io-number))
+    (loop while (or (redirect-op-token-p (cur-type p))
+                    (member (cur-type p) '(:io-number :io-varname)))
           do (push (parse-redirect p) redirs))
     (nreverse redirs)))
 

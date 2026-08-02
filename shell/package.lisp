@@ -21,7 +21,7 @@
                 #:arith-for #:arith-for-init #:arith-for-cond #:arith-for-step
                 #:arith-for-body #:arith-for-redirects
                 #:redirect #:redirect-op #:redirect-fd #:redirect-target
-                #:redirect-heredoc
+                #:redirect-heredoc #:redirect-varfd
                 #:subshell #:subshell-body #:subshell-redirects
                 #:brace-group #:brace-group-body #:brace-group-redirects
                 #:if-clause #:if-clause-condition #:if-clause-then #:if-clause-else

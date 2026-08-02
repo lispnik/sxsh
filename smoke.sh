@@ -11,6 +11,9 @@
 set -u
 
 SXSH=${1:-./bin/sxsh}
+# Absolute: some cases cd into a scratch directory to exercise descriptor
+# redirections, and a relative path would stop resolving there.
+case $SXSH in /*) ;; *) SXSH=$PWD/${SXSH#./} ;; esac
 pass=0
 fail=0
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/sxsh-smoke.XXXXXX")
@@ -241,6 +244,50 @@ check set-noclobber-force 'b'        0 'cd "$(mktemp -d)"; set -C; echo a>f; ech
 check set-allexport     '1'          0 'set -a; V=x; env | grep -c "^V=x"'
 check set-noexec        ''           0 'set -n; echo NOTRUN'
 check set-invalid-opt   ''           2 'set -Z 2>/dev/null'
+
+# --- redirections: dup, move, close, {name} allocation ---------------------
+# Expectations diffed against bash before being written down. These run in
+# their own directory so the fd files cannot collide with other cases.
+rdir="$tmp/redir"; mkdir -p "$rdir"
+# Not a subshell: `check' increments the pass/fail counters, and a subshell
+# would silently discard them -- failures printed while the total stayed 0.
+rcheck() { local back=$PWD; cd "$rdir" || return; rm -f f.txt file1 out.txt
+           check "$@"; cd "$back" || return; }
+# `n>&n' succeeds even when n is closed; a DIFFERENT bad fd fails the command
+# (and only the command -- the raw SB-POSIX error used to kill the shell).
+rcheck redir-self-dup   'hello'  0 ': 3>&3; echo hello'
+rcheck redir-bad-fd     'st=1'   0 'echo x >&7 2>/dev/null; echo st=$?'
+rcheck redir-close      'hello'  0 'exec 5> f.txt; echo hello >&5; exec 5>&-; echo world >&5 2>/dev/null; cat f.txt'
+rcheck redir-move       'hello5
+world6'                          0 'exec 5> f.txt; echo hello5 >&5; exec 6>&5-; echo world5 >&5 2>/dev/null; echo world6 >&6; exec 6>&-; cat f.txt'
+# A command-scoped fd is gone again by the next command, subshell included.
+rcheck redir-not-leaked 'st=0'   0 'true 9> f.txt; ( echo world >&9 ) 2>/dev/null; cat f.txt; echo st=$?'
+# `>&word' with a non-numeric word sends BOTH streams to the file...
+rcheck redir-both       'STDERR
+STDOUT'                          0 'f(){ echo STDOUT; echo STDERR >&2; }; f >&out.txt; sort out.txt'
+# ...but only without an explicit descriptor.
+rcheck redir-ambiguous  'st=1'   0 'echo hi 2>&out.txt 2>/dev/null; echo st=$?'
+# `{name}>' allocates a fresh descriptor >= 10 and stores its number.
+rcheck redir-varfd      'named-fd-contents' 0 'exec {myfd}> f.txt; echo named-fd-contents >&$myfd; cat f.txt'
+rcheck redir-varfd-close 'foo55' 0 'exec {fd}>file1; echo foo55 >&$fd; exec {fd}>&-; echo bar >&$fd 2>/dev/null; cat file1'
+# The empty first line is the point: `{myvar}>' takes a NEW descriptor, so
+# echo's own stdout is untouched and it still prints its (empty) argument list.
+rcheck redir-varfd-num  '
+ge10=1'                          0 'echo {myvar}>/dev/null; echo "ge10=$((myvar>=10))"'
+# `{name}' is a redirection only as a whole word immediately before < or >.
+rcheck redir-varfd-word1 'x={myvar}' 0 'echo x={myvar}>/dev/stdout'
+rcheck redir-varfd-word2 'x={myvar}' 0 'echo x={myvar} >/dev/stdout'
+rcheck redir-varfd-word3 '+{myvar}'  0 'echo +{myvar}>/dev/stdout'
+rcheck redir-varfd-word4 'x='        0 'echo x= {myvar}>/dev/stdout'
+# The shell's own saved descriptors must sit outside the range a script names:
+# closing fd 10 once freed it for the next command's stdout backup, so `>&10'
+# silently duplicated stdout instead of failing.
+rcheck redir-backup-range 'st=1
+bar'                             0 'exec 10>file1; echo bar >&10; exec 10>&-; echo after >&10 2>/dev/null; echo st=$?; cat file1'
+# `err' goes to STDERR -- a plain `check' captures stdout only and would pass
+# on an empty string no matter where the text went.
+rcheck_err() { local back=$PWD; cd "$rdir" || return; check_err "$@"; cd "$back" || return; }
+rcheck_err redir-backup-safe 'err' 0 '(exec 3>&1) 2>/dev/null; echo err >&2'
 
 # --- arithmetic: bases, constant validation, subscripts, short circuit -----
 # Expectations diffed against bash before being written down.

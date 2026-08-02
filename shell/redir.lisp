@@ -68,15 +68,30 @@ Lisp condition."
                          "cannot overwrite existing file"
                          (errno-message e))))))
 
-(defconstant +fd-backup-base+ 10
+(defconstant +fd-backup-base+ 200
   "Saved fds live at or above this number.
 
 A redirection's backup must not sit where the script can reach it. Duplicating
 with plain dup() hands out the lowest free descriptor -- often fd 3 -- and a
 script that then does `exec 3>&1' silently overwrites the shell's saved copy.
 `(exec 3>&1) 2>/dev/null' did exactly that: restoring afterwards put stdout
-into fd 2, so every later `>&2' went to stdout. Real shells reserve the range
-above 10 for this.")
+into fd 2, so every later `>&2' went to stdout.
+
+10 is NOT far enough, which is what `exec 10>f; exec 10>&-; echo x >&10'
+showed: closing 10 freed it, so the next command's stdout backup was handed
+fd 10, and `>&10' then duplicated the shell's own stdout instead of failing.
+Scripts name descriptors up to 9 by hand and bash's `{name}>' form allocates
+from 10 upward, so the reserved range has to start well above both.")
+
+(defun checked-dup2 (from to)
+  "dup2 that reports a bad source descriptor as a REDIRECT-ERROR.
+
+Letting the raw SB-POSIX error escape aborted the whole shell -- `echo x >&7'
+with 7 closed printed \"Error in SB-POSIX:DUP2: Bad file descriptor (9)\" and
+died, where every shell fails just that command and carries on."
+  (handler-case (sb-posix:dup2 from to)
+    (error () (error 'redirect-error :path (princ-to-string from)
+                                     :detail "Bad file descriptor"))))
 
 (defun dup-to-high (fd)
   "Duplicate FD to the lowest free descriptor >= +FD-BACKUP-BASE+."
@@ -122,6 +137,53 @@ and no body to collect at the next newline -- the word IS the body."
 ;;; For external commands: build FILE-ACTION recipes
 ;;; ---------------------------------------------------------------------------
 
+(defconstant +varfd-base+ 10
+  "Lowest descriptor bash's `{name}>' form will allocate. Staying clear of
+0-9 is the point: a script may still name those explicitly.")
+
+(defun apply-varfd-redirect (sh r)
+  "bash `{name}>file': open on a FRESH descriptor >= 10 and put its number in
+NAME. `{name}>&-' instead closes whatever descriptor NAME currently holds.
+
+The descriptor is allocated in the parent even for an external command,
+because the variable has to be set where the script can see it; children
+inherit it, which is what makes `exec {fd}>f; cmd >&$fd' work."
+  (let* ((op (redirect-op r))
+         (name (redirect-varfd r))
+         (target (single-expand sh (word-text (redirect-target r)))))
+    (if (and (member op '(:>& :<&)) (string= target "-"))
+        (let ((cur (ignore-errors
+                     (parse-integer (or (nth-value 0 (get-var sh name)) "")))))
+          (when cur (ignore-errors (sb-posix:close cur)))
+          nil)
+        (let ((opened
+                (ecase op
+                  (:< (open-for-redirect target +o-rdonly+ 0))
+                  (:> (open-for-redirect target
+                                         (logior +o-wronly+ +o-creat+
+                                                 (noclobber-flags sh target))
+                                         +mode+))
+                  (:>\| (open-for-redirect target
+                                           (logior +o-wronly+ +o-creat+ +o-trunc+)
+                                           +mode+))
+                  (:>> (open-for-redirect target
+                                          (logior +o-wronly+ +o-creat+ +o-append+)
+                                          +mode+))
+                  (:<> (open-for-redirect target (logior +o-rdwr+ +o-creat+) +mode+))
+                  ((:>& :<&)
+                   (multiple-value-bind (kind num) (parse-dup-target target)
+                     (unless (eq kind :dup)
+                       (error 'redirect-error :path target
+                                              :detail "ambiguous redirect"))
+                     (sb-posix:fcntl num sb-posix:f-dupfd +varfd-base+))))))
+          (let ((high (if (>= opened +varfd-base+)
+                          opened
+                          (prog1 (sb-posix:fcntl opened sb-posix:f-dupfd
+                                                 +varfd-base+)
+                            (sb-posix:close opened)))))
+            (set-var sh name (princ-to-string high))
+            high)))))
+
 (defun redirect->file-actions (sh redirect)
   "Return (values list-of-file-action temp-path-or-nil)."
   (let* ((op (redirect-op redirect))
@@ -166,19 +228,56 @@ and no body to collect at the next newline -- the word IS the body."
                                 +mode+)
                        (fa-dup2 1 2))
                  nil)))
-      (:<& (values (dup-actions fd (single-expand sh target-word)) nil))
-      (:>& (values (dup-actions fd (single-expand sh target-word)) nil)))))
+      ((:<& :>&)
+       (values (dup-actions fd (single-expand sh target-word)
+                            :op op :explicit-fd (redirect-fd redirect) :sh sh)
+               nil)))))
 
-(defun dup-actions (fd target)
-  "Handle n<&m, n>&m, n<&- (close). TARGET is an already-expanded fd number
-or '-'. It must be expanded first: `exec 3>&$fd' is ordinary shell, and
-classifying the raw word rejected it as a bad descriptor."
-  (cond
-    ((string= target "-") (list (fa-close fd)))
-    ((and (plusp (length target)) (every #'digit-char-p target))
-     (list (fa-dup2 (parse-integer target) fd)))
-    (t (error 'redirect-error :path target
-                              :detail "bad file descriptor in redirection"))))
+(defun parse-dup-target (target)
+  "Decode the word after `>&' or `<&'. Returns (values kind number).
+
+  :close  `-'      close the descriptor
+  :dup    `m'      duplicate m onto it
+  :move   `m-'     duplicate m onto it, then close m
+  :file            anything else -- a filename, handled by the caller
+
+TARGET is already expanded: `exec 3>&$fd' is ordinary shell, and classifying
+the raw word rejected it as a bad descriptor."
+  (let ((n (length target)))
+    (cond
+      ((string= target "-") (values :close nil))
+      ((and (plusp n) (every #'digit-char-p target))
+       (values :dup (parse-integer target)))
+      ((and (> n 1) (char= (char target (1- n)) #\-)
+            (every #'digit-char-p (subseq target 0 (1- n))))
+       (values :move (parse-integer target :end (1- n))))
+      (t (values :file nil)))))
+
+(defun dup-both-streams-p (op explicit-fd)
+  "True for bash's `>&word' shorthand, which sends stdout AND stderr to WORD.
+
+Only without an explicit descriptor: `2>&word' is an ambiguous redirect, not a
+request to write both streams to a file."
+  (and (eq op :>&) (null explicit-fd)))
+
+(defun dup-actions (fd target &key op explicit-fd sh)
+  "File actions for n<&m, n>&m, n>&m- and n>&-."
+  (multiple-value-bind (kind num) (parse-dup-target target)
+    (ecase kind
+      (:close (list (fa-close fd)))
+      ;; `n>&n' is a no-op that SUCCEEDS even when n is closed, which is why
+      ;; it cannot go through dup2: `: 3>&3' is fine in every shell.
+      (:dup (if (= num fd) '() (list (fa-dup2 num fd))))
+      (:move (if (= num fd)
+                 '()
+                 (list (fa-dup2 num fd) (fa-close num))))
+      (:file
+       (unless (dup-both-streams-p op explicit-fd)
+         (error 'redirect-error :path target :detail "ambiguous redirect"))
+       (list (fa-open 1 target
+                      (logior +o-wronly+ +o-creat+ (noclobber-flags sh target))
+                      +mode+)
+             (fa-dup2 1 2))))))
 
 (defun single-expand (sh word-text)
   "Expand a redirection target to a single field (no splitting; globbing only
@@ -199,9 +298,12 @@ if it yields exactly one match)."
   "Return (values file-actions temp-paths) for a list of REDIRECT nodes."
   (let ((actions '()) (temps '()))
     (dolist (r redirects)
-      (multiple-value-bind (acts temp) (redirect->file-actions sh r)
-        (setf actions (nconc actions acts))
-        (when temp (push temp temps))))
+      (if (redirect-varfd r)
+          ;; Allocated in the parent, and inherited: no file action to add.
+          (apply-varfd-redirect sh r)
+          (multiple-value-bind (acts temp) (redirect->file-actions sh r)
+            (setf actions (nconc actions acts))
+            (when temp (push temp temps)))))
     (values actions temps)))
 
 ;;; ---------------------------------------------------------------------------
@@ -218,6 +320,11 @@ RESTORE-REDIRECTS. Also returns temp paths to delete."
         (dolist (r redirects)
           (let* ((op (redirect-op r))
                  (fd (or (redirect-fd r) (default-fd op))))
+           ;; `{name}>' allocates its own descriptor and is never restored --
+           ;; the whole point is that the script keeps it.
+           (if (redirect-varfd r)
+               (apply-varfd-redirect sh r)
+            (progn
             ;; back up the target fd
             (let ((backup (ignore-errors (dup-to-high fd))))
               (push (make-saved-fd :orig-fd fd :backup-fd backup) saved))
@@ -258,12 +365,30 @@ RESTORE-REDIRECTS. Also returns temp paths to delete."
               ((:<& :>&)
                ;; expanded, so `exec 3>&$fd' works
                (let ((tgt (single-expand sh (word-text (redirect-target r)))))
-                 (cond ((string= tgt "-") (ignore-errors (sb-posix:close fd)))
-                       ((and (plusp (length tgt)) (every #'digit-char-p tgt))
-                        (sb-posix:dup2 (parse-integer tgt) fd))
-                       (t (error 'redirect-error
-                                 :path tgt
-                                 :detail "bad file descriptor in redirection"))))))))
+                 (multiple-value-bind (kind num) (parse-dup-target tgt)
+                   (ecase kind
+                     (:close (ignore-errors (sb-posix:close fd)))
+                     ;; `n>&n' succeeds even when n is closed.
+                     (:dup (unless (= num fd) (checked-dup2 num fd)))
+                     (:move (unless (= num fd)
+                              (checked-dup2 num fd)
+                              (ignore-errors (sb-posix:close num))))
+                     (:file
+                      (unless (dup-both-streams-p op (redirect-fd r))
+                        (error 'redirect-error :path tgt
+                                               :detail "ambiguous redirect"))
+                      ;; fd 2 needs its own backup or restore leaves it dup'd.
+                      (let ((newfd (open-for-redirect
+                                    tgt
+                                    (logior +o-wronly+ +o-creat+
+                                            (noclobber-flags sh tgt))
+                                    +mode+)))
+                        (push (make-saved-fd
+                               :orig-fd 2 :backup-fd (ignore-errors (dup-to-high 2)))
+                              saved)
+                        (unless (= newfd 1)
+                          (sb-posix:dup2 newfd 1) (sb-posix:close newfd))
+                        (sb-posix:dup2 1 2))))))))))))
       (error (e)
         (restore-redirects saved)
         (dolist (p temps) (ignore-errors (delete-file p)))

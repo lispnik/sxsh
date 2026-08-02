@@ -35,7 +35,8 @@
   op
   fd
   target
-  heredoc)                              ; (delimiter body quoted-p strip-p) once collected
+  heredoc                               ; (delimiter body quoted-p strip-p) once collected
+  varfd)                                ; bash `{name}>file': NAME receives the fd
 
 ;;; bash `coproc [NAME] command' -- background job with two pipes
 (defstruct (coproc-clause (:include node)

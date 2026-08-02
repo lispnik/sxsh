@@ -256,6 +256,19 @@ tracking nesting, quotes and nested substitutions. Assumes point is on OPEN."
        (every #'digit-char-p text)
        (member next-char '(#\< #\>))))
 
+(defun looks-like-io-varname (text next-char)
+  "`{name}' immediately followed by < or > is bash's fd-allocation form.
+
+The adjacency and the exact shape are both load-bearing: `echo {v}>f' is a
+redirection, but `echo x={v}>f' and `echo +{v}>f' are ordinary words, and
+`echo {v} >f' is a word too."
+  (let ((n (length text)))
+    (and (>= n 3)
+         (char= (char text 0) #\{)
+         (char= (char text (1- n)) #\})
+         (valid-name-p (subseq text 1 (1- n)))
+         (member next-char '(#\< #\>)))))
+
 (defun subscript-assignment-ahead-p (lx)
   "Point is on `['. True if a matching `]' exists and is followed by `=' or
 `+=' -- that is, this really is the left side of an element assignment."
@@ -547,6 +560,8 @@ are returned as :assignment-word."
     ;; IO_NUMBER: digits directly before a redirection operator, no blanks
     (when (looks-like-io-number text (lx-peek lx))
       (return-from scan-word-token (make-token :io-number text line col)))
+    (when (looks-like-io-varname text (lx-peek lx))
+      (return-from scan-word-token (make-token :io-varname text line col)))
     (when accept-assignment
       (multiple-value-bind (name value) (assignment-word-split text)
         (declare (ignore value))
