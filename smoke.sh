@@ -242,6 +242,26 @@ check set-allexport     '1'          0 'set -a; V=x; env | grep -c "^V=x"'
 check set-noexec        ''           0 'set -n; echo NOTRUN'
 check set-invalid-opt   ''           2 'set -Z 2>/dev/null'
 
+# --- echo -e escape decoding ----------------------------------------------
+# echo and printf share DECODE-ESCAPE-AT; these pin the forms that differ or
+# that a partial decoder silently passes through as literal text.
+check echo-e-hex        'abcdef'  0 'echo -e "abcd\x65f"'
+check echo-e-hex-1digit 'ab'      0 'echo -e "a\x62"'
+check echo-e-hex-bare   'a\x'     0 'echo -e "a\x"'
+check echo-e-esc        'a b'     0 'echo -e "a\eb" | tr "\033" " "'
+check echo-e-u4         'abcdef'  0 'echo -e "abcdef"'
+check echo-e-u8         'abcdef'  0 'echo -e "abcd\U00000065f"'
+check echo-e-u-short    'ab'      0 'echo -e "a\u62"'
+# \c stops output AND suppresses the newline, so the next echo joins on.
+check echo-e-c-stops    'xy abZ'  0 'echo -e "xy ab\cde zzz"; echo Z'
+# Octal needs the leading zero in echo: \44 is literal, \044 is a byte.
+check echo-e-octal      'abcd$e'  0 'echo -e "abcd\0044e"'
+check echo-e-octal-1    'a b'     0 'echo -e "a\040b"'
+check echo-e-no-octal   'a\44'    0 'echo -e "a\44"'
+# printf keeps the bare-\NNN form its format string is specified with.
+check printf-bare-octal 'a b'     0 'printf "a\040b\n"'
+check printf-hex        'abc'     0 'printf "a\x62c\n"'
+
 # --- read: escapes and EOF status (POSIX 2.14) ----------------------------
 check read-eof-status   'st=1 x=a'   0 'printf "a" | { read x; echo "st=$? x=$x"; }'
 check read-newline-st   'st=0 x=a'   0 'printf "a\n" | { read x; echo "st=$? x=$x"; }'

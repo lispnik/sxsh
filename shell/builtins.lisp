@@ -42,31 +42,35 @@
                          (#\e (setf interpret t))
                          (#\E (setf interpret nil))))))
     (let ((text (format nil "~{~A~^ ~}" args)))
-      (write-string (if interpret (interpret-escapes text) text) out)
+      (if interpret
+          (multiple-value-bind (decoded stopped) (interpret-escapes text)
+            (write-string decoded out)
+            ;; \c stops processing AND suppresses the trailing newline.
+            (when stopped (setf newline nil)))
+          (write-string text out))
       (when newline (write-char #\Newline out)))
     0))
 
 (defun interpret-escapes (s)
-  (with-output-to-string (o)
-    (let ((i 0) (n (length s)))
-      (loop while (< i n) do
-        (let ((c (char s i)))
-          (if (and (char= c #\\) (< (1+ i) n))
-              (progn
-                (incf i)
-                (case (char s i)
-                  (#\n (write-char #\Newline o))
-                  (#\t (write-char #\Tab o))
-                  (#\r (write-char #\Return o))
-                  (#\\ (write-char #\\ o))
-                  (#\a (write-char (code-char 7) o))
-                  (#\b (write-char (code-char 8) o))
-                  (#\f (write-char (code-char 12) o))
-                  (#\v (write-char (code-char 11) o))
-                  (#\0 (write-char (code-char 0) o))
-                  (t (write-char #\\ o) (write-char (char s i) o)))
-                (incf i))
-              (progn (write-char c o) (incf i))))))))
+  "Decode `echo -e' escapes. Returns (values string stopped-p).
+
+Shares DECODE-ESCAPE-AT with printf; the one difference is that echo requires
+the leading zero on an octal escape -- `\\0044' is a byte but `\\44' is literal --
+whereas the printf FORMAT string accepts a bare `\\44'."
+  (let ((stopped nil))
+    (values
+     (with-output-to-string (o)
+       (let ((i 0) (n (length s)))
+         (loop while (< i n) do
+           (let ((c (char s i)))
+             (if (char= c #\\)
+                 (multiple-value-bind (str next)
+                     (decode-escape-at s i n :octal :leading-zero)
+                   (when (eq str :stop) (setf stopped t) (return))
+                   (write-string str o)
+                   (setf i next))
+                 (progn (write-char c o) (incf i)))))))
+     stopped)))
 
 (define-builtin "printf" (sh args out)
   ;; bash `-v NAME': put the result in a variable instead of on stdout.
@@ -119,12 +123,31 @@ single-quoted form would be equally correct shell but a different string."
            (when (find c +printf-q-escape+) (write-char #\\ o))
            (write-char c o))))))
 
-(defun printf-escape-at (s i n &key (octal t))
+(defun hex-run (s start n limit)
+  "End index of at most LIMIT hex digits beginning at START."
+  (let ((j start))
+    (loop while (and (< j n) (< (- j start) limit)
+                     (digit-char-p (char s j) 16))
+          do (incf j))
+    j))
+
+(defun decode-escape-at (s i n &key (octal t))
   "Decode the backslash escape starting at S[i] (which is a backslash).
-Returns (values string next-index). Sharing one decoder between the format
-scanner and %b is what keeps them consistent -- an earlier version tried to
-expand a fixed-size window of the format and miscounted how much it had
-consumed, silently swallowing the character after each escape."
+Returns (values string next-index), or (values :stop nil) for \\c.
+
+OCTAL selects the octal syntax, which is the ONE place echo and printf differ:
+  t              a bare \\NNN or \\0NNN   (the printf format string)
+  :leading-zero  only \\0NNN              (echo -e, and printf %b)
+  nil            no octal escapes
+
+Sharing one decoder between the format scanner, %b and echo is what keeps them
+consistent -- an earlier version tried to expand a fixed-size window of the
+format and miscounted how much it had consumed, silently swallowing the
+character after each escape.
+
+\\x, \\u and \\U differ in kind: \\xHH and the octal forms name a BYTE, so their
+value is masked to 8 bits, while \\uHHHH names a codepoint that is encoded on
+output. bash draws the same distinction."
   (if (>= (1+ i) n)
       (values "\\" (1+ i))
       (let ((e (char s (1+ i))))
@@ -138,21 +161,48 @@ consumed, silently swallowing the character after each escape."
           (#\f (values (string (code-char 12)) (+ i 2)))
           (#\v (values (string (code-char 11)) (+ i 2)))
           (#\e (values (string (code-char 27)) (+ i 2)))
+          (#\c (values :stop nil))
+          ;; \x with no digit at all stays literal, so `echo -e \x' prints \x.
+          (#\x (let ((j (hex-run s (+ i 2) n 2)))
+                 (if (> j (+ i 2))
+                     (values (string (code-char
+                                      (logand (parse-integer s :start (+ i 2)
+                                                               :end j :radix 16)
+                                              #xFF)))
+                             j)
+                     (values "\\x" (+ i 2)))))
+          ((#\u #\U)
+           (let* ((limit (if (char= e #\u) 4 8))
+                  (j (hex-run s (+ i 2) n limit)))
+             (if (> j (+ i 2))
+                 (values (string (code-char (parse-integer s :start (+ i 2)
+                                                             :end j :radix 16)))
+                         j)
+                 (values (concatenate 'string "\\" (string e)) (+ i 2)))))
           (t
-           (if (and octal (digit-char-p e 8))
-               (let ((j (+ i 1)) (count 0))
-                 (when (char= e #\0) (incf j))    ; optional leading 0
+           (if (and octal (digit-char-p e 8)
+                    (or (not (eq octal :leading-zero)) (char= e #\0)))
+               (let ((j (1+ i)) (count 0))
+                 (when (char= e #\0) (incf j))    ; the leading 0 is not a digit
                  (let ((start j))
                    (loop while (and (< j n) (< count 3)
                                     (digit-char-p (char s j) 8))
                          do (incf j) (incf count))
                    (if (> j start)
-                       (values (string (code-char (parse-integer s :start start
-                                                                   :end j
-                                                                   :radix 8)))
+                       ;; \0400 and \0777 exceed a byte; bash keeps the low 8
+                       ;; bits rather than clamping or erroring.
+                       (values (string (code-char
+                                        (logand (parse-integer s :start start
+                                                                 :end j :radix 8)
+                                                #xFF)))
                                j)
                        (values (string #\Nul) j))))
                (values (concatenate 'string "\\" (string e)) (+ i 2))))))))
+
+(defun printf-escape-at (s i n &key (octal t))
+  "Backwards-compatible name used by the printf format scanner."
+  (multiple-value-bind (str next) (decode-escape-at s i n :octal octal)
+    (if (eq str :stop) (values "" n) (values str next))))
 
 (defun printf-escapes (s &key (octal t))
   "Process backslash escapes in a printf format string (and in %b arguments).

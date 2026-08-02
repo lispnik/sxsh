@@ -14,6 +14,37 @@ Two ASDF systems in one tree, both SBCL-only:
   Every external command is launched with **`posix_spawnp(3)`** via `sb-alien` — there is no
   `fork`/`exec` and no `sb-ext:run-program`.
 
+## Reading the Oils scoreboard
+
+A raw failure count from `make oils` is not a backlog. `sh_spec.py` has five
+result words, and the difference between two of them decides whether a case is
+even ours to pass:
+
+    pass   matched the canonical expectation
+    ok     matched an `OK bash: ...' annotation -- bash DIVERGES from the
+           canonical expectation and the case documents it
+    BUG    matched a `BUG bash: ...' annotation
+    N-I    not implemented in that shell
+    FAIL   mismatch
+
+sxsh appears in no annotation, so it is always scored against the canonical
+expectation. Triage therefore means running the identical harness over bash
+(`SXSH_SHELL=/opt/homebrew/bin/bash`) and splitting our failures three ways:
+bash `pass` = our bug; bash `ok`/`BUG`/`N-I` = we would fail even by matching
+bash exactly; bash `FAIL` = OSH-specific, never ours.
+
+Measured 2026-08-02 across 18 spec files: **87 real, 43 annotated-only, 19
+bash-fails-too**. A per-file failure count on its own is close to meaningless
+-- `tilde` shows 6 failures and 0 are real, while `builtin-echo` showed 13 and
+all 13 were.
+
+A regex over that output must match `pass`. Matching only `ok|FAIL|N-I|BUG`
+inverts the result: it silently drops every case bash genuinely passes -- which
+is exactly the set being looked for -- and reports the annotated divergences
+instead. That mistake made `builtin-echo` read as 0 real failures when it was
+13 of 13.
+
+
 ## Layout
 
 ```
