@@ -187,6 +187,10 @@ Zero unless an invalid format or number is given, or a write fails."
     ;; `--' ends the options; the next word is the format even if it starts
     ;; with a dash.
     (when (and args (string= (first args) "--")) (pop args))
+    ;; No format at all is a usage error, not a silent success.
+    (when (null args)
+      (format *error-output* "printf: usage: printf [-v var] format [arguments]~%")
+      (return-from builtin 2))
     (when args
       (let ((fmt (first args)) (rest (rest args)))
         (multiple-value-bind (text status) (posix-printf fmt rest)
@@ -240,10 +244,14 @@ single-quoted form would be equally correct shell but a different string."
   "Decode the backslash escape starting at S[i] (which is a backslash).
 Returns (values string next-index), or (values :stop nil) for \\c.
 
-OCTAL selects the octal syntax, which is the ONE place echo and printf differ:
-  t              a bare \\NNN or \\0NNN   (the printf format string)
-  :leading-zero  only \\0NNN              (echo -e, and printf %b)
-  nil            no octal escapes
+OCTAL selects the octal syntax, and there are THREE dialects, all verified
+against bash rather than assumed:
+  t               up to three octal digits in TOTAL, so `\\0377' in a printf
+                  FORMAT is `\\037' followed by a literal 7
+  :optional-zero  an optional leading 0 then up to three more digits, so
+                  printf %b reads both `\\141' and `\\0141' as `a'
+  :leading-zero   the leading 0 is REQUIRED, so `echo -e \\141' is literal
+  nil             no octal escapes
 
 Sharing one decoder between the format scanner, %b and echo is what keeps them
 consistent -- an earlier version tried to expand a fixed-size window of the
@@ -288,7 +296,11 @@ output. bash draws the same distinction."
            (if (and octal (digit-char-p e 8)
                     (or (not (eq octal :leading-zero)) (char= e #\0)))
                (let ((j (1+ i)) (count 0))
-                 (when (char= e #\0) (incf j))    ; the leading 0 is not a digit
+                 ;; Where the leading zero is a MARKER rather than a digit,
+                 ;; step over it so three more may follow.
+                 (when (and (member octal '(:leading-zero :optional-zero))
+                            (char= e #\0))
+                   (incf j))
                  (let ((start j))
                    (loop while (and (< j n) (< count 3)
                                     (digit-char-p (char s j) 8))
@@ -308,6 +320,27 @@ output. bash draws the same distinction."
   "Backwards-compatible name used by the printf format scanner."
   (multiple-value-bind (str next) (decode-escape-at s i n :octal octal)
     (if (eq str :stop) (values "" n) (values str next))))
+
+(defun printf-b-escapes (s)
+  "Escapes for a %b argument. Returns (values text stopped-p).
+
+%b uses `echo -e' rules -- octal needs its leading zero -- and honours \c,
+which ends the output. The caller has to know that happened, hence the second
+value."
+  (let ((stopped nil))
+    (values
+     (with-output-to-string (o)
+       (let ((i 0) (n (length s)))
+         (loop while (< i n) do
+           (let ((c (char s i)))
+             (if (char= c #\\)
+                 (multiple-value-bind (str next)
+                     (decode-escape-at s i n :octal :optional-zero)
+                   (when (eq str :stop) (setf stopped t) (return))
+                   (write-string str o)
+                   (setf i next))
+                 (progn (write-char c o) (incf i)))))))
+     stopped)))
 
 (defun printf-escapes (s &key (octal t))
   "Process backslash escapes in a printf format string (and in %b arguments).
@@ -343,31 +376,102 @@ OCTAL enables \\NNN / \\0NNN, which POSIX specifies for the format string."
 
 (defun printf-integer (arg)
   "Convert a printf argument to an integer, returning (values int okp).
+
+The value uses C numeric-constant syntax, not just decimal: `0x55' is 85 and
+`055' is 45, with an optional leading sign, because that is what every shell's
+printf accepts and scripts rely on it.
+
+Leading blanks are allowed, TRAILING ones are not -- bash accepts ` -123' and
+rejects `-123 ' -- so the string is only left-trimmed.
+
 POSIX: a value that is not a valid number is a diagnostic and a non-zero exit,
-but printf still emits something (0) and carries on with the remaining
-arguments."
-  (let* ((s (string-trim '(#\Space #\Tab) (princ-to-string arg))))
-    (cond
-      ((string= s "") (values 0 t))
-      ;; 'x or "x is the numeric value of the character
-      ((and (> (length s) 1) (member (char s 0) '(#\' #\")))
-       (values (char-code (char s 1)) t))
-      (t (multiple-value-bind (v end)
-             (ignore-errors (parse-integer s :junk-allowed t))
-           (if (and v (= end (length s)))
-               (values v t)
-               (progn
-                 (format *error-output* "printf: ~A: invalid number~%" s)
-                 (values (or v 0) nil))))))))
+but printf still emits something and carries on with the remaining arguments."
+  (let ((s (string-left-trim '(#\Space #\Tab) (princ-to-string arg))))
+    (labels ((bad (v)
+               (format *error-output* "printf: ~A: invalid number~%" s)
+               (values (or v 0) nil))
+             (digits (start radix)
+               ;; (values value end) for the run of RADIX digits at START.
+               (let ((e start))
+                 (loop while (and (< e (length s))
+                                  (digit-char-p (char s e) radix))
+                       do (incf e))
+                 (values (when (> e start)
+                           (parse-integer s :start start :end e :radix radix))
+                         e))))
+      (cond
+        ((string= s "") (values 0 t))
+        ;; 'x or "x is the numeric value of the character
+        ((and (> (length s) 1) (member (char s 0) '(#\' #\")))
+         (values (char-code (char s 1)) t))
+        (t
+         (let* ((neg (and (plusp (length s)) (char= (char s 0) #\-)))
+                (i (if (and (plusp (length s))
+                            (member (char s 0) '(#\- #\+)))
+                       1 0)))
+           (multiple-value-bind (v end)
+               (cond
+                 ;; 0x / 0X hexadecimal
+                 ((and (< (1+ i) (length s)) (char= (char s i) #\0)
+                       (member (char s (1+ i)) '(#\x #\X)))
+                  (digits (+ i 2) 16))
+                 ;; a leading 0 with more digits after it is octal
+                 ((and (< (1+ i) (length s)) (char= (char s i) #\0))
+                  (digits (1+ i) 8))
+                 (t (digits i 10)))
+             (let ((v (and v (if neg (- v) v))))
+               (cond
+                 ((null v) (bad nil))
+                 ;; Anything left over -- including a trailing blank -- is junk.
+                 ((< end (length s)) (bad v))
+                 (t (values v t)))))))))))
+
+(defun printf-unsigned (v)
+  "V as the unsigned 64-bit value C's %u/%o/%x would print.
+
+bash's printf formats a negative through an unsigned conversion as its
+two's-complement bit pattern, so `printf %u -42' is 18446744073709551574 rather
+than 42 -- printing the absolute value quietly lost the distinction."
+  (ldb (byte 64 0) v))
+
+(defun printf-digits (digits precision)
+  "Apply an integer PRECISION -- a MINIMUM number of digits, zero-filled.
+
+Distinct from the `0' flag, which fills to the field WIDTH: `%6.4d' of 42 is
+`  0042', four digits padded to six with spaces."
+  (if (and precision (> precision (length digits)))
+      (concatenate 'string
+                   (make-string (- precision (length digits))
+                                :initial-element #\0)
+                   digits)
+      digits))
+
+(defun printf-signed (v precision plus space)
+  "Render a signed integer: sign, then the precision-padded digits."
+  (let ((digits (printf-digits (princ-to-string (abs v)) precision)))
+    (concatenate 'string
+                 (cond ((minusp v) "-") (plus "+") (space " ") (t ""))
+                 digits)))
 
 (defun posix-printf (fmt args)
   "A printf supporting %s %b %c %d %i %o %u %x %X %% with flags, field width
 and precision (including the `*' forms), recycling the format over remaining
-arguments. Returns (values text status)."
-  (let ((status 0))
+arguments. Returns (values text status).
+
+Two conversions end the run early rather than returning normally: a `\c' in a
+%b argument stops the OUTPUT (everything already written is kept), and an
+unrecognised conversion character discards the output entirely and fails."
+  (let ((status 0)
+        ;; An explicit stream, not WITH-OUTPUT-TO-STRING: a `\c' has to keep
+        ;; everything written before it, and throwing out of the macro would
+        ;; discard the buffer along with the rest of the format.
+        (o (make-string-output-stream)))
     (values
-     (with-output-to-string (o)
-       (labels
+     (catch 'printf-invalid
+       ;; A \c in %b throws the text it managed to produce; normal completion
+       ;; falls through to the trailing NIL.
+       (let ((tail (catch 'printf-stop-with
+                     (labels
            ((one-pass (args)
               (let ((i 0) (n (length fmt)) (used nil))
                 (flet ((next-arg ()
@@ -387,7 +491,7 @@ arguments. Returns (values text status)."
                             (write-char #\% o) (incf i))
                            (t
                             (let ((left nil) (zero nil) (plus nil) (space nil)
-                                  (width nil) (precision nil))
+                                  (alt nil) (width nil) (precision nil))
                               ;; flags
                               (loop while (and (< i n)
                                                (member (char fmt i)
@@ -396,6 +500,7 @@ arguments. Returns (values text status)."
                                          (#\- (setf left t))
                                          (#\0 (setf zero t))
                                          (#\+ (setf plus t))
+                                         (#\# (setf alt t))
                                          (#\Space (setf space t)))
                                        (incf i))
                               ;; width
@@ -434,16 +539,29 @@ arguments. Returns (values text status)."
                                   (incf i)
                                   (multiple-value-bind (body numericp)
                                       (printf-convert conv arg precision plus
-                                                      space (lambda ()
-                                                              (setf status 1)))
+                                                      space alt
+                                                      (lambda ()
+                                                        (setf status 1)))
                                     (write-string
-                                     (printf-pad body width left zero numericp)
+                                     ;; A precision suppresses the `0' flag for
+                                     ;; INTEGER conversions only -- there it
+                                     ;; already fixes the digit count. For a
+                                     ;; float the precision is the number of
+                                     ;; decimals and `%-08.3f' still zero-fills.
+                                     (printf-pad body width left
+                                                 (and zero
+                                                      (not (and precision
+                                                                (find conv "diouxX"))))
+                                                 numericp)
                                      o))))))))
                         (t (write-char c o) (incf i)))))
                   (values args used)))))
          (multiple-value-bind (remaining used) (one-pass args)
            (loop while (and remaining used) do
-             (multiple-value-setq (remaining used) (one-pass remaining)))))) 
+             (multiple-value-setq (remaining used) (one-pass remaining)))))
+                     nil)))
+         (when tail (write-string tail o))
+         (get-output-stream-string o)))
      status)))
 
 (defun printf-float (arg fail)
@@ -462,46 +580,83 @@ arguments. Returns (values text status)."
                      (funcall fail)
                      0.0d0))))))
 
-(defun printf-convert (conv arg precision plus space fail)
-  "Render one conversion. Returns (values string numericp)."
+(defun printf-convert (conv arg precision plus space alt fail)
+  "Render one conversion. Returns (values string numericp).
+
+ALT is the `#' flag: an alternate form -- a leading 0 on %o, a 0x/0X prefix on
+%x/%X, and a decimal point kept on a float that would otherwise have none."
   (flet ((int ()
            (multiple-value-bind (v ok) (printf-integer arg)
              (unless ok (funcall fail))
-             v)))
+             v))
+         (based (v radix upcase prefix)
+           ;; %o/%x/%X are UNSIGNED conversions, so a negative argument is
+           ;; rendered from its two's-complement bit pattern.
+           (let* ((d (printf-digits
+                      (let ((str (format nil "~VR" radix (printf-unsigned v))))
+                        (if upcase (string-upcase str) (string-downcase str)))
+                      precision)))
+             (cond
+               ((not alt) d)
+               ;; #: %o gains a leading zero unless it has one already
+               ((= radix 8) (if (and (plusp (length d)) (char= (char d 0) #\0))
+                                d
+                                (concatenate 'string "0" d)))
+               ;; #: %x/%X gain 0x/0X, but not on a zero value
+               ((string= d "0") d)
+               (t (concatenate 'string prefix d))))))
     (case conv
       (#\s (let ((s (princ-to-string arg)))
              (values (if precision (subseq s 0 (min precision (length s))) s) nil)))
-      (#\b (let ((s (printf-escapes (princ-to-string arg))))
-             (values (if precision (subseq s 0 (min precision (length s))) s) nil)))
+      (#\b (multiple-value-bind (str stopped)
+               (printf-b-escapes (princ-to-string arg))
+             (let ((str (if precision
+                            (subseq str 0 (min precision (length str)))
+                            str)))
+               ;; \c ends the OUTPUT, not just this conversion: the rest of
+               ;; the format is dropped too, so `printf "[%b]" "a\cb"' has no
+               ;; closing bracket.
+               (when stopped (throw 'printf-stop-with str))
+               (values str nil))))
       (#\c (let ((s (princ-to-string arg)))
              (values (if (plusp (length s)) (string (char s 0)) "") nil)))
       (#\q (values (printf-quote (princ-to-string arg)) nil))
-      ((#\d #\i) (let ((v (int)))
-                   (values (format nil "~:[~;+~]~A"
-                                   (and plus (>= v 0))
-                                   (if (and space (not plus) (>= v 0))
-                                       (format nil " ~D" v)
-                                       (princ-to-string v)))
-                           t)))
-      (#\u (values (princ-to-string (abs (int))) t))
+      ((#\d #\i) (values (printf-signed (int) precision plus space) t))
+      (#\u (values (printf-digits
+                    (princ-to-string (printf-unsigned (int))) precision)
+                   t))
+      (#\o (values (based (int) 8 nil "0") t))
+      (#\x (values (based (int) 16 nil "0x") t))
+      (#\X (values (based (int) 16 t "0X") t))
       ((#\f #\F)
-       (values (format nil "~,vF" (or precision 6) (printf-float arg fail)) t))
+       (let ((str (format nil "~,vF" (or precision 6) (printf-float arg fail))))
+         ;; `~,0F' still prints the point: %.0f of 3 is `3', and only %#.0f
+         ;; keeps it.
+         (values (if (and (eql precision 0) (not alt))
+                     (string-right-trim "." str)
+                     str)
+                 t)))
       ((#\e #\E)
        (let ((str (format nil "~,v,2,,,,'eE" (or precision 6)
                           (printf-float arg fail))))
          (values (if (char= conv #\E) (string-upcase str) str) t)))
       ((#\g #\G)
-       ;; %g drops trailing zeros; approximate with the shortest sensible form
+       ;; %g drops trailing zeros; `#' keeps them.
        (let* ((v (printf-float arg fail))
-              (str (if (= v (truncate v))
-                       (princ-to-string (truncate v))
-                       (string-right-trim "0" (format nil "~,vF"
-                                                      (or precision 6) v)))))
+              ;; %g precision is SIGNIFICANT digits, not decimals: the
+              ;; default 6 leaves five after the point for a units value.
+              (str (cond
+                     (alt (format nil "~,vF" (max 0 (1- (or precision 6))) v))
+                     ((= v (truncate v)) (princ-to-string (truncate v)))
+                     (t (string-right-trim "0" (format nil "~,vF"
+                                                       (or precision 6) v))))))
          (values str t)))
-      (#\o (values (format nil "~O" (int)) t))
-      (#\x (values (format nil "~(~X~)" (int)) t))
-      (#\X (values (format nil "~:@(~X~)" (int)) t))
-      (t (values (princ-to-string arg) nil)))))
+      (t
+       ;; An unrecognised conversion is a usage error: bash emits nothing at
+       ;; all and exits 1, rather than printing the argument raw.
+       (format *error-output* "printf: `%~C': invalid format character~%" conv)
+       (funcall fail)
+       (throw 'printf-invalid "")))))
 
 (define-builtin "pwd" (sh args out)
   :synopsis "pwd [-LP]"

@@ -245,6 +245,38 @@ check set-allexport     '1'          0 'set -a; V=x; env | grep -c "^V=x"'
 check set-noexec        ''           0 'set -n; echo NOTRUN'
 check set-invalid-opt   ''           2 'set -Z 2>/dev/null'
 
+# --- printf: numeric conversions, flags, escape dialects -------------------
+# Expectations diffed against bash before being written down.
+# Precision on an integer is a MINIMUM DIGIT COUNT, zero-filled -- distinct
+# from the `0' flag, which fills to the field width.
+check pf-int-precision  '[  0042][0042][    42]' 0 'printf "[%6.4d][%.4d][%6d]\n" 42 42 42'
+check pf-int-prec-neg   '[ -0042][-0042][   -42]' 0 'printf "[%6.4d][%.4d][%6d]\n" -42 -42 -42'
+check pf-zero-vs-prec   '[000042][000042][-000042]' 0 'printf "[%06d][%6.6d][%6.6d]\n" 42 42 -42'
+# ...but a precision does NOT suppress `0' for a float.
+check pf-float-zero     '[0003.140][3.140   ]' 0 'printf "[%08.3f][%-08.3f]\n" 3.14 3.14'
+# %u/%o/%x are UNSIGNED: a negative shows its two's-complement bit pattern.
+check pf-unsigned-neg   '[18446744073709551574][1777777777777777777726][ffffffffffffffd6][FFFFFFFFFFFFFFD6]' 0 'printf "[%u][%o][%x][%X]\n" -42 -42 -42 -42'
+check pf-alt-flag       '[052][0x2a][0X2A]' 0 'printf "[%#o][%#x][%#X]\n" 42 42 42'
+check pf-alt-float      '3|3.|3|3.00000' 0 'printf "%.0f|%#.0f|%g|%#g\n" 3 3 3 3'
+# The VALUE uses C constant syntax, not just decimal.
+check pf-numeric-input  '85 45 42 55 171' 0 'printf "%d %d %d %X %d\n" 0x55 055 +42 0x55 0xab'
+check pf-leading-space  '-123' 0 'printf "%d\n" " -123"'
+check pf-trailing-space 'st=1' 0 'printf "%d\n" "-123 " >/dev/null 2>&1; echo st=$?'
+# Three different octal dialects, all verified against bash:
+#   format  -- three digits TOTAL, so \0377 is \037 then a literal 7
+#   %b      -- optional leading zero, so \141 and \0141 are both `a'
+#   echo -e -- the leading zero is REQUIRED, so \141 stays literal
+check pf-octal-format   '037 7' 0 'printf "\0377" | od -An -c | tr -s " " | sed "s/^ //;s/ $//"'
+check pf-octal-b        'a|a'   0 'printf "%b|%b\n" "\141" "\0141"'
+check pf-octal-echo     'a\141b' 0 'echo -e "a\141b"'
+# %b honours \c by ending the OUTPUT, not just its own conversion.
+check pf-b-stop         '[ab
+cd' 0 'printf "[%b]\n" "ab\ncd\cxy"'
+# Usage errors.
+check_err pf-no-format  'usage' 2 'printf'
+check_err pf-bad-conv   'invalid format' 1 'printf "%z" 42'
+check_err pf-bad-conv-flag 'invalid format' 1 'printf "%-z" 42'
+
 # --- assorted conformance singles ------------------------------------------
 # Expectations diffed against bash before being written down.
 # `return'/`exit' truncate to the byte a wait status can actually carry.
