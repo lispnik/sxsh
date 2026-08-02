@@ -401,6 +401,26 @@ gives us no way to ask."
      (setf (led-rows-used led) 1 (led-cursor-row led) 0))
     (t (setf (led-done led) :eof))))
 
+(defun ed-insert-paste (led)
+  "Insert everything up to the paste-end marker literally.
+
+Without this, pasting a multi-line snippet executes it a line at a time as it
+arrives -- so a half-finished paste starts running -- and every TAB in the
+pasted text fires completion instead of being text. Newlines are kept in the
+buffer; the renderer handles them, and the command runs only when the user
+presses Return."
+  (led-snapshot led)
+  (loop
+    (let ((k (read-key)))
+      (cond
+        ((eq k :paste-end) (return))
+        ;; Anything that ends input mid-paste has to stop the loop, or a
+        ;; disconnected terminal would spin here forever.
+        ((member k '(:eof :interrupt)) (return))
+        ((characterp k)
+         (led-insert led (string (if (char= k #\Return) #\Newline k))))
+        (t nil)))))
+
 (defun ed-quoted-insert (led sh key) (declare (ignore key))
   (let ((k (read-key)))
     (when (characterp k) (ed-self-insert led sh k))))
@@ -589,7 +609,8 @@ raw -- that is the invariant the whole file is arranged around."
                         (ignore-errors (raw-mode-apply (tty-fd))))
                       (setf (led-rows-used led) 1 (led-cursor-row led) 0)
                       (led-redraw led))
-                     ((:escape :unknown :paste-start :paste-end))
+                     (:paste-start (ed-insert-paste led))
+                     ((:escape :unknown :paste-end))
                      (t
                       (let ((handled (and (led-search led)
                                           (search-handle-key led sh key))))

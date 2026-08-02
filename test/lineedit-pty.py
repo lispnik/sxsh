@@ -347,6 +347,53 @@ def main():
     else:
         fail("no command completion in argument position", lines[-6:])
 
+    # --- bracketed paste ---------------------------------------------------
+
+    # A multi-line paste must land in the BUFFER as text, not execute a line at
+    # a time as it arrives. Proof: after pasting, C-a and a `# ' comments out
+    # the first pasted line -- which is only possible if that line never ran.
+    # So `one' must NOT appear and `two' must.
+    lines = session(path, h(34),
+                    [b"\x1b[200~echo one\necho two\x1b[201~", b"\x01", b"# ",
+                     b"\n", b"exit\n"])
+    outs = output_lines(lines)
+    if any(l.strip() == "two" for l in outs) and not any(l.strip() == "one"
+                                                         for l in outs):
+        ok("pasted lines are buffered, not executed as they arrive")
+    else:
+        fail("pasted lines are buffered, not executed as they arrive", outs)
+
+    # A TAB inside a paste is text. Literal TAB splits `aa' and `X' into two
+    # arguments -> `aa X'; had completion fired on `aa' it would have extended
+    # the word instead and printed `aaX'.
+    lines = session(path, h(35), [b"\x1b[200~echo aa\tX\x1b[201~", b"\n",
+                                  b"exit\n"], cwd=cdir)
+    outs = output_lines(lines)
+    if any(l.strip() == "aa X" for l in outs):
+        ok("a pasted TAB inserts text instead of completing")
+    else:
+        fail("a pasted TAB inserts text instead of completing", outs)
+
+    # --- C-v quoted insert -------------------------------------------------
+
+    # Same discriminator without the paste markers: C-v TAB is a literal tab
+    # (`a X'), an unquoted TAB would complete `a' to the common prefix `aa'.
+    lines = session(path, h(36), [b"echo a", b"\x16\t", b"X", b"\n",
+                                  b"exit\n"], cwd=cdir)
+    outs = output_lines(lines)
+    if any(l.strip() == "a X" for l in outs):
+        ok("C-v quotes the next key instead of running it")
+    else:
+        fail("C-v quotes the next key instead of running it", outs)
+
+    # --- M-y ---------------------------------------------------------------
+
+    # Two separate kills (the self-inserts between them stop accumulation),
+    # then C-y yanks the newest and M-y rotates to the older.
+    expect_ran("M-y rotates the kill ring", path, h(37),
+               [b"echo ", b"aaa", b"\x17", b"bbb", b"\x17", b"\x19", b"\x1by"],
+               "aaa")
+
     # --- history is still recorded through the editor ----------------------
     lines = session(path, h(27),
                     [b"echo one\n", b"echo two\n", b"history\n", b"exit\n"])
