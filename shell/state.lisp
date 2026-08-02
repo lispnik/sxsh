@@ -94,6 +94,15 @@ installs the handler and loads earlier.")
 (defvar *winch-pending* nil)
 (defvar *cont-pending* nil)
 
+(defvar *assignment-error-fatal* t
+  "Whether a variable assignment error ends a non-interactive shell.
+
+POSIX 2.8.1 makes it fatal, and it is: `readonly r=1; r=2' must not reach the
+next command. But the abort is contained by some constructs -- bash carries on
+after `eval \"r=2\"' and after the prefix form `r=2 cmd', failing only that
+command. Those bind this to NIL rather than each catching SHELL-EXIT, which
+would also swallow a legitimate `exit' inside the same construct.")
+
 (defvar *trap-entry-status* nil
   "The exit status in effect when the current trap action began, or NIL.
 
@@ -325,9 +334,15 @@ it rather than hanging. We simply stop and use the last name reached."
   "Return (values value found-p exported-p)."
   (let ((name (resolve-nameref sh name)))
     (multiple-value-bind (cell found) (gethash name (shell-vars sh))
-      (if found
-          (values (scalar-of (car cell)) t (cdr cell))
-          (values nil nil nil)))))
+      (cond
+        ;; `$a' on an array means `${a[0]}', so an array with no element 0 is
+        ;; UNSET as far as the scalar view is concerned -- `set -u; declare -a
+        ;; x; echo $x' is an unbound-variable error in bash, and `${x+SET}' is
+        ;; empty. Reporting it as found-but-empty made both silently succeed.
+        ((and found (sh-array-p (car cell)) (null (array-get (car cell) 0)))
+         (values nil nil (cdr cell)))
+        (found (values (scalar-of (car cell)) t (cdr cell)))
+        (t (values nil nil nil))))))
 
 (define-condition readonly-violation (error)
   ((name :initarg :name :reader readonly-violation-name))
@@ -491,12 +506,36 @@ that is relying on the least portable of the three behaviours."
     (setf (gethash name (shell-vars sh))
           (cons (if cell (car cell) "") t))))
 
+(defvar *temp-frames* '()
+  "Stack of active command-scoped assignment frames, innermost first.
+
+Each frame is a one-element box holding a list of (NAME VALUE FOUND EXPORTED)
+records of what a `VAR=x cmd' prefix shadowed. UNSET consults it so that
+unsetting a temporarily-bound name reveals what it covered rather than deleting
+both: in `x=global; x=temp f', an `unset x' inside f leaves x at `global'.")
+
+(defun pop-temp-binding (sh name)
+  "If NAME is bound by an active command-scoped frame, put back what it
+shadowed, drop the record so the frame does not restore it a second time, and
+return T."
+  (dolist (frame *temp-frames* nil)
+    (let ((entry (assoc name (car frame) :test #'string=)))
+      (when entry
+        (destructuring-bind (n value found exported) entry
+          (declare (ignore n))
+          (if found
+              (setf (gethash name (shell-vars sh)) (cons value exported))
+              (remhash name (shell-vars sh))))
+        (setf (car frame) (remove entry (car frame) :test #'eq))
+        (return t)))))
+
 (defun unset-var (sh name)
   (when (readonly-p sh name)
     (error 'readonly-violation :name name))
   ;; Unsetting a dynamic variable makes it ordinary from here on, as in bash.
   (setf (gethash name (shell-dynamic-off sh)) t)
-  (remhash name (shell-vars sh)))
+  (unless (pop-temp-binding sh name)
+    (remhash name (shell-vars sh))))
 
 (defun exported-environ (sh)
   "Build the child environment (list of K=V) from exported variables."

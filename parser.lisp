@@ -106,6 +106,15 @@ word. Reserved words are only WORDs (never quoted forms)."
   (let ((commands '()))
     (loop
       (when (eq (cur-type p) :eof) (return))
+      ;; Nothing encloses us here, so a token that can only CLOSE a construct
+      ;; -- `do', `fi', `esac', `}', `)', `;;' -- has no opener and is a syntax
+      ;; error. Falling through to PARSE-COMPLETE-COMMAND instead ran it as a
+      ;; command name: `do' reported "command not found" (status 127) where
+      ;; every other shell reports a syntax error (status 2), and in
+      ;; `echo hi; do; echo x' the list simply stopped at `do' and the rest of
+      ;; the line was discarded without a word.
+      (when (at-list-end-p p)
+        (perr p "unexpected token ~S" (or (cur-text p) (cur-type p))))
       (push (parse-complete-command p) commands)
       (skip-newlines p))
     (nreverse commands)))

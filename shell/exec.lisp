@@ -169,7 +169,9 @@ because the trap's own `echo' overwrote the 3."
               ;; non-interactive shell. Reporting and carrying on let a script
               ;; run past a failed assignment with the old value still in
               ;; place, which is exactly what readonly exists to prevent.
-              (unless (shell-interactive sh)
+              ;; *ASSIGNMENT-ERROR-FATAL* marks the constructs that contain it.
+              (unless (or (shell-interactive sh)
+                          (not *assignment-error-fatal*))
                 (signal 'shell-exit :code 1))
               1))))
     (setf (shell-last-status sh) status)
@@ -591,12 +593,32 @@ substitution twice when the test and the spawn each expanded independently."
                 words))
       (values nil nil)))
 
-(defparameter +declaration-utilities+ '("export" "readonly")
+(defparameter +declaration-utilities+
+  '("export" "readonly" "declare" "typeset" "local")
   "Utilities whose `name=value' operands are expanded as assignments.
 
 POSIX 2.9.1: for these, a word of that form is treated the way a real
 assignment would be, so the tilde after `=' (and after each unquoted `:')
-expands. Without this `export PATH=~/bin' exported a literal ~.")
+expands. Without this `export PATH=~/bin' exported a literal ~. The same rule
+suppresses field splitting and globbing, which is why `typeset foo=*' assigns
+a literal `*' rather than matching files named `foo=...'.")
+
+(defun alias-resolved-name (sh name)
+  "Follow the alias chain from NAME and return the command word it ends at.
+
+The declaration-utility test has to run BEFORE the operands are expanded, but
+aliases are substituted afterwards, in APPLY-ALIAS. Testing the unresolved word
+meant `alias e=export; e x=$v' split the value that a plain `export x=$v'
+keeps whole."
+  (let ((seen '()) (cur name))
+    (loop
+      (multiple-value-bind (body found) (gethash cur (shell-aliases sh))
+        (if (and found (not (member cur seen :test #'string=)))
+            (progn
+              (push cur seen)
+              (let ((parts (remove "" (split-string-ws body) :test #'string=)))
+                (if parts (setf cur (first parts)) (return cur))))
+            (return cur))))))
 
 (defun assignment-operand-p (raw)
   "True if RAW has the shape name=value."
@@ -674,7 +696,8 @@ Applies alias substitution to the command name (first word)."
                       :split (not as-assignment)
                       :glob (not as-assignment))))
         (when first
-          (setf declaration (and (member (first fields) +declaration-utilities+
+          (setf declaration (and (member (alias-resolved-name sh (first fields))
+                                         +declaration-utilities+
                                          :test #'string=)
                                  t)
                 first nil))
@@ -1017,6 +1040,13 @@ substitutions intact for the later expansion pass."
 Four shapes: plain scalar, `a=(...)' whole-array, `a[i]=v' element, and the
 `+=' variants of each."
   (multiple-value-bind (base sub) (split-subscript name)
+    ;; Readonly is checked HERE, before anything is touched. SET-VAR checks it
+    ;; too, but the array paths mutate the existing SH-ARRAY in place and only
+    ;; then call SET-VAR -- so `readonly -a a; a+=(4)' raised the error with
+    ;; the element already appended -- and the `a[i]=v' path never reaches
+    ;; SET-VAR at all when the array exists.
+    (when (readonly-p sh (resolve-nameref sh base))
+      (error 'readonly-violation :name base))
     (cond
       ;; a=(...)  /  a+=(...)
       ((array-literal-p value)
@@ -1128,7 +1158,7 @@ it restores before it returns; that is right for an external command, which
 receives the values through its environment, but not for anything we run
 in-process."
   (let ((saved '()))
-    (dolist (a assignments saved)
+    (dolist (a assignments)
       (let* ((name (assignment-name a))
              (vw (assignment-value a))
              (raw (and vw (word-text vw)))
@@ -1142,15 +1172,25 @@ in-process."
         ;; Push before setting, so an earlier assignment is visible to a later
         ;; one (`a=1 b=$a cmd') while still restoring to the original value.
         (push (cons name (multiple-value-list (get-var sh name))) saved)
-        (assign-one sh name val (assignment-append a))))))
+        (assign-one sh name val (assignment-append a))
+        ;; A prefix assignment goes into the command's ENVIRONMENT, so any
+        ;; external command run while it is in force must see it -- including
+        ;; one run inside a shell function, which is what makes `F=f f' with
+        ;; `f() { printenv F; }' print f rather than nothing.
+        (export-var sh name)))
+    ;; The frame is boxed so UNSET can drop individual records from it.
+    (let ((frame (list saved)))
+      (push frame *temp-frames*)
+      frame)))
 
-(defun restore-assignments (sh saved)
-  (dolist (entry saved)
-    (destructuring-bind (name value found exported)
-        (cons (car entry) (cdr entry))
-      (if found
-          (setf (gethash name (shell-vars sh)) (cons value exported))
-          (remhash name (shell-vars sh))))))
+(defun restore-assignments (sh frame)
+  (when frame
+    (setf *temp-frames* (remove frame *temp-frames* :test #'eq))
+    (dolist (entry (car frame))
+      (destructuring-bind (name value found exported) entry
+        (if found
+            (setf (gethash name (shell-vars sh)) (cons value exported))
+            (remhash name (shell-vars sh)))))))
 
 (defun run-builtin (sh name args node)
   "Run a builtin with redirections applied in-process."

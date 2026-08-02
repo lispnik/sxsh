@@ -242,6 +242,50 @@ check set-allexport     '1'          0 'set -a; V=x; env | grep -c "^V=x"'
 check set-noexec        ''           0 'set -n; echo NOTRUN'
 check set-invalid-opt   ''           2 'set -Z 2>/dev/null'
 
+# --- declaration utilities and command-scoped assignments ------------------
+# Expectations diffed against bash before being written down.
+# declare/typeset/local are declaration utilities too: no splitting, no glob.
+check decl-no-split     '[a b c]' 0 'w="a b c"; declare d=$w; echo "[$d]"'
+check decl-no-glob      '[*]'     0 'cd "$TMPDIR" || cd /tmp; touch foo=a foo=b; typeset foo=*; echo "[$foo]"; rm -f foo=a foo=b'
+# `cd ""' is an error, not $HOME -- and must not crash reaching for char 0.
+check_err cd-null-dir   'null directory' 1 'cd ""'
+# `declare -a' on an existing array declares the type, it does not reset it.
+check decl-a-keeps      'n=3'     0 'declare -a arr; arr=(a b c); declare -a arr; echo n=${#arr[@]}'
+check decl-A-keeps      'n=2'     0 'declare -A d; d[x]=1; d[y]=2; declare -A d; echo n=${#d[@]}'
+# `$x' on an array is `${x[0]}', so no element 0 means UNSET.
+check decl-a-unset      '[]'      0 'declare -a x; echo "[${x+SET}]"'
+# readonly must be enforced before the array is mutated, not after.
+check ro-array-append   '[1 2 3]' 0 'a=(1 2 3); readonly -a a; eval "a+=(4)" 2>/dev/null; echo "[${a[@]}]"'
+check ro-array-elem     '[1 2 3]' 0 'a=(1 2 3); readonly -a a; eval "a[0]=9" 2>/dev/null; echo "[${a[@]}]"'
+# eval contains the abort; a bare assignment is still fatal (see posix-diff).
+check ro-eval-continues '[1]'     0 'readonly r=1; eval "r=2" 2>/dev/null; echo "[$r]"'
+# A prefix assignment is in the command's ENVIRONMENT, so children see it --
+# including children of a shell function, and of a nested call.
+check temp-exported     'v'       0 'f(){ printenv X; }; X=v f'
+check temp-nested       'f
+g1'                               0 'g(){ printenv F G1; }; f(){ G1=g1 g; }; F=f f'
+# unset on a temporarily-bound name reveals what it shadowed.
+check temp-unset-reveal 'x=temp
+after=global
+end=global'                       0 'f(){ echo "x=$x"; unset x; echo "after=$x"; }; x=global; x=temp f; echo "end=$x"'
+check temp-not-leaked   'st=1'    0 'X=1 true; printenv X; echo st=$?'
+
+# A token that can only CLOSE a construct is a syntax error at top level, not
+# a command name -- and must not silently discard the rest of the line.
+check_err syn-do        ''  2 'do'
+check_err syn-done      ''  2 'done'
+check_err syn-fi        ''  2 'fi'
+check_err syn-esac      ''  2 'esac'
+check_err syn-rbrace    ''  2 '}'
+check_err syn-do-midline '' 2 'echo hi; do; echo x'
+check_err syn-assign-for '' 2 'FOO=bar for i in a b; do echo $FOO; done'
+# ...but an assignment prefix makes an OPENING word an ordinary command name.
+check_err syn-assign-bare 'not found' 127 'FOO=bar for'
+# Constructs that legitimately consume a closer are untouched.
+check syn-brace-group   'hi'      0 '{ echo hi; }'
+check syn-case          'm'       0 'case x in x) echo m;; esac'
+check syn-subst-group   'a'       0 'x=$( { echo a; } ); echo "$x"'
+
 # --- read: option clusters, -n counting, IFS field counts -----------------
 # Every expectation here was diffed against bash before being written down.
 check read-smooshed     'v=h'    0 'echo hi | { read -rn1 v; echo "v=$v"; }'

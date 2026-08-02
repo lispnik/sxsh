@@ -422,6 +422,11 @@ arguments. Returns (values text status)."
     (when (cdr rest)
       (format *error-output* "cd: too many arguments~%")
       (return-from builtin 2))
+    ;; An explicitly empty operand is an error, not a no-op and not $HOME.
+    ;; It also cannot reach the CDPATH test below, which indexes character 0.
+    (when (equal (first rest) "")
+      (format *error-output* "cd: null directory~%")
+      (return-from builtin 1))
     (let* ((arg (first rest))
            (from-cdpath nil)
            (to-oldpwd (equal arg "-"))
@@ -553,9 +558,13 @@ no-op beyond evaluating the RHS arithmetically."
           (when localp (declare-local sh (nth-value 0 (split-subscript name))))
           (cond
             ;; -A/-a with no value: create an empty array of the right kind.
+            ;; On a name that is ALREADY an array this only declares the type;
+            ;; it must not reset the contents, so a redundant `declare -a arr'
+            ;; part-way through a script does not silently empty it.
             ((and (null value) (or (member #\A flags) (member #\a flags)))
-             (set-var sh name (make-sh-array (if (member #\A flags)
-                                                 :assoc :indexed))))
+             (unless (var-array sh name)
+               (set-var sh name (make-sh-array (if (member #\A flags)
+                                                   :assoc :indexed)))))
             ((member #\n flags))          ; handled below, as a reference
             (value
              (when (and (member #\A flags) (not (var-array sh name)))
@@ -1043,7 +1052,9 @@ be re-read to restore the current settings."
      0)))
 
 (define-builtin "eval" (sh args out)
-  (let ((src (format nil "~{~A~^ ~}" args)))
+  (let ((src (format nil "~{~A~^ ~}" args))
+        ;; A failed assignment inside eval ends the eval, not the shell.
+        (*assignment-error-fatal* nil))
     (if (string= (string-trim " " src) "") 0
         (run-string-capturing sh src out))))
 
