@@ -685,6 +685,33 @@ for children); it now sets `*sigint-pending*` instead of doing nothing.
 Escape hatches, all tested: `set +o emacs`, `SXSH_NO_LINEEDIT=1`, `TERM=dumb`, and
 `*lineedit-disabled*` after a failure. Each routes back to the plain reader unchanged.
 
+### Completion does not use the parser
+
+`shell/complete.lisp`. The line being typed is usually **not parseable** -- that is the normal
+case, not an edge case -- so `completion-context` is a purpose-built left-to-right scan that
+tracks quote state and `$(`/`${` nesting and tolerates anything unterminated. Feeding a partial
+line to `parse-string` would fail on most keystrokes.
+
+Reuse the expansion *primitives*, not `glob-field`: that takes an xchar field rather than a
+string and drags in `nullglob`/`dotglob` semantics completion does not want. `directory-entries`
+and `expand-tilde` are the right level.
+
+Three details worth keeping:
+
+- **Directory tests use `stat`, not `directoryp`.** The latter goes through `truename`, which is
+  slow across hundreds of entries and signals on a broken symlink — both routine in a completion
+  list.
+- **`escape-for-completion`, not `shell-quote`.** `shell-quote` wraps the whole string in single
+  quotes, which would re-quote the prefix the user already typed; only the *inserted* text may
+  be escaped, and nothing needs escaping inside an existing quote.
+- **The `$PATH` scan is cached per PATH value.** A TAB on an empty word otherwise stats several
+  thousand files, and the two-TAB listing convention does it twice in a row. This cache is not
+  `set -o hashall`, which is a separate option that currently does nothing — do not conflate
+  them.
+
+A word containing `/` is always a path, even in command position, so `./scr<TAB>` works; and the
+word after a redirection operator is always a filename.
+
 ### The terminal must never be left in raw mode
 
 `shell/term.lisp` is the raw-mode layer under the line editor. One invariant governs it: **no

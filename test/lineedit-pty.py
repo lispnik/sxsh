@@ -71,9 +71,11 @@ ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
 
 class Shell:
-    def __init__(self, path, histfile, cols=80, rows=24, term="xterm"):
+    def __init__(self, path, histfile, cols=80, rows=24, term="xterm", cwd=None):
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
+            if cwd:
+                os.chdir(cwd)
             os.environ["PS1"] = "$ "
             os.environ["PS2"] = "> "
             os.environ["TERM"] = term
@@ -135,8 +137,8 @@ def output_lines(lines):
     return [l for l in lines if not l.startswith("$") and not l.startswith(">")]
 
 
-def session(path, hist, chunks, cols=80, gap=0.3, term="xterm"):
-    sh = Shell(path, hist, cols=cols, term=term)
+def session(path, hist, chunks, cols=80, gap=0.3, term="xterm", cwd=None):
+    sh = Shell(path, hist, cols=cols, term=term, cwd=cwd)
     sh.send(*chunks, gap=gap)
     out = sh.read()
     sh.close()
@@ -306,6 +308,44 @@ def main():
         ok("set +o emacs falls back to the plain reader")
     else:
         fail("set +o emacs falls back to the plain reader", output_lines(lines))
+
+    # --- completion --------------------------------------------------------
+    # A scratch directory with known contents, so the candidate set is exactly
+    # what the assertions assume.
+    cdir = os.path.join(tmp, "comp")
+    os.makedirs(cdir, exist_ok=True)
+    for n in ("uniquename", "aa1", "aa2"):
+        open(os.path.join(cdir, n), "w").close()
+
+    lines = session(path, h(30), [b"echo uniq\t", b"\n", b"exit\n"], cwd=cdir)
+    if any(l.strip() == "uniquename" for l in output_lines(lines)):
+        ok("TAB completes a filename")
+    else:
+        fail("TAB completes a filename", output_lines(lines))
+
+    # `ech<TAB>' must find the echo BUILTIN, which is only in the builtin
+    # table -- proving command completion is not just a $PATH scan.
+    lines = session(path, h(31), [b"ech\t", b"hi\n", b"exit\n"], cwd=cdir)
+    if any(l.strip() == "hi" for l in output_lines(lines)):
+        ok("TAB completes a command name")
+    else:
+        fail("TAB completes a command name", output_lines(lines))
+
+    # Ambiguous: one TAB extends to the common prefix, a second lists.
+    lines = session(path, h(32), [b"echo a\t", b"\t", b"\n", b"exit\n"], cwd=cdir)
+    joined = "\n".join(lines)
+    if "aa1" in joined and "aa2" in joined:
+        ok("a second TAB lists ambiguous candidates")
+    else:
+        fail("a second TAB lists ambiguous candidates", lines[-6:])
+
+    # In ARGUMENT position a word must complete as a file, not a command:
+    # `echo ec<TAB>' must not turn into `echo echo'.
+    lines = session(path, h(33), [b"echo ec\t", b"\n", b"exit\n"], cwd=cdir)
+    if not any("echo echo" in l for l in lines):
+        ok("no command completion in argument position")
+    else:
+        fail("no command completion in argument position", lines[-6:])
 
     # --- history is still recorded through the editor ----------------------
     lines = session(path, h(27),

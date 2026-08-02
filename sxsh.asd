@@ -33,6 +33,7 @@
                              (:file "term")
                              (:file "builtins")
                              (:file "exec")
+                             (:file "complete")
                              (:file "lineedit")
                              (:file "driver"))))
   :in-order-to ((asdf:test-op (asdf:test-op "sxsh/shell/test"))))

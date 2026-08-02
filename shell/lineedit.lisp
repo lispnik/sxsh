@@ -505,6 +505,7 @@ gives us no way to ask."
       (bind (ctrl #\v) 'ed-quoted-insert)
       (bind (ctrl #\g) 'ed-abort)
       (bind (code-char 31) 'ed-undo)    ; C-_
+      (bind #\Tab 'ed-complete)
       (bind #\Return 'ed-accept-line)
       (bind (ctrl #\j) 'ed-accept-line)
       (bind :backspace 'ed-backward-delete-char)
