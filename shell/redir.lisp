@@ -183,6 +183,13 @@ classifying the raw word rejected it as a bad descriptor."
 (defun single-expand (sh word-text)
   "Expand a redirection target to a single field (no splitting; globbing only
 if it yields exactly one match)."
+  ;; `cmd < <(...)': the target is a process substitution, which becomes a
+  ;; /dev/fd path rather than being expanded as a word.
+  (when (process-substitution-p word-text)
+    (multiple-value-bind (path fd) (open-process-substitution sh word-text)
+      (when path
+        (push fd *procsub-fds*)
+        (return-from single-expand path))))
   (let ((fields (expand-word-to-fields sh word-text :split nil :glob t)))
     (cond ((= 1 (length fields)) (first fields))
           ((null fields) "")

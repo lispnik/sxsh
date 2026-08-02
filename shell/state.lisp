@@ -74,6 +74,13 @@
   ;; control-flow signals for break/continue/return handled via catch tags
   )
 
+(defvar *procsub-fds* '()
+  "Descriptors opened for process substitutions in the command being built.
+
+Closed by EXEC-SIMPLE once the command has finished. Leaving them open leaks a
+descriptor per `<(...)' and, worse, keeps the pipe's read end alive so a
+consumer that waits for EOF never sees it.")
+
 (defvar *trap-entry-status* nil
   "The exit status in effect when the current trap action began, or NIL.
 

@@ -260,6 +260,14 @@ tracking nesting, quotes and nested substitutions. Assumes point is on OPEN."
   "Scan one WORD token starting at point. Returns the raw text string.
 Detects assignment-word shape as a side product via classify."
   (let ((out (make-array 16 :element-type 'character :adjustable t :fill-pointer 0)))
+    ;; bash process substitution `<(cmd)' / `>(cmd)'. Consumed BEFORE the loop:
+    ;; `<' is a word terminator, so the loop's first test would end the word
+    ;; immediately and hand back an empty token -- which the caller then
+    ;; re-scans from the same position, forever.
+    (when (and (member (lx-peek lx) '(#\< #\>)) (eql (lx-peek lx 1) #\())
+      (vector-push-extend (lx-advance lx) out)
+      (scan-balanced lx out #\( #\))
+      (return-from scan-word (coerce out 'string)))
     (loop
       (when (word-char-terminator-p lx) (return))
       (let ((c (lx-peek lx)))
@@ -446,6 +454,12 @@ are returned as :assignment-word."
         ;; { and } as standalone tokens only matter to the parser as reserved
         ;; words; lexically they are word constituents. But when they stand
         ;; alone we still emit words and let the parser test reserved-ness.
+        ;; bash process substitution `<(cmd)' / `>(cmd)'. Must be caught here,
+        ;; before the operator branch: `<' is an operator-start character, so
+        ;; SCAN-WORD would never see it. A space (`< (cmd)') still means a
+        ;; redirection of a subshell, which is why the `(' must be adjacent.
+        ((and (member c '(#\< #\>)) (eql (lx-peek lx 1) #\())
+         (scan-word-token lx line col :accept-assignment accept-assignment))
         ;; bash `[[ ... ]]'. Scanned whole, like `((', because the contents
         ;; are not ordinary words: no field splitting or globbing happens
         ;; inside, and `<' `>' are comparisons rather than redirections.

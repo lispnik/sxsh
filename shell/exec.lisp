@@ -459,6 +459,45 @@ expands. Without this `export PATH=~/bin' exported a literal ~.")
                 (every (lambda (c) (or (alphanumericp c) (char= c #\_)))
                        name))))))
 
+(defun process-substitution-p (raw)
+  "True if RAW is a `<(cmd)' or `>(cmd)' word."
+  (and (>= (length raw) 3)
+       (member (char raw 0) '(#\< #\>))
+       (char= (char raw 1) #\()
+       (char= (char raw (1- (length raw))) #\))))
+
+(defun open-process-substitution (sh raw)
+  "Start `<(cmd)' / `>(cmd)' and return the /dev/fd path standing for it.
+
+A pipe is created, the command is run in a child with one end wired to its
+stdout (for `<') or stdin (for `>'), and the word becomes /dev/fd/N naming the
+end WE keep. The descriptor is deliberately left inheritable: the command
+being built is spawned afterwards and has to be able to open that path.
+
+Returns (values path fd) so the caller can close the descriptor once the
+consuming command has finished."
+  (let* ((readp (char= (char raw 0) #\<))
+         (src (subseq raw 2 (1- (length raw))))
+         (self (self-exec-path)))
+    (unless self (return-from open-process-substitution (values nil nil)))
+    (multiple-value-bind (r w) (sb-posix:pipe)
+      (handler-case
+          (let* ((child-fd (if readp w r))   ; the end the child writes/reads
+                 (ours (if readp r w))
+                 (pid (spawn self (list "sxsh" "-c"
+                                        (concatenate 'string (async-prelude sh) src))
+                             :env (exported-environ sh)
+                             :file-actions
+                             (list (fa-dup2 child-fd (if readp 1 0))
+                                   (fa-close ours)))))
+            (declare (ignore pid))
+            (sb-posix:close child-fd)
+            (values (format nil "/dev/fd/~D" ours) ours))
+        (error ()
+          (ignore-errors (sb-posix:close r))
+          (ignore-errors (sb-posix:close w))
+          (values nil nil))))))
+
 (defun expand-command-words (sh cmd)
   "Expand the word list of a simple command into argv (no assignments).
 Applies alias substitution to the command name (first word)."
@@ -467,6 +506,15 @@ Applies alias substitution to the command name (first word)."
      ;; Brace expansion comes first and can turn one word into several, so it
      ;; wraps the rest rather than being a step inside EXPAND-WORD-TO-FIELDS.
      (dolist (raw (brace-expand (word-text w)))
+      (if (process-substitution-p raw)
+          ;; `<(cmd)' becomes a /dev/fd path naming a live pipe; it is not a
+          ;; word to expand, and the descriptor stays open until the command
+          ;; consuming it has finished.
+          (multiple-value-bind (path fd) (open-process-substitution sh raw)
+            (when path
+              (push fd *procsub-fds*)
+              (push path argv)
+              (setf first nil)))
       (let* ((as-assignment (and declaration (assignment-operand-p raw)))
              (fields (expand-word-to-fields
                       sh raw
@@ -482,7 +530,7 @@ Applies alias substitution to the command name (first word)."
                                          :test #'string=)
                                  t)
                 first nil))
-        (dolist (f fields) (push f argv)))))
+        (dolist (f fields) (push f argv))))))
     (setf argv (nreverse argv))
     (apply-alias sh argv)))
 
@@ -544,7 +592,10 @@ the same name may legitimately reappear once we have moved on to a later word."
 (defun exec-simple (sh node)
   ;; PIPESTATUS is set from the result, AFTER the words have been expanded --
   ;; so `echo ${PIPESTATUS[0]}' still reports the previous command.
-  (set-single-pipestatus sh (exec-simple-1 sh node)))
+  (let ((*procsub-fds* '()))
+    (unwind-protect
+         (set-single-pipestatus sh (exec-simple-1 sh node))
+      (dolist (fd *procsub-fds*) (ignore-errors (sb-posix:close fd))))))
 
 (defun exec-simple-1 (sh node)
   ;; Reset the command-substitution status tracker; any $(...) expanded while

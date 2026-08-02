@@ -952,6 +952,24 @@ check bx-extglob-subst  'fooZ'          0 'shopt -s extglob; v=fooX; echo ${v/@(
 # with extglob OFF the pattern keeps its ordinary meaning
 check bx-extglob-off    'y'             0 'case abx in ab?) echo y;; *) echo n;; esac'
 
+# --- bash extensions (tranche 9: process substitution) ---------------------
+# `<(cmd)' runs cmd with one end of a pipe and substitutes /dev/fd/N naming
+# the end WE keep. The descriptor stays inheritable so the command being built
+# can open it, and is closed once that command finishes -- leaving it open
+# leaks a descriptor and keeps the pipe alive so a reader never sees EOF.
+check bx-procsub        'hi'            0 'cat <(echo hi)'
+check bx-procsub-two    'one
+two'                                    0 'cat <(echo one) <(echo two)'
+check bx-procsub-diff   'same'          0 'diff <(echo a) <(echo a) >/dev/null && echo same'
+check bx-procsub-differ 'differ'        0 'diff <(echo a) <(echo b) >/dev/null || echo differ'
+check bx-procsub-pipe   '3'             0 'cat <(printf "a\nb\nc\n") | wc -l | tr -d " "'
+check bx-procsub-cmdsub 'x'             0 'v=$(cat <(echo x)); echo $v'
+# as a redirection target, not just an argument
+check bx-procsub-redir  '2'             0 'wc -l < <(printf "a\nb\n") | tr -d " "'
+# a space still means a redirection of a subshell, so these must NOT change
+check bx-redir-plain    'ok'            0 'echo a > /dev/null; echo ok'
+check bx-redir-in       'ok'            0 'cat < /etc/hosts | head -1 >/dev/null; echo ok'
+
 # --- stdin / REPL mode ----------------------------------------------------
 got=$(printf 'echo from-stdin\nexit 0\n' | "$SXSH" 2>/dev/null)
 if printf '%s' "$got" | grep -q 'from-stdin'; then

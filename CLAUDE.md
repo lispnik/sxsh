@@ -440,8 +440,26 @@ those consume the quantifier character first and `?(...)`/`*(...)` silently fall
 ordinary wildcards. `@`, `+` and `!` are not wildcards, so they worked while the other two did
 not -- a good reminder that partial success here is not success.
 
-Still missing: process substitution; `coproc`; and a subscript containing whitespace
-(`m[a b]=v`, which the lexer splits)
+Tranche 9 added process substitution. `<(cmd)` creates a pipe, runs the command in a re-exec of
+this binary with one end wired to its stdout, and substitutes `/dev/fd/N` naming the end we
+keep. The descriptor is deliberately left inheritable -- the command being built is spawned
+afterwards and has to open that path -- and is closed by `exec-simple` once that command
+finishes, via `*procsub-fds*`. Leaving it open leaks a descriptor per `<(...)` and, worse, keeps
+the pipe's write end alive so a reader never sees EOF. It works as an argument and as a
+redirection target (`wc -l < <(...)`).
+
+Two traps in the lexing, both of which bit:
+
+- `<` is an **operator-start** character, so `next-token` never reaches `scan-word`. The `<(`
+  case has to be caught in `next-token`, before the operator branch.
+- Inside `scan-word`, the group must be consumed **before** the loop. `word-char-terminator-p`
+  is tested at the top of the loop and `<` is a terminator, so the word ended immediately, the
+  caller re-scanned from the same position, and the lexer looped until the heap was exhausted.
+
+The `(` must be adjacent: `cat < (echo x)` stays a redirection of a subshell, as in bash.
+
+Still missing: `coproc`, and a subscript containing whitespace (`m[a b]=v`, which the lexer
+splits)
 -- which drag in `declare`/`local` options, `PIPESTATUS`, `read -a`, `mapfile` and namerefs, and
 which touch the variable model everywhere, so they want their own tranche.
 
