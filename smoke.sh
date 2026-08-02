@@ -245,6 +245,52 @@ check set-allexport     '1'          0 'set -a; V=x; env | grep -c "^V=x"'
 check set-noexec        ''           0 'set -n; echo NOTRUN'
 check set-invalid-opt   ''           2 'set -Z 2>/dev/null'
 
+# --- word splitting: operand quoting, empty params, $* joining -------------
+# Expectations diffed against bash before being written down. `av' prints its
+# arguments one per line so field boundaries are visible.
+av='av(){ for __x in "$@"; do echo "<$__x>"; done; }; '
+# Quoting INSIDE a ${...} operand survives: the quoted spaces do not split,
+# the unquoted one between the two parts does.
+check ws-operand-quoted '<1>
+<2 3>
+<4 5>
+<6>'                              0 "${av}av 1 \${u:-\"2 3\" \"4 5\"} 6"
+check ws-operand-join   '<12 3>
+<4 56>'                           0 "${av}av 1\${u:-\"2 3\" \"4 5\"}6"
+check ws-operand-ifs    '<12_3x>
+<x4_56>'                          0 "IFS=_; ${av}av 1\${u:-\"2_3\"x_x\"4_5\"}6"
+# The same rule, seen through IFS=x: only the unquoted operand splits.
+check ws-operand-split  'A B C
+AxBxC
+AxBxC
+AxBxCx'                           0 'IFS=x; v=; echo ${v:-AxBxC}; echo ${v:-"AxBxC"}; echo "${v:-AxBxC}"; echo "${v:-"AxBxC"}"x'
+# `${v:=w}' stores the flattened value but still yields the split fields.
+check ws-assign-default '<a>
+<b>
+v=[a b]'                          0 "${av}v=; av \${v:=a b}; echo \"v=[\$v]\""
+# Unquoted, an empty parameter or element contributes NO field; quoted, it does.
+check ws-empty-param    '<a>
+<b>'                              0 "${av}set -- a \"\" b; av \$@"
+check ws-empty-quoted   '<a>
+<>
+<b>'                              0 "${av}set -- a \"\" b; av \"\$@\""
+check ws-empty-array    '<x>
+<y>'                              0 "${av}a=(x \"\" y); av \${a[@]}"
+# Unquoted ${a[*]} fields per element like [@]; only the QUOTED form joins.
+check ws-star-unquoted  '<a>
+<b c>'                            0 "IFS=''; ${av}a=(a 'b c'); av \${a[*]}"
+check ws-star-quoted    '<a b c>' 0 "${av}a=(a 'b c'); av \"\${a[*]}\""
+# With no splitting to do, $* joins on IFS's first character -- not a space,
+# which is what "$@" does.
+check ws-star-join      '<x y z>
+<x y z>
+<x:y z>
+<x:y z>'                          0 "IFS=:; ${av}set -- x 'y z'; s=\"\$@\"; av \"\$s\"; s=\$@; av \"\$s\"; s=\"\$*\"; av \"\$s\"; s=\$*; av \"\$s\""
+check ws-star-join-empty '[ab]'   0 'IFS=""; set -- a b; s=$*; echo "[$s]"'
+# The ${v/pat/repl} replacement is spliced into a string, not a field of its
+# own -- it must stay flattened.
+check ws-subst-still-ok 'baa bbb Xaa aaX' 0 'v=aaa; echo ${v/a/b} ${v//a/b} ${v/#a/X} ${v/%a/X}'
+
 # --- redirections: dup, move, close, {name} allocation ---------------------
 # Expectations diffed against bash before being written down. These run in
 # their own directory so the fd files cannot collide with other cases.

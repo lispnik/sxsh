@@ -61,11 +61,45 @@ assignments like x=\"$@\"."
       (case (xchar-class xc)
         (:anchor)                        ; drop
         (:field-sep (write-char #\Space s))
+        ;; `$*' joins with IFS's first character, not a space -- `IFS=:;
+        ;; set -- x "y z"; s=$*' gives `x:y z'. The character travels on the
+        ;; marker because quote removal cannot reach the shell to ask for IFS.
+        ;; #\Nul means IFS was empty, so the parts abut.
+        (:star-sep (unless (char= (xchar-char xc) #\Nul)
+                     (write-char (xchar-char xc) s)))
         (t (write-char (xchar-char xc) s))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Pass 1: tilde + parameter + command + arithmetic, honoring quotes
 ;;; ---------------------------------------------------------------------------
+
+(defun expansion-value->string (v)
+  "An expansion result as a plain string, whether it arrived as one or as
+XCHARs."
+  (if (stringp v) v (xchars->string v)))
+
+(defun emit-expansion (value emit default-class)
+  "Emit an expansion result through EMIT.
+
+VALUE is either a string -- every character takes DEFAULT-CLASS -- or a list of
+XCHAR that already carries its own classes. The latter is how quoting INSIDE a
+${...} operand survives: `${undef:-\"2 3\" \"4 5\"}' unquoted must yield the two
+fields `2 3' and `4 5', so the quoted spaces have to stay unsplittable while
+the space between the two parts becomes a separator.
+
+In a quoted context the whole expansion is quoted and DEFAULT-CLASS wins.
+Otherwise anything that was not quoted inside the operand becomes :SPLIT --
+being merely literal is not enough, because these characters did come from an
+expansion and POSIX splits them."
+  (if (stringp value)
+      (dolist (ch (coerce value 'list)) (funcall emit ch default-class))
+      (dolist (xc value)
+        (case (xchar-class xc)
+          (:anchor (funcall emit (xchar-char xc) :anchor))
+          (t (funcall emit (xchar-char xc)
+                     (cond ((eq default-class :quoted) :quoted)
+                           ((eq (xchar-class xc) :quoted) :quoted)
+                           (t :split))))))))
 
 (defun expand-pass (sh raw &key (tilde t) assignment)
   "Return a list of XCHAR for RAW after step-1 expansions. When ASSIGNMENT is
@@ -74,6 +108,11 @@ PATH=~/a:~/b rule)."
   (let ((out '()) (i 0) (n (length raw)) (start-of-field t))
     (labels ((emit (ch class) (push (make-xchar ch class) out))
              (emit-anchor () (push (make-xchar #\Nul :anchor) out))
+             (emit-star-sep ()
+               (let ((f (ifs-first sh)))
+                 (push (make-xchar (if (plusp (length f)) (char f 0) #\Nul)
+                                   :star-sep)
+                       out)))
              (emit-field-sep () (push (make-xchar #\Nul :field-sep) out)))
       (loop while (< i n) do
         (let ((c (char raw i)))
@@ -113,9 +152,9 @@ PATH=~/a:~/b rule)."
                (emit-anchor)             ; $'' is still a field
                (dolist (ch (coerce str 'list)) (emit ch :quoted))
                (setf i next start-of-field nil)))
-            ;; ${a[@]} unquoted: one field per element, then IFS splitting
-            ((braced-array-at-p sh raw i n)
-             (multiple-value-bind (arr next) (braced-array-at-p sh raw i n)
+            ;; ${a[@]} / ${a[*]} unquoted: one field per element, then IFS
+            ((braced-array-at-p sh raw i n :star t)
+             (multiple-value-bind (arr next) (braced-array-at-p sh raw i n :star t)
                (emit-array-elements arr #'emit #'emit-field-sep :split)
                (setf i next start-of-field nil)))
             ;; $@ / $* need special multi-field handling (see emit-at-params)
@@ -123,15 +162,17 @@ PATH=~/a:~/b rule)."
              (emit-at-params sh #'emit #'emit-field-sep nil :split)
              (setf i (+ i 2) start-of-field nil))
             ((and (char= c #\$) (< (1+ i) n) (char= (char raw (1+ i)) #\*))
-             ;; unquoted $* splits like $@ (each param a field, then IFS split)
-             (emit-at-params sh #'emit #'emit-field-sep nil :split)
+             ;; Unquoted $* splits like $@ -- each parameter is a field, then
+             ;; IFS splitting applies. It differs only when there is NO
+             ;; splitting (an assignment RHS), where it joins on IFS's first
+             ;; character rather than a space, so it needs its own separator.
+             (emit-at-params sh #'emit #'emit-star-sep nil :split)
              (setf i (+ i 2) start-of-field nil))
             ;; $ expansions (unquoted -> splittable)
             ((char= c #\$)
              (multiple-value-bind (str next literal-quoted)
                  (expand-dollar sh raw i n)
-               (dolist (ch (coerce str 'list))
-                 (emit ch (if literal-quoted :quoted :split)))
+               (emit-expansion str #'emit (if literal-quoted :quoted :split))
                (setf i next start-of-field nil)))
             ;; backquote command substitution (unquoted -> splittable)
             ((char= c #\`)
@@ -262,7 +303,7 @@ EMIT-FIELD-SEP, when provided, emits an explicit field boundary (used for
          (incf i 2))
         ((char= c #\$)
          (multiple-value-bind (str next) (expand-dollar sh raw i n)
-           (dolist (ch (coerce str 'list)) (funcall emit ch :quoted))
+           (emit-expansion str emit :quoted)
            (setf i next)))
         ((char= c #\`)
          (multiple-value-bind (str next) (expand-backquote sh raw i n)
@@ -305,7 +346,7 @@ There is no field splitting or pathname expansion here either."
              (incf i 2))
             ((char= c #\$)
              (multiple-value-bind (str next) (expand-dollar sh raw i n)
-               (emit-string str)
+               (emit-string (expansion-value->string str))
                (setf i next)))
             ((char= c #\`)
              (multiple-value-bind (str next) (expand-backquote sh raw i n)
@@ -335,34 +376,49 @@ empty line produced one empty field instead of none."
              (when (and sub (string= sub "@")) (setf end (1+ close))))))))
     (and end (or (= end n) (char= (char raw end) #\")))))
 
-(defun braced-array-at-p (sh raw i n)
+(defun braced-array-at-p (sh raw i n &key star)
   "If RAW at I is `${name[@]}', return (values array end-index); else NIL.
 
-Only the `[@]' form gets per-element fields; `[*]' joins, exactly as `$@' and
-`$*' differ. Recognised here rather than in EXPAND-BRACED-PARAM because only
-the caller can emit field separators."
+With STAR, `${name[*]}' matches too. Inside double quotes it must not: there
+`[*]' joins the elements into one field, exactly as `\"$*\"' differs from
+`\"$@\"'. UNQUOTED, though, the two behave alike -- `IFS=\"\"; argv ${a[*]}'
+yields one field per element, which joining silently got wrong.
+
+Recognised here rather than in EXPAND-BRACED-PARAM because only the caller can
+emit field separators."
   (when (and (< (+ i 1) n) (char= (char raw i) #\$) (char= (char raw (1+ i)) #\{))
     (let ((close (position #\} raw :start (+ i 2))))
       (when close
         (let ((body (subseq raw (+ i 2) close)))
           (multiple-value-bind (base sub) (split-subscript body)
-            (let ((arr (and sub (string= sub "@") (var-array sh base))))
+            (let ((arr (and sub (or (string= sub "@")
+                                    (and star (string= sub "*")))
+                            (var-array sh base))))
               (when arr (values arr (1+ close))))))))))
 
 (defun emit-array-elements (arr emit emit-field-sep class)
   "Emit each element of ARR as its own field, like EMIT-AT-PARAMS does for $@."
-  (loop for v in (array-values arr)
-        for first = t then nil
-        do (unless first (funcall emit-field-sep))
-           (dolist (ch (coerce v 'list)) (funcall emit ch class))))
+  (let ((values (array-values arr)))
+    ;; Unquoted, an empty element contributes no field at all.
+    (unless (eq class :quoted)
+      (setf values (remove-if (lambda (v) (zerop (length v))) values)))
+    (loop for v in values
+          for first = t then nil
+          do (unless first (funcall emit-field-sep))
+             (dolist (ch (coerce v 'list)) (funcall emit ch class)))))
 
 (defun emit-at-params (sh emit emit-field-sep quoted-p class)
   "Emit the positional parameters as separate fields, inserting a field
 separator between each. CLASS is the xchar class for the characters. When
 there are zero positionals, nothing is emitted (so \"$@\" with no args yields
-no field). QUOTED-P is informational; CLASS already encodes quoting."
-  (declare (ignore quoted-p))
+no field).
+
+Unquoted, an EMPTY parameter contributes no field: `set -- a \"\" b; argv $@'
+is two arguments, while the quoted form keeps the empty one. Emitting a
+separator for it regardless left a stray empty field on the end."
   (let ((params (coerce (shell-positional sh) 'list)))
+    (unless quoted-p
+      (setf params (remove-if (lambda (p) (zerop (length p))) params)))
     (loop for p in params
           for first = t then nil
           do (unless first (funcall emit-field-sep))
@@ -621,7 +677,8 @@ variable names."
         (let ((word (if op (subseq rest oppos) nil))
               (val (param-value sh name)))
           (flet ((set-and-return (v)
-                   (unless (special-param-p name) (set-var sh name v))
+                   (unless (special-param-p name)
+                     (set-var sh name (expansion-value->string v)))
                    (values v nil)))
             (cond
               ((null op) (values (or val "") nil))
@@ -644,12 +701,12 @@ variable names."
               ((string= op ":?") (if (nonempty val) (values val nil)
                                      (error "~A: ~A" name
                                             (if (plusp (length word))
-                                                (expand-nested sh word)
+                                                (expand-nested-string sh word)
                                                 "parameter null or not set"))))
               ((string= op "?")  (if val (values val nil)
                                      (error "~A: ~A" name
                                             (if (plusp (length word))
-                                                (expand-nested sh word)
+                                                (expand-nested-string sh word)
                                                 "parameter not set"))))
               ;; use alternative
               ((string= op ":+") (if (nonempty val)
@@ -755,7 +812,15 @@ the dynamic behaviour, as in bash -- `RANDOM=5; echo $RANDOM' prints 5."
 (defun nonempty (v) (and v (plusp (length v))))
 
 (defun expand-nested (sh word)
-  "Expand a ${...} default/alternative word (no splitting, no globbing)."
+  "Expand a ${...} default/alternative word, KEEPING the per-character quoting.
+
+Returning a flat string here was what made `${undef:-"2 3"}' split: once the
+quotes are gone there is nothing left to say the space was protected."
+  (expand-pass sh word))
+
+(defun expand-nested-string (sh word)
+  "As EXPAND-NESTED, flattened -- for diagnostics and for the value stored by
+`${name:=word}', both of which need a string."
   (xchars->string (expand-pass sh word)))
 
 ;;; pattern removal helpers (shell patterns: * ? [..])
@@ -816,7 +881,12 @@ does: `v=aaa; ${v/a*/X}' gives X, not Xaa."
               ((char= (char spec j) #\/) (setf pat-end j) (return))
               (t (incf j))))
       (let* ((raw-pat (subseq spec i (or pat-end (length spec))))
-             (rep (if pat-end (expand-nested sh (subseq spec (1+ pat-end))) ""))
+             ;; The replacement is spliced into a string, so it needs the
+             ;; flattened form -- unlike a :- operand, it is never a field of
+             ;; its own and carries no quoting into the result.
+             (rep (if pat-end
+                      (expand-nested-string sh (subseq spec (1+ pat-end)))
+                      ""))
              (pat (expand-nested-pattern sh raw-pat)))
         (when (string= raw-pat "") (return-from substitute-expand value))
         (substitute-matches value pat rep allp anchor)))))
@@ -925,7 +995,7 @@ empty field."
   ;; First cut on hard :field-sep boundaries.
   (let ((segments '()) (cur '()))
     (dolist (xc xchars)
-      (if (eq (xchar-class xc) :field-sep)
+      (if (member (xchar-class xc) '(:field-sep :star-sep))
           (progn (push (nreverse cur) segments) (setf cur nil))
           (push xc cur)))
     (push (nreverse cur) segments)
