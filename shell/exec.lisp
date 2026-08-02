@@ -429,8 +429,10 @@ expands. Without this `export PATH=~/bin' exported a literal ~.")
 Applies alias substitution to the command name (first word)."
   (let ((argv '()) (declaration nil) (first t))
     (dolist (w (simple-command-words cmd))
-      (let* ((raw (word-text w))
-             (as-assignment (and declaration (assignment-operand-p raw)))
+     ;; Brace expansion comes first and can turn one word into several, so it
+     ;; wraps the rest rather than being a step inside EXPAND-WORD-TO-FIELDS.
+     (dolist (raw (brace-expand (word-text w)))
+      (let* ((as-assignment (and declaration (assignment-operand-p raw)))
              (fields (expand-word-to-fields
                       sh raw
                       ;; Operands of export/readonly are expanded exactly like
@@ -445,7 +447,7 @@ Applies alias substitution to the command name (first word)."
                                          :test #'string=)
                                  t)
                 first nil))
-        (dolist (f fields) (push f argv))))
+        (dolist (f fields) (push f argv)))))
     (setf argv (nreverse argv))
     (apply-alias sh argv)))
 

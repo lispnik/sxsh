@@ -85,7 +85,7 @@ above 10 for this.")
 (defun default-fd (op)
   "The fd a redirection applies to when no explicit IO_NUMBER is given."
   (case op
-    ((:< :<< :<<- :<> :<&) 0)
+    ((:< :<< :<<- :<<< :<> :<&) 0)
     (t 1)))
 
 (defun heredoc-tempfile (sh redirect)
@@ -101,6 +101,22 @@ parameter/command/arith expansion unless the delimiter was quoted."
                               :if-does-not-exist :create)
         (write-string text s))
       path)))
+
+(defun herestring-tempfile (sh redirect)
+  "Write a here-string body to a temp file and return its path.
+
+bash `<<< word': the word is expanded (no field splitting, no globbing) and a
+newline appended, then fed on stdin. Unlike a here-doc there is no delimiter
+and no body to collect at the next newline -- the word IS the body."
+  (let ((text (concatenate 'string
+                           (single-expand sh (word-text (redirect-target redirect)))
+                           (string #\Newline)))
+        (path (format nil "/tmp/sxsh-herestring-~A-~A"
+                      (sb-posix:getpid) (random 1000000))))
+    (with-open-file (s path :direction :output :if-exists :supersede
+                            :if-does-not-exist :create)
+      (write-string text s))
+    path))
 
 ;;; ---------------------------------------------------------------------------
 ;;; For external commands: build FILE-ACTION recipes
@@ -136,6 +152,20 @@ parameter/command/arith expansion unless the delimiter was quoted."
       ((:<< :<<-)
        (let ((path (heredoc-tempfile sh redirect)))
          (values (list (fa-open fd path +o-rdonly+ 0)) path)))
+      (:<<< (let ((path (herestring-tempfile sh redirect)))
+              (values (list (fa-open fd path +o-rdonly+ 0)) path)))
+      ;; bash `&>' / `&>>': stdout and stderr to the same file. Equivalent to
+      ;; `> file 2>&1', so the dup must come after the open.
+      ((:&> :&>>)
+       (let ((path (single-expand sh target-word)))
+         (values (list (fa-open 1 path
+                                (logior +o-wronly+ +o-creat+
+                                        (if (eq op :&>>)
+                                            +o-append+
+                                            (noclobber-flags sh path)))
+                                +mode+)
+                       (fa-dup2 1 2))
+                 nil)))
       (:<& (values (dup-actions fd (single-expand sh target-word)) nil))
       (:>& (values (dup-actions fd (single-expand sh target-word)) nil)))))
 
@@ -197,11 +227,27 @@ RESTORE-REDIRECTS. Also returns temp paths to delete."
                       (newfd (open-for-redirect path flags +mode+)))
                  (unless (= newfd fd)
                    (sb-posix:dup2 newfd fd) (sb-posix:close newfd))))
-              ((:<< :<<-)
-               (let* ((path (heredoc-tempfile sh r))
+              ((:<< :<<- :<<<)
+               (let* ((path (if (eq op :<<<)
+                                (herestring-tempfile sh r)
+                                (heredoc-tempfile sh r)))
                       (newfd (open-for-redirect path +o-rdonly+ 0)))
                  (push path temps)
                  (unless (= newfd fd) (sb-posix:dup2 newfd fd) (sb-posix:close newfd))))
+              ;; bash `&>' / `&>>': stdout and stderr to the same file. fd 2
+              ;; needs its own backup entry or restore would leave it dup'd.
+              ((:&> :&>>)
+               (let* ((path (single-expand sh (word-text (redirect-target r))))
+                      (flags (logior +o-wronly+ +o-creat+
+                                     (if (eq op :&>>)
+                                         +o-append+
+                                         (noclobber-flags sh path))))
+                      (newfd (open-for-redirect path flags +mode+)))
+                 (push (make-saved-fd :orig-fd 2
+                                      :backup-fd (ignore-errors (dup-to-high 2)))
+                       saved)
+                 (unless (= newfd 1) (sb-posix:dup2 newfd 1) (sb-posix:close newfd))
+                 (sb-posix:dup2 1 2)))
               ((:<& :>&)
                ;; expanded, so `exec 3>&$fd' works
                (let ((tgt (single-expand sh (word-text (redirect-target r)))))

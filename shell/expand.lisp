@@ -1128,3 +1128,134 @@ characters entirely."
 
 (declaim (ftype (function (t string) string) command-substitute))
 (declaim (ftype (function (t string) integer) eval-arith))
+
+;;; ---------------------------------------------------------------------------
+;;; Brace expansion (bash; not POSIX)
+;;;
+;;; Runs BEFORE every other expansion and operates on the raw word text, which
+;;; is why it lives outside EXPAND-PASS: `{a,b}' has to become two words before
+;;; anything looks at parameters. Quoting suppresses it, so the scan has to
+;;; skip quoted regions rather than work on the quote-removed string.
+;;; ---------------------------------------------------------------------------
+
+(defun brace-skip-quoted (s i n)
+  "If S[i] opens a quoted or substituted region, return the index just past it,
+else NIL."
+  (let ((c (char s i)))
+    (case c
+      (#\\ (min n (+ i 2)))
+      (#\' (let ((j (position #\' s :start (1+ i))))
+             (if j (1+ j) n)))
+      (#\" (let ((j (1+ i)))
+             (loop while (< j n) do
+               (cond ((char= (char s j) #\\) (incf j 2))
+                     ((char= (char s j) #\") (return (1+ j)))
+                     (t (incf j)))
+                   finally (return n))))
+      (t nil))))
+
+(defun brace-find-group (s)
+  "Find the leftmost unquoted `{' with a matching unquoted `}'.
+Returns (values open-index close-index) or NIL."
+  (let ((n (length s)) (i 0))
+    (loop while (< i n) do
+      (let ((skip (brace-skip-quoted s i n)))
+        (cond
+          (skip (setf i skip))
+          ((char= (char s i) #\{)
+           ;; find the matching close, tracking nesting and quotes
+           (let ((depth 0) (j i))
+             (loop while (< j n) do
+               (let ((sk (brace-skip-quoted s j n)))
+                 (cond
+                   (sk (setf j sk))
+                   ((char= (char s j) #\{) (incf depth) (incf j))
+                   ((char= (char s j) #\})
+                    (decf depth)
+                    (when (zerop depth)
+                      (return-from brace-find-group (values i j)))
+                    (incf j))
+                   (t (incf j)))))
+             ;; unmatched `{': it is literal, keep looking after it
+             (incf i)))
+          (t (incf i)))))
+    nil))
+
+(defun brace-split-commas (s)
+  "Split S on top-level unquoted commas. Returns NIL if there are none."
+  (let ((parts '()) (start 0) (depth 0) (n (length s)) (i 0) (found nil))
+    (loop while (< i n) do
+      (let ((skip (brace-skip-quoted s i n)))
+        (cond
+          (skip (setf i skip))
+          ((char= (char s i) #\{) (incf depth) (incf i))
+          ((char= (char s i) #\}) (decf depth) (incf i))
+          ((and (char= (char s i) #\,) (zerop depth))
+           (push (subseq s start i) parts)
+           (setf start (1+ i) found t)
+           (incf i))
+          (t (incf i)))))
+    (when found
+      (push (subseq s start) parts)
+      (nreverse parts))))
+
+(defun brace-range (s)
+  "Expand `{1..5}' / `{a..e}' / `{0..10..5}'. Returns a list, or NIL if S is
+not a range."
+  (let ((parts '()) (start 0))
+    ;; split on ".." at top level (ranges never nest)
+    (let ((i 0) (n (length s)))
+      (loop while (< i n) do
+        (if (and (< (1+ i) n) (char= (char s i) #\.) (char= (char s (1+ i)) #\.))
+            (progn (push (subseq s start i) parts) (setf start (+ i 2)) (incf i 2))
+            (incf i)))
+      (push (subseq s start) parts))
+    (setf parts (nreverse parts))
+    (unless (member (length parts) '(2 3)) (return-from brace-range nil))
+    (destructuring-bind (from to &optional step) parts
+      (let ((istep (and step (ignore-errors (abs (parse-integer step))))))
+        (when (and step (or (null istep) (zerop istep)))
+          (return-from brace-range nil))
+        (cond
+          ;; numeric range
+          ((and (ignore-errors (parse-integer from))
+                (ignore-errors (parse-integer to)))
+           (let* ((a (parse-integer from)) (b (parse-integer to))
+                  (d (or istep 1))
+                  (out '()))
+             (if (<= a b)
+                 (loop for v from a to b by d do (push (princ-to-string v) out))
+                 (loop for v downfrom a to b by d do (push (princ-to-string v) out)))
+             (nreverse out)))
+          ;; single-character range
+          ((and (= 1 (length from)) (= 1 (length to)))
+           (let* ((a (char-code (char from 0))) (b (char-code (char to 0)))
+                  (d (or istep 1)) (out '()))
+             (if (<= a b)
+                 (loop for v from a to b by d do (push (string (code-char v)) out))
+                 (loop for v downfrom a to b by d do (push (string (code-char v)) out)))
+             (nreverse out)))
+          (t nil))))))
+
+(defun brace-expand (raw)
+  "Expand brace groups in RAW, returning a list of words (possibly just RAW).
+
+`{a,b}' needs at least one top-level comma, or a `..' range, to expand at all;
+`{a}' and `{}' stay literal, as in bash."
+  (multiple-value-bind (open close) (brace-find-group raw)
+    (if (null open)
+        (list raw)
+        (let* ((pre (subseq raw 0 open))
+               (inside (subseq raw (1+ open) close))
+               (post (subseq raw (1+ close)))
+               (alts (or (brace-split-commas inside) (brace-range inside))))
+          (if (null alts)
+              ;; Not a real brace group. Keep the `{' literal and carry on
+              ;; past it, or we would rescan it forever.
+              (mapcar (lambda (tail) (concatenate 'string pre "{" tail))
+                      (brace-expand (concatenate 'string inside "}" post)))
+              (let ((out '()))
+                (dolist (a alts)
+                  (dolist (w (brace-expand (concatenate 'string pre a post)))
+                    (push w out)))
+                (nreverse out)))))))

@@ -75,12 +75,16 @@
 (defparameter +operators+
   ;; Longest-match matters; table is scanned longest-first.
   '((";;&" . :dsemi-and)                ; bash extension, harmless to accept
+    ("&>>" . :and-dgreat)               ; bash: append stdout+stderr
     ("&&"  . :and-if)
     ("||"  . :or-if)
     (";;"  . :dsemi)
     (";&"  . :semi-and)
+    ("<<<" . :tless)                    ; bash: here-string
     ("<<-" . :dlessdash)
     ("<<"  . :dless)
+    ("&>"  . :and-great)                ; bash: stdout+stderr
+    ("|&"  . :pipe-and)                 ; bash: pipe stdout+stderr
     (">>"  . :dgreat)
     ("<&"  . :lessand)
     (">&"  . :greatand)

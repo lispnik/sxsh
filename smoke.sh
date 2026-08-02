@@ -682,6 +682,44 @@ check bx-seconds        'y'             0 'test "$SECONDS" -ge 0 && echo y'
 check bx-seconds-assign '99'            0 'SECONDS=99; echo $SECONDS'
 check bx-seconds-unset  '[]'            0 'unset SECONDS; echo "[$SECONDS]"'
 
+# --- bash extensions (tranche 2: parser-level) -----------------------------
+# here-strings
+check bx-herestring     'hello'         0 'cat <<<hello'
+check bx-herestring-sp  'a b'           0 'cat <<<"a b"'
+check bx-herestring-var 'x'             0 'v=x; cat <<<"$v"'
+check bx-herestring-read 'hi'           0 'read x <<<hi; echo $x'
+# &> and &>> send stdout AND stderr to one file
+check bx-amp-redirect   'ok'            0 'echo hi &>/dev/null; echo ok'
+check bx-amp-both       '2'             0 'sh -c "echo o; echo e >&2" &>"$SMOKE_TMP/ae"; wc -l <"$SMOKE_TMP/ae" | tr -d " "'
+check bx-amp-append     '4'             0 'sh -c "echo o; echo e >&2" &>"$SMOKE_TMP/ap"; sh -c "echo o; echo e >&2" &>>"$SMOKE_TMP/ap"; wc -l <"$SMOKE_TMP/ap" | tr -d " "'
+# fd 2 must be restored afterwards, or later stderr would vanish too
+check_err bx-amp-restores 'after'       0 'echo hi &>/dev/null; echo after >&2'
+# |& is `2>&1 |'
+check bx-pipe-amp       'hi'            0 'echo hi |& cat'
+check bx-pipe-amp-both  '2'             0 'sh -c "echo o; echo e >&2" |& wc -l | tr -d " "'
+check bx-pipe-amp-brace 'x'             0 '{ echo x; } |& cat'
+# function keyword, with and without ()
+check bx-function-kw    'hi'            0 'function f { echo hi; }; f'
+check bx-function-kw-p  'hi'            0 'function f() { echo hi; }; f'
+check bx-function-args  'arg'           0 'function g { echo $1; }; g arg'
+# brace expansion -- happens before every other expansion
+check bx-brace-list     'a b c'         0 'echo {a,b,c}'
+check bx-brace-range    '1 2 3 4 5'     0 'echo {1..5}'
+check bx-brace-rev      '5 4 3 2 1'     0 'echo {5..1}'
+check bx-brace-step     '0 5 10'        0 'echo {0..10..5}'
+check bx-brace-alpha    'a b c d e'     0 'echo {a..e}'
+check bx-brace-affix    'xay xby'       0 'echo x{a,b}y'
+check bx-brace-nested   'a b c'         0 'echo {a,{b,c}}'
+check bx-brace-cross    'a1 a2 b1 b2'   0 'echo {a,b}{1,2}'
+check bx-brace-empty-alt 'a'            0 'echo {a,}'
+# not brace groups: no comma, no range, or quoted
+check bx-brace-single   '{a}'           0 'echo {a}'
+check bx-brace-none     '{}'            0 'echo {}'
+check bx-brace-dquote   '{a,b}'         0 'echo "{a,b}"'
+check bx-brace-squote   '{a,b}'         0 "echo '{a,b}'"
+check bx-brace-escaped  '{a,b}'         0 'echo \{a,b\}'
+check bx-brace-lone     '{'             0 'echo {'
+
 # --- stdin / REPL mode ----------------------------------------------------
 got=$(printf 'echo from-stdin\nexit 0\n' | "$SXSH" 2>/dev/null)
 if printf '%s' "$got" | grep -q 'from-stdin'; then

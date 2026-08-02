@@ -60,7 +60,7 @@ NEWLINE is consumed."
 
 (defparameter +reserved+
   '("if" "then" "else" "elif" "fi" "do" "done" "case" "esac"
-    "while" "until" "for" "in" "{" "}" "!" "time"))
+    "while" "until" "for" "in" "{" "}" "!" "time" "function"))
 
 (defun reservedp (p word)
   "True if the current token is a WORD whose text equals the given reserved
@@ -154,7 +154,11 @@ word. Reserved words are only WORDs (never quoted forms)."
       (setf bang t)
       (advance p))
     (let ((cmds (list (parse-command p))))
-      (loop while (eq (cur-type p) :pipe) do
+      (loop while (member (cur-type p) '(:pipe :pipe-and)) do
+        ;; bash `a |& b' is exactly `a 2>&1 | b', so the stderr dup belongs to
+        ;; the command on the LEFT, which we have already parsed.
+        (when (eq (cur-type p) :pipe-and)
+          (add-stderr-to-stdout (first cmds)))
         (advance p)
         (skip-newlines p)
         (push (parse-command p) cmds))
@@ -162,6 +166,26 @@ word. Reserved words are only WORDs (never quoted forms)."
         (if (and (null bang) (null timed) (= 1 (length cmds)))
             (first cmds)                ; unwrap trivial pipeline
             (make-pipeline cmds bang timed))))))
+
+(defun add-stderr-to-stdout (node)
+  "Append a `2>&1' redirection to NODE, for bash's `|&'.
+
+Every command node type carries a redirect list, so this works for a compound
+on the left of the pipe as well as a simple command."
+  (let ((r (make-redirect :>& 2 (make-word "1"))))
+    (macrolet ((push-redirect (accessor)
+                 `(setf (,accessor node) (append (,accessor node) (list r)))))
+      (typecase node
+        (simple-command (push-redirect simple-command-redirects))
+        (subshell       (push-redirect subshell-redirects))
+        (brace-group    (push-redirect brace-group-redirects))
+        (if-clause      (push-redirect if-clause-redirects))
+        (for-clause     (push-redirect for-clause-redirects))
+        (while-clause   (push-redirect while-clause-redirects))
+        (until-clause   (push-redirect until-clause-redirects))
+        (case-clause    (push-redirect case-clause-redirects))
+        (t nil))))
+  node)
 
 (defun time-keyword-ahead-p (p)
   "True if the current `time` word should be treated as the timing reserved
@@ -196,7 +220,9 @@ It is NOT the keyword when followed by a pipe/operator/terminator (e.g.
     ((reservedp p "while") (parse-while p))
     ((reservedp p "until") (parse-until p))
     ((reservedp p "case")  (parse-case p))
-    ;; function definition:  NAME ( )
+    ;; function definition:  NAME ( )   -- and bash's `function NAME [()]'
+    ((and (reservedp p "function") (function-keyword-ahead-p p))
+     (parse-function-keyword-def p))
     ((function-def-ahead-p p) (parse-function-def p))
     (t (parse-simple-command p))))
 
@@ -231,7 +257,9 @@ We snapshot the lexer, read a token, then restore."
 
 (defun redirect-op-token-p (type)
   (member type '(:less :great :dgreat :dless :dlessdash
-                 :lessand :greatand :lessgreat :clobber)))
+                 :lessand :greatand :lessgreat :clobber
+                 ;; bash: <<< here-string, &> and &>> stdout+stderr
+                 :tless :and-great :and-dgreat)))
 
 (defun parse-simple-command (p)
   "cmd_prefix (assignments/redirs) then words and more redirs."
@@ -295,7 +323,12 @@ We snapshot the lexer, read a token, then restore."
                      (:less :<) (:great :>) (:dgreat :>>)
                      (:dless :<<) (:dlessdash :<<-)
                      (:lessand :<&) (:greatand :>&)
-                     (:lessgreat :<>) (:clobber :>\|))))
+                     (:lessgreat :<>) (:clobber :>\|)
+                     ;; A here-string is not a here-doc: its body is the word
+                     ;; itself, so nothing is queued for collection at the
+                     ;; next newline.
+                     (:tless :<<<)
+                     (:and-great :&>) (:and-dgreat :&>>))))
         (advance p)
         ;; target word (filename or fd)
         (unless (member (cur-type p) '(:word :assignment-word :io-number))
@@ -507,6 +540,40 @@ Returns a COMPLETE-COMMAND node (reusing the same structure)."
 ;;; ---------------------------------------------------------------------------
 ;;; function definition
 ;;; ---------------------------------------------------------------------------
+
+(defun function-keyword-ahead-p (p)
+  "True if the current `function' word introduces a bash function definition.
+
+`function' is not reserved in POSIX, so it has to stay usable as an ordinary
+command name -- `function' alone, or `function | cat', must still run a
+program called function. It is the keyword only when a NAME follows."
+  (let* ((lx (parser-lexer p))
+         (saved-pos (lexer-pos lx))
+         (saved-line (lexer-line lx))
+         (saved-col (lexer-column lx))
+         (saved-hd (copy-list (lexer-pending-heredocs lx))))
+    (let ((tok (next-token lx)))
+      (setf (lexer-pos lx) saved-pos
+            (lexer-line lx) saved-line
+            (lexer-column lx) saved-col
+            (lexer-pending-heredocs lx) saved-hd)
+      (and (eq (token-type tok) :word)
+           (valid-name-p (token-text tok))))))
+
+(defun parse-function-keyword-def (p)
+  "bash: `function NAME { ... }' or `function NAME () { ... }'.
+
+The parentheses are optional after the keyword, which is the whole point of
+the form; the body is otherwise the same compound command."
+  (advance p)                           ; `function'
+  (let ((name (cur-text p)))
+    (advance p)                         ; name
+    (when (eq (cur-type p) :lparen)     ; optional ()
+      (advance p)
+      (expect p :rparen))
+    (skip-newlines p)
+    (let ((body (parse-command p)))
+      (make-function-def name body (parse-redirect-list p)))))
 
 (defun parse-function-def (p)
   (let ((name (cur-text p)))

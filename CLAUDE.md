@@ -333,11 +333,20 @@ with optional pattern; `${!x}` indirection and `${!prefix*}`; `name+=value`; `se
 `$RANDOM` and `$SECONDS`. Plus what was already there: `${x:o:l}`, `**`, `$'...'`, `echo -e`,
 `printf %*d`, `type -a`, `local`.
 
-Still missing, roughly in the order worth doing: here-strings `<<<`, `&>` / `&>>`, the
-`function` keyword and brace expansion (all small parser work); `printf -v` and `%q`; `read`'s
-`-n -N -d -t -u -s` flags; `for ((;;))` and `((expr))`; then the two big ones, `[[ ]]` with
-`=~`, and arrays -- which drag in `declare`/`local` options, `PIPESTATUS`, `read -a`, `mapfile`
-and namerefs, and which touch the variable model everywhere, so they want their own tranche.
+Tranche 2 added the parser-level batch: here-strings `<<<`, `&>` / `&>>`, `|&`, the `function`
+keyword (with optional `()`), and brace expansion including ranges and steps.
+
+Two things there are easy to get wrong. `&>` has to back up fd 2 as well as fd 1, or restoring
+leaves stderr dup'd to the file and every later diagnostic disappears. And brace expansion runs
+*before* every other expansion on the RAW word text, so it cannot live inside
+`expand-word-to-fields` -- it wraps the call in `expand-command-words` and turns one word into
+several. It must skip quoted regions itself, since quote removal has not happened yet.
+
+Still missing, roughly in the order worth doing: `printf -v` and `%q`; `read`'s `-n -N -d -t -u
+-s` flags; `for ((;;))` and `((expr))`; `select`; `case ;&` and `;;&`; `shopt` and extglob;
+process substitution; `trap ERR`/`DEBUG`; then the two big ones, `[[ ]]` with `=~`, and arrays
+-- which drag in `declare`/`local` options, `PIPESTATUS`, `read -a`, `mapfile` and namerefs, and
+which touch the variable model everywhere, so they want their own tranche.
 
 Note the tension with the previous section: every extension added here is one more thing a
 strict mode would have to gate, and one more divergence `make posix-yash` will report. That is
