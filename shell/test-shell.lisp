@@ -116,7 +116,30 @@ directly."
   (check-rx "a\\.c" "abc" nil)
   ;; an empty-matching repetition must terminate rather than spin
   (check-rx "(a*)*b" "b" '("b" ""))
-  (check-rx "^[a-z]+@[a-z]+\\.[a-z]+$" "me@host.com" '("me@host.com")))
+  (check-rx "^[a-z]+@[a-z]+\\.[a-z]+$" "me@host.com" '("me@host.com"))
+  ;; The remaining character classes -- only alpha and digit were covered.
+  (check-rx "[[:space:]]+" "a  b" '("  "))
+  (check-rx "[[:upper:]]+" "abCDef" '("CD"))
+  (check-rx "[[:lower:]]+" "ABcdEF" '("cd"))
+  (check-rx "[[:alnum:]]+" "!!a1!!" '("a1"))
+  (check-rx "[[:punct:]]+" "ab,;cd" '(",;"))
+  (check-rx "[[:xdigit:]]+" "zz1aFz" '("1aF"))
+  ;; CL string literals have no \t escape -- "a\tb" would just be "atb".
+  (check-rx "[[:blank:]]+" (format nil "a~Cb" #\Tab) (list (string #\Tab)))
+  (check-rx "[[:graph:]]+" " ab " '("ab"))
+  (check-rx "[[:print:]]+" "ab" '("ab"))
+  (check-rx "[^[:digit:]]+" "12ab" '("ab"))
+  ;; Catastrophic backtracking. Without the failure memo these grow
+  ;; exponentially: 26 characters took 5.4 seconds and each further two
+  ;; roughly quadrupled it, so an untrusted regex could hang the shell.
+  ;; A run of 200 finishing at all is the assertion.
+  (check-rx "^(a+)+$" (concatenate 'string (make-string 200 :initial-element #\a) "X") nil)
+  (check-rx "^(a|a)+$" (concatenate 'string (make-string 200 :initial-element #\a) "X") nil)
+  (check-rx "^(a*)*$" (concatenate 'string (make-string 200 :initial-element #\a) "X") nil)
+  (check-rx "^(a|aa)+$" (concatenate 'string (make-string 200 :initial-element #\a) "X") nil)
+  ;; ...and the same shapes must still MATCH when they should.
+  (check-rx "^(a+)+$" "aaaa" '("aaaa" "aaaa"))
+  (check-rx "^(a|aa)+$" "aaa" '("aaa" "a")))
 
 (defun run-all ()
   (setf *pass* 0 *fail* 0)

@@ -169,7 +169,59 @@
 ;;; and greedy repetition able to give back characters on failure.
 ;;; ---------------------------------------------------------------------------
 
+(defvar *rx-memo* nil
+  "Failure memo for one match attempt: NODE -> set of positions known to fail.
+
+This is what keeps a backtracking matcher from going exponential. `^(a+)+$'
+against 26 a's and an X took 5.4 seconds before it existed, and each further
+two characters roughly quadrupled that -- a regex from untrusted input could
+hang the shell outright.
+
+Memoising on (NODE . POSITION) is sound because a node's CONTINUATION is
+structurally fixed within a single attempt: what follows a node is determined
+by where it sits in the tree -- the rest of its concatenation, then the rest of
+its parent's, and so on -- and that is the same on every visit, including
+visits from different iterations of an enclosing repetition. So if matching
+NODE at POSITION failed once, it fails every time, and the whole subtree can be
+skipped. Only failures are recorded: a success is consumed immediately by the
+caller and never re-asked.
+
+The table is reset per starting position in REGEX-MATCH, since the anchoring
+differs there.")
+
+(defvar *rx-steps* 0
+  "Steps taken in the current attempt, as a backstop under the memo. A pattern
+the memo cannot tame still terminates rather than hanging the shell.")
+
+(defconstant +rx-max-steps+ 2000000
+  "Step ceiling for one match attempt. Generous enough that no realistic
+pattern reaches it, small enough to fail in well under a second.")
+
+(defun rx-memo-failed-p (node pos)
+  (let ((set (and *rx-memo* (gethash node *rx-memo*))))
+    (and set (gethash pos set))))
+
+(defun rx-memo-fail (node pos)
+  (when *rx-memo*
+    (let ((set (or (gethash node *rx-memo*)
+                   (setf (gethash node *rx-memo*) (make-hash-table :test 'eql)))))
+      (setf (gethash pos set) t))))
+
 (defun rx-match-node (node s pos caps k)
+  ;; The memo only applies to nodes that can branch. A single character never
+  ;; backtracks, so recording it would cost more than it saves.
+  (when (and (member (rx-kind node) '(:rep :alt :cat :group))
+             (rx-memo-failed-p node pos))
+    (return-from rx-match-node nil))
+  (when (> (incf *rx-steps*) +rx-max-steps+)
+    (return-from rx-match-node nil))
+  (let ((result (rx-match-node-1 node s pos caps k)))
+    (when (and (null result)
+               (member (rx-kind node) '(:rep :alt :cat :group)))
+      (rx-memo-fail node pos))
+    result))
+
+(defun rx-match-node-1 (node s pos caps k)
   (ecase (rx-kind node)
     (:char (and (< pos (length s)) (char= (char s pos) (rx-ch node))
                 (funcall k (1+ pos))))
@@ -226,6 +278,10 @@ not participate yields an empty string."
     (let ((caps (make-array (1+ groups) :initial-element nil)))
       (loop for start from 0 to (length string) do
         (fill caps nil)
+        ;; Fresh per starting position: a node that fails when anchored at one
+        ;; start may well succeed at another.
+        (setf *rx-memo* (make-hash-table :test 'eq)
+              *rx-steps* 0)
         (let ((end (rx-match-node tree string start caps #'identity)))
           (when end
             (return (cons (subseq string start end)
