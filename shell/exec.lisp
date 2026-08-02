@@ -362,6 +362,22 @@ so builtins in non-final pipeline stages run in-process writing to the pipe."
                      (spawn-stage sh cmd (stdin-of i) (stdout-of i) all-fds
                                   :classified (aref classes i))
                    (setf (aref stages i) (if pid (cons :pid pid) (cons :status st))))))
+             ;; Drop the parent's copy of every fd that only a spawned child
+             ;; needs, BEFORE running any in-process stage. Holding a pipe's
+             ;; write end open means the reader never sees EOF -- and if that
+             ;; reader is an in-process stage, the shell waits on itself. That
+             ;; is `find | awk | while read ...; done', which hung forever.
+             ;; Keyed on whether a child was ACTUALLY started, not on how the
+             ;; stage was classified. A command that is external but cannot be
+             ;; found never spawns, so nothing will ever read its input pipe;
+             ;; closing that read end here made the producer die of EPIPE and
+             ;; the pipeline report 141 instead of the 127 the failed lookup
+             ;; owes it. `echo hi | nosuchcmd' is the case.
+             (loop for i from 0 below (1- n) do
+               (when (eq (car (aref stages i)) :pid)
+                 (ignore-errors (sb-posix:close (second (nth i pipes)))))
+               (when (eq (car (aref stages (1+ i))) :pid)
+                 (ignore-errors (sb-posix:close (first (nth i pipes))))))
              ;; PASS 2: the in-process stages, in pipeline order. Each one's
              ;; reader is already running. Close our copy of a stage's write
              ;; end as soon as it finishes, or the downstream reader never
@@ -372,8 +388,13 @@ so builtins in non-final pipeline stages run in-process writing to the pipe."
                      (spawn-stage sh cmd (stdin-of i) (stdout-of i) all-fds
                                   :classified (aref classes i))
                    (setf (aref stages i) (if pid (cons :pid pid) (cons :status st))))
+                 ;; Same reasoning for an in-process stage, once it is done:
+                 ;; release its output pipe so the next reader sees EOF, and
+                 ;; its input pipe since nothing else will read it.
                  (when (< i (1- n))
-                   (ignore-errors (sb-posix:close (second (nth i pipes))))))))
+                   (ignore-errors (sb-posix:close (second (nth i pipes)))))
+                 (when (plusp i)
+                   (ignore-errors (sb-posix:close (first (nth (1- i) pipes))))))))
         ;; Every remaining parent-side pipe fd goes now: a reader still holding
         ;; a write end would wait for an EOF that cannot arrive.
         (dolist (fd all-fds) (ignore-errors (sb-posix:close fd))))))

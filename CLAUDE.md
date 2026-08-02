@@ -588,6 +588,14 @@ Two things to know before touching it:
   computed up front and threaded through `spawn-stage`.
 - **Close a stage's write end as soon as it finishes**, or the downstream reader waits for an
   EOF that never arrives.
+- **Drop the parent's copy of every child-only fd BEFORE running any in-process stage.** While
+  the parent holds a pipe's write end, the reader never sees EOF -- and if that reader is an
+  in-process stage, the shell waits on itself. `find | awk | while read ...; done` hung forever
+  on exactly this, which is git's t1006-cat-file test 252.
+- **Key that closing on whether a child was actually STARTED, not on how the stage was
+  classified.** An external command that cannot be found never spawns, so nothing will ever read
+  its input pipe; closing that read end made the producer die of EPIPE and the pipeline report
+  141 instead of the 127 the failed lookup owes it (`echo hi | nosuchcmd`).
 
 **Known limitation.** The fix only helps when the *reader* is a child process. A pipeline whose
 stages are BOTH in-process -- `( ... ) | :`, a subshell into a builtin -- still deadlocks the
