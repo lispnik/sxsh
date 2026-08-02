@@ -610,11 +610,16 @@ instead was tried and rejected: the child loses too much context and t1006-cat-f
 
 Three constraints on that fork, each learned the hard way:
 
-- **`fork-safe-p` checks the image is single-threaded, at runtime.** fork clones only the
-  calling thread, so a mutex held by any other thread stays locked forever and the child
-  deadlocks on its first allocation. SBCL starts a finalizer thread lazily and does so more
-  readily on Linux than macOS, and CI runs both. Declining to fork just falls back to inline,
-  which is the older behaviour rather than a wedged child.
+- **Leave thread safety to `sb-posix:fork`; do not re-check it here.** fork clones only the
+  calling thread, so a mutex held by any other stays locked forever and the child would deadlock
+  on its first allocation -- and this child runs arbitrary Lisp rather than exec'ing at once.
+  SBCL already stops its finalizer thread around the fork and restarts it, prunes dead thread
+  structs, then tests `(avl-count *all-threads*)` -- lower level than `list-all-threads`, which
+  by SBCL's own comment does not expose newborn threads -- all under `*make-thread-lock*`, so the
+  test is atomic with the fork. A hand-rolled check (this file used to have one) is both weaker
+  and racy. It signals rather than forking unsafely, which `ignore-errors` turns into NIL, and
+  the caller runs the stage inline. Note this is a **runtime** property, not a platform one:
+  Linux starts the finalizer thread more readily than macOS, and CI runs both.
 - **`vfork` is not an alternative.** Its child shares the parent's address space and may only
   call exec or `_exit`; running a stage in one would corrupt the parent. That is why
   `posix_spawn` may use vfork internally and we cannot.

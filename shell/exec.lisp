@@ -445,26 +445,6 @@ pipeline anyway -- their output is a job table, never enough to fill a pipe.")
                          (and w (word-text w))))))
          (and name (member name +parent-only-builtins+ :test #'string=)))))
 
-(defun fork-safe-p ()
-  "True only if forking this image is safe: it must be single-threaded.
-
-fork(2) clones ONLY the calling thread. Any mutex held by another thread stays
-locked forever in the child, so the first allocation needing the GC lock would
-deadlock -- and the child here runs arbitrary Lisp, not an immediate exec.
-SBCL is single-threaded in this image today, but it starts a finalizer thread
-lazily and does so more readily on Linux than on macOS, and CI runs both.
-Hence a runtime check rather than an assumption about the platform.
-
-Declining to fork is not a failure: the caller then runs the stage inline,
-which is the older behaviour -- correct except for the both-stages-in-process
-deadlock -- rather than a child wedged on a lock it can never acquire.
-
-vfork is NOT an alternative. Its child shares the parent's address space and
-may only call exec or _exit; running a pipeline stage in one would corrupt the
-parent directly. That is exactly why posix_spawn can use vfork internally and
-we cannot: it execs immediately, and this never execs."
-  (= 1 (length (sb-thread:list-all-threads))))
-
 (defun fork-stage (sh cmd stdin stdout close-in-child)
   "Run an in-process pipeline stage in a forked child. Returns a pid, or NIL if
 the fork failed and the caller should fall back to running it inline.
@@ -483,8 +463,24 @@ so this does not reintroduce the fork+exec that posix_spawn exists to avoid --
 external commands are still spawned, never forked.
 
 The flush before forking is not optional: buffered output present in the
-parent would otherwise be written twice, once by each process."
-  (unless (fork-safe-p) (return-from fork-stage nil))
+parent would otherwise be written twice, once by each process.
+
+Thread safety is left to SB-POSIX:FORK, which does it better than a check here
+could. fork clones only the calling thread, so a mutex held by any other stays
+locked forever and the child would deadlock on its first allocation -- and this
+child runs arbitrary Lisp rather than exec'ing immediately. SBCL stops its
+finalizer thread around the fork and restarts it afterwards, prunes dead thread
+structs, and then tests (avl-count *all-threads*) -- lower level than
+LIST-ALL-THREADS, which by SBCL's own comment does not expose newborn threads.
+All of that happens under *make-thread-lock*, so it is atomic with the fork;
+a check of our own would be both weaker and racy. It signals rather than
+forking unsafely, which the IGNORE-ERRORS below turns into NIL, and the caller
+then runs the stage inline -- the older behaviour, not a wedged child.
+
+vfork is NOT an alternative: its child shares the parent's address space and
+may only call exec or _exit, so running a stage in one would corrupt the
+parent. That is exactly why posix_spawn may use vfork internally and we
+cannot -- it execs immediately, and this never execs."
   (finish-output *standard-output*)
   (finish-output *error-output*)
   (let ((pid (ignore-errors (sb-posix:fork))))
