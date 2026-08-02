@@ -69,15 +69,55 @@
               (progn (write-char c o) (incf i))))))))
 
 (define-builtin "printf" (sh args out)
-  ;; `--' ends the options; the next word is the format even if it starts
-  ;; with a dash.
-  (when (and args (string= (first args) "--")) (pop args))
-  (when args
-    (let ((fmt (first args)) (rest (rest args)))
-      (multiple-value-bind (text status) (posix-printf fmt rest)
-        (write-string text out)
-        (return-from builtin status))))
+  ;; bash `-v NAME': put the result in a variable instead of on stdout.
+  (let ((target nil))
+    (loop while (and args (>= (length (first args)) 2)
+                     (string= (subseq (first args) 0 2) "-v"))
+          do (let ((a (pop args)))
+               (setf target (if (> (length a) 2) (subseq a 2) (pop args)))))
+    ;; `--' ends the options; the next word is the format even if it starts
+    ;; with a dash.
+    (when (and args (string= (first args) "--")) (pop args))
+    (when args
+      (let ((fmt (first args)) (rest (rest args)))
+        (multiple-value-bind (text status) (posix-printf fmt rest)
+          (if target
+              (set-var sh target text)
+              (write-string text out))
+          (return-from builtin status)))))
   0)
+
+(defparameter +printf-q-escape+ " !\"$&'()*,;<>?[\\]^`{|}"
+  "Characters bash's %q escapes with a backslash. Determined by probing bash
+rather than guessed -- the set is not the same as the shell metacharacters,
+and notably excludes # ~ = % and :.")
+
+(defun printf-quote (s)
+  "bash %q: render S so it re-parses to itself.
+
+Empty becomes '', anything containing a control character uses the $'...'
+form, and otherwise each special character is backslash-escaped. That last
+choice is what makes the output match bash textually; SHELL-QUOTE's
+single-quoted form would be equally correct shell but a different string."
+  (cond
+    ((string= s "") "''")
+    ((some (lambda (c) (< (char-code c) 32)) s)
+     (with-output-to-string (o)
+       (write-string "$'" o)
+       (loop for c across s do
+         (case c
+           (#\Newline (write-string "\\n" o))
+           (#\Tab (write-string "\\t" o))
+           (#\Return (write-string "\\r" o))
+           (t (if (< (char-code c) 32)
+                  (format o "\\x~2,'0x" (char-code c))
+                  (progn (when (find c "'\\") (write-char #\\ o))
+                         (write-char c o))))))
+       (write-char #\' o)))
+    (t (with-output-to-string (o)
+         (loop for c across s do
+           (when (find c +printf-q-escape+) (write-char #\\ o))
+           (write-char c o))))))
 
 (defun printf-escape-at (s i n &key (octal t))
   "Decode the backslash escape starting at S[i] (which is a backslash).
@@ -280,6 +320,7 @@ arguments. Returns (values text status)."
              (values (if precision (subseq s 0 (min precision (length s))) s) nil)))
       (#\c (let ((s (princ-to-string arg)))
              (values (if (plusp (length s)) (string (char s 0)) "") nil)))
+      (#\q (values (printf-quote (princ-to-string arg)) nil))
       ((#\d #\i) (let ((v (int)))
                    (values (format nil "~:[~;+~]~A"
                                    (and plus (>= v 0))
@@ -451,43 +492,95 @@ arguments. Returns (values text status)."
   (signal 'loop-continue :n (if args (parse-integer (first args)) 1)) 0)
 
 (define-builtin "read" (sh args out)
-  ;; read [-r] [-p prompt] [-s] name...
-  (let ((raw-mode nil) (silent nil) (prompt nil) (names args))
-    (loop while (and names (plusp (length (first names)))
-                     (char= (char (first names) 0) #\-)
-                     (> (length (first names)) 1))
-          do (let ((opt (first names)))
-               (cond
-                 ((string= opt "-r") (setf raw-mode t) (pop names))
-                 ((string= opt "-s") (setf silent t) (pop names))
-                 ((string= opt "-p")
-                  (pop names)
-                  (setf prompt (pop names)))
-                 ((and (> (length opt) 2) (string= (subseq opt 0 2) "-p"))
-                  (setf prompt (subseq opt 2)) (pop names))
-                 (t (return)))))
+  ;; POSIX has only -r. The rest are bash: -p prompt, -s silent, -n/-N a
+  ;; character count, -d an alternate delimiter, -u a file descriptor, -t a
+  ;; timeout.
+  (let ((raw-mode nil) (silent nil) (prompt nil) (names args)
+        (fd 0) (delim #\Newline) (max nil) (exact nil) (timeout nil))
+    (labels ((opt-arg (opt)
+               ;; -n3 and -n 3 are both accepted, as in bash.
+               (if (> (length opt) 2) (subseq opt 2) (pop names))))
+      (loop while (and names (> (length (first names)) 1)
+                       (char= (char (first names) 0) #\-))
+            do (let* ((opt (first names)) (kind (char opt 1)))
+                 (case kind
+                   (#\r (setf raw-mode t) (pop names))
+                   (#\s (setf silent t) (pop names))
+                   (#\p (pop names) (setf prompt (opt-arg opt)))
+                   (#\n (pop names)
+                        (setf max (ignore-errors (parse-integer (opt-arg opt)))))
+                   (#\N (pop names)
+                        (setf max (ignore-errors (parse-integer (opt-arg opt)))
+                              exact t))
+                   (#\d (pop names)
+                        (let ((d (opt-arg opt)))
+                          ;; `read -d ""' means NUL-delimited.
+                          (setf delim (if (plusp (length d))
+                                          (char d 0)
+                                          (code-char 0)))))
+                   (#\u (pop names)
+                        (setf fd (or (ignore-errors (parse-integer (opt-arg opt))) 0)))
+                   (#\t (pop names)
+                        (setf timeout
+                              (or (ignore-errors
+                                    (let ((*read-default-float-format* 'double-float))
+                                      (float (read-from-string (opt-arg opt)) 1d0)))
+                                  0d0)))
+                   (t (return))))))
     (when prompt (write-string prompt *error-output*) (finish-output *error-output*))
+    ;; -t: bash exits 142 (128+SIGALRM) when the deadline passes with nothing
+    ;; read. -t 0 is the polling form: report whether input is available and
+    ;; consume nothing.
+    (when timeout
+      (unless (fd-input-ready-p fd timeout)
+        (return-from builtin (if (zerop timeout) 1 142)))
+      (when (zerop timeout) (return-from builtin 0)))
     (multiple-value-bind (line escaped eof-no-newline)
-        ;; fd 0, not *STANDARD-INPUT*: redirections move the descriptor, and a
+        ;; A descriptor, not *STANDARD-INPUT*: redirections move the fd, and a
         ;; buffered stream would keep serving bytes read before the move.
-        (read-one-logical-line 0 raw-mode)
+        (read-one-logical-line fd raw-mode :delim delim :max max :exact exact)
       (when (eq line :eof) (return-from builtin 1))
-      (when silent (terpri *error-output*))
+      ;; bash echoes the newline the user's (suppressed) Return would have
+      ;; produced -- but only on a terminal. Doing it unconditionally put a
+      ;; stray blank line into every piped `read -s'.
+      (when (and silent (plusp (sb-unix:unix-isatty fd)))
+        (terpri *error-output*))
       ;; POSIX: input ending before a newline still assigns, but the status is
       ;; non-zero so `while read line' terminates on a file with no final
       ;; newline instead of looping on the last record.
       (let ((status (if eof-no-newline 1 0)))
-        (if (null names)
-            (progn (set-var sh "REPLY" line) status)
-            (let* ((ifs (current-ifs sh))
-                   (parts (split-on-ifs line ifs (length names) escaped)))
-              (loop for nm in names for i from 0
-                    do (set-var sh nm (or (nth i parts) "")))
-              status))))))
+        (cond
+          ;; -N takes the bytes verbatim: no IFS trimming or splitting at all.
+          (exact
+           (if names
+               (loop for nm in names for i from 0
+                     do (set-var sh nm (if (zerop i) line "")))
+               (set-var sh "REPLY" line))
+           status)
+          ((null names) (set-var sh "REPLY" line) status)
+          (t
+           (let* ((ifs (current-ifs sh))
+                  (parts (split-on-ifs line ifs (length names) escaped)))
+             (loop for nm in names for i from 0
+                   do (set-var sh nm (or (nth i parts) "")))
+             status)))))))
 
-(defun fd-read-line (fd)
-  "Read one line from FD a byte at a time, consuming the newline but nothing
-beyond it. Returns (values line missing-newline), or :eof at end of input.
+(defun fd-input-ready-p (fd seconds)
+  "True if FD has input available within SECONDS (a float; 0 polls).
+
+Used by bash's `read -t'. select(2) rather than a non-blocking read, because
+the point is to wait without consuming anything."
+  (sb-unix:unix-simple-poll fd :input (round (* (max seconds 0) 1000))))
+
+(defun fd-read-line (fd &key (delim #\Newline) max exact)
+  "Read from FD a byte at a time, consuming the delimiter but nothing beyond.
+
+DELIM is the terminator (bash `read -d'). MAX stops after that many characters
+(`read -n'). EXACT means read exactly MAX characters and treat no byte as a
+delimiter (`read -N'), which is why the two are separate options rather than
+one with a flag.
+
+Returns (values text missing-delim), or :eof at end of input.
 
 The single-byte reads are the point, not an oversight. POSIX requires `read'
 to leave the file offset just past the newline it consumed, because the very
@@ -502,7 +595,8 @@ what made gpgrt-config, which parses .pc files with exactly this shape, report
 another field's value for every variable it read."
   (let ((buf (make-array 1 :element-type '(unsigned-byte 8)))
         (out (make-string-output-stream))
-        (got-any nil))
+        (got-any nil)
+        (count 0))
     (loop
       (let ((n (sb-sys:with-pinned-objects (buf)
                  (loop
@@ -522,11 +616,24 @@ another field's value for every variable it read."
           (t
            (setf got-any t)
            (let ((ch (code-char (aref buf 0))))
-             (if (char= ch #\Newline)
-                 (return (values (get-output-stream-string out) nil))
-                 (write-char ch out)))))))))
+             (cond
+               ;; -N: no character is a delimiter; stop only on the count.
+               (exact
+                (write-char ch out)
+                (incf count)
+                (when (and max (>= count max))
+                  (return (values (get-output-stream-string out) nil))))
+               ((char= ch delim)
+                (return (values (get-output-stream-string out) nil)))
+               (t
+                (write-char ch out)
+                (incf count)
+                ;; -n: a short read is not a failure, so the delimiter is
+                ;; reported as present.
+                (when (and max (>= count max))
+                  (return (values (get-output-stream-string out) nil))))))))))))
 
-(defun read-one-logical-line (fd raw-mode)
+(defun read-one-logical-line (fd raw-mode &key (delim #\Newline) max exact)
   "Read one logical line for the `read' builtin from FD.
 
 Returns (values text escaped-positions eof-without-newline), or :eof as the
@@ -550,7 +657,8 @@ when input ends before a newline, even though the fields are still assigned."
                (when esc (push pos escaped))
                (incf pos)))
       (loop
-        (multiple-value-bind (line missing-newline) (fd-read-line fd)
+        (multiple-value-bind (line missing-newline)
+            (fd-read-line fd :delim delim :max max :exact exact)
           (when (eq line :eof)
             (unless got-any
               (return-from read-one-logical-line (values :eof nil nil)))
@@ -574,7 +682,7 @@ when input ends before a newline, even though the fields are still assigned."
                       (setf continues t)
                       (incf i))
                      (t (emit c nil) (incf i)))))
-               (when (or (not continues) missing-newline) (return))))))))
+               (when (or (not continues) missing-newline max) (return))))))))
     (values (get-output-stream-string text) (nreverse escaped) eof-no-newline)))
 
 (defun split-on-ifs (line ifs maxfields &optional escaped)

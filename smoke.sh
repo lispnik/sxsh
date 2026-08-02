@@ -720,6 +720,41 @@ check bx-brace-squote   '{a,b}'         0 "echo '{a,b}'"
 check bx-brace-escaped  '{a,b}'         0 'echo \{a,b\}'
 check bx-brace-lone     '{'             0 'echo {'
 
+# --- bash extensions (tranche 3: builtins) ---------------------------------
+# printf -v NAME puts the result in a variable instead of on stdout
+check bx-printf-v       'hi'            0 'printf -v v %s hi; echo $v'
+check bx-printf-v-multi 'a-b'           0 'printf -v v "%s-%s" a b; echo $v'
+check bx-printf-v-joined 'hi'           0 'printf -vv %s hi; echo $v'
+check bx-printf-v-silent 'x'            0 'printf -v v %s noise; echo x'
+# printf %q renders a value so it re-parses to itself. The escape set was
+# taken by probing bash, not guessed: it excludes # ~ = % and :.
+check bx-printf-q-space 'a\ b'          0 'printf "%q\n" "a b"'
+check bx-printf-q-quote "it\\'s"        0 'printf "%q\n" "it'"'"'s"'
+check bx-printf-q-plain 'x'             0 'printf "%q\n" x'
+check bx-printf-q-empty "''"            0 'printf "%q\n" ""'
+check bx-printf-q-dollar 'a\$b'         0 'printf "%q\n" "a\$b"'
+check bx-printf-q-hash  'a#b'           0 'printf "%q\n" "a#b"'
+check bx-printf-q-tab   "\$'a\\tb'"     0 'printf "%q\n" "$(printf "a\tb")"'
+check bx-printf-q-round 'a b'           0 'v=$(printf "%q" "a b"); eval "echo $v"'
+# read -n (at most N chars) / -N (exactly N, no delimiter, no IFS trimming)
+check bx-read-n         '[123]'         0 'printf 12345 | { read -n 3 x; echo "[$x]"; }'
+check bx-read-n-stops   '[ab]'          0 'printf "ab\ncd\n" | { read -n 10 x; echo "[$x]"; }'
+check bx-read-n-joined  '[123]'         0 'printf 12345 | { read -n3 x; echo "[$x]"; }'
+check bx-read-n-fields  '[a][b]'        0 'printf "a b\n" | { read -n 3 x y; echo "[$x][$y]"; }'
+check bx-read-N-nodelim '[a
+b]'                                     0 'printf "a\nb\nc\n" | { read -N 3 x; echo "[$x]"; }'
+check bx-read-N-short   'st=1 [ab]'     0 'printf "ab" | { read -N 5 x; echo "st=$? [$x]"; }'
+check bx-read-N-noifs   '[  ab  ]'      0 'printf "  ab  \n" | { read -N 6 x; echo "[$x]"; }'
+# read -d alternate delimiter
+check bx-read-d         '[a]'           0 'printf a:b | { read -d : x; echo "[$x]"; }'
+check bx-read-d-twice   '[a][b]'        0 'printf "a:b:c" | { read -d : x; read -d : y; echo "[$x][$y]"; }'
+check bx-read-d-eof     'st=1 [foo]'    0 'printf "foo" | { read -d : x; echo "st=$? [$x]"; }'
+# read -u FD, -t timeout, -s silent
+check bx-read-u         '[hi]'          0 'read -u 3 3<<<hi; echo "[$REPLY]"'
+check bx-read-u-d       '[a]'           0 'read -u 3 -d : x 3<<<"a:b"; echo "[$x]"'
+check bx-read-t-poll    '0'             0 'read -t 0 </dev/null; echo $?'
+check bx-read-s         '[hi]'          0 'echo hi | { read -s x; echo "[$x]"; }'
+
 # --- stdin / REPL mode ----------------------------------------------------
 got=$(printf 'echo from-stdin\nexit 0\n' | "$SXSH" 2>/dev/null)
 if printf '%s' "$got" | grep -q 'from-stdin'; then

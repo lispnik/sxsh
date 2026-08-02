@@ -342,9 +342,16 @@ leaves stderr dup'd to the file and every later diagnostic disappears. And brace
 `expand-word-to-fields` -- it wraps the call in `expand-command-words` and turns one word into
 several. It must skip quoted regions itself, since quote removal has not happened yet.
 
-Still missing, roughly in the order worth doing: `printf -v` and `%q`; `read`'s `-n -N -d -t -u
--s` flags; `for ((;;))` and `((expr))`; `select`; `case ;&` and `;;&`; `shopt` and extglob;
-process substitution; `trap ERR`/`DEBUG`; then the two big ones, `[[ ]]` with `=~`, and arrays
+Tranche 3 added the builtin batch: `printf -v` and `%q`, and `read`'s `-n -N -d -t -u -s`.
+`%q`'s escape set was taken by probing bash over every printable character rather than guessed
+-- it is not the shell metacharacter set, and notably excludes `#`, `~`, `=`, `%` and `:`.
+`-n` and `-N` are separate options rather than one with a flag because `-N` treats no byte as a
+delimiter *and* skips IFS trimming entirely. `read -s` echoes its newline only on a terminal;
+unconditionally meant a stray blank line in every piped `read -s`.
+
+Still missing, roughly in the order worth doing: `for ((;;))` and `((expr))`; `select`;
+`case ;&` and `;;&`; `shopt` and extglob; process substitution; `trap ERR`/`DEBUG`; then the two
+big ones, `[[ ]]` with `=~`, and arrays
 -- which drag in `declare`/`local` options, `PIPESTATUS`, `read -a`, `mapfile` and namerefs, and
 which touch the variable model everywhere, so they want their own tranche.
 
