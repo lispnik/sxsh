@@ -56,6 +56,7 @@ make fuzz           # fuzz the parser; findings are shrunk and the seed printed
 make git-tests      # git's t/ suite under sxsh vs bash (slow; builds test-tool once)
 make posix          # differential conformance vs bash (247 cases)
 make posix REF_SHELL=/bin/dash    # stricter reference
+make posix-yash     # strictest reference; rejects extensions (brew install yash)
 make clean          # remove bin/ and this project's fasls
 ```
 
@@ -315,6 +316,37 @@ into four groups:
 
 Do not "fix" these against dash. If the count moves, triage the delta rather
 than assuming a regression.
+
+### yash is the strictest reference, and the only one that rejects extensions
+
+`make posix-yash` runs the differential suite against yash (`brew install yash` / `apt install
+yash`). It is worth having as a *second* reference, not a replacement for bash, for one reason:
+it is the only shell here whose POSIX mode genuinely **rejects** extensions rather than merely
+adjusting behaviour. Under `yash --posix`, arrays, the `function` keyword and here-strings are
+all parse errors, and even by default yash has no `**`, no `${v:o:l}` and no `source`. That
+makes it the reference that finds bashisms we ship without noticing.
+
+It found six: `type -p` and `type -t` (POSIX `type` takes no options), `printf %*d` (no `*`
+field width in POSIX), and `**` in arithmetic. Those are real, and are the first candidates for
+a strict-mode gate.
+
+**Do not treat every yash divergence as our bug.** The rest of its ~18 fall into four buckets,
+none of them conformance failures on our side:
+
+- **Status 1 vs 2, both non-zero.** `readonly r=1; r=2`, `$((1/0))`, `$((1%0))`, `umask 999`:
+  all four shells abort, sxsh and bash exit 1, dash and yash exit 2. POSIX requires only a
+  non-zero status, so the value is unspecified.
+- **Diagnostic and output format.** `type` prints `cc: an external command at /usr/bin/cc` in
+  yash; POSIX does not specify the wording. Same for redirection failure messages.
+- **Features yash lacks.** `\u` inside `$'...'` (it has `$'...'`, just not that escape), and the
+  arithmetic comma operator, which ISO C has and POSIX inherits — yash is arguably wrong there.
+- **yash idiosyncrasies.** `command -v echo` prints an external path rather than `echo`.
+
+**Beware probes that lean on `echo`.** What `echo` does with a backslash in its operand is
+implementation-defined: XSI echo expands escapes, bash's does not. `echo "a\\b"` prints `a\b`
+under bash and sxsh but `a` under dash and yash, so a probe written that way tests the reference
+shell's choice of `echo` rather than the thing it means to test. Use `printf "%s\n"`. One probe
+(`q-backslash`) had exactly this defect and yash is what exposed it.
 
 ### Use a modern bash as the differential reference
 

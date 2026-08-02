@@ -301,7 +301,12 @@ probe pe-undef-concat   'echo ${undefined_zz}extra'
 # --- quoting --------------------------------------------------------------
 probe q-dquote-escape   'echo "a\"b"'
 probe q-dollar-escape   'echo "a\$b"'
-probe q-backslash       'echo "a\\b"'
+# printf, not echo: what `echo' does with a backslash in its operand is
+# implementation-defined (XSI echo expands escapes, bash's does not), so
+# `echo "a\\b"' prints a\b under bash and sxsh but a under dash and yash. The
+# probe is meant to test that a backslash survives double quoting, and only
+# printf tests that rather than the reference shell's choice of echo.
+probe q-backslash       'printf "%s\n" "a\\b"'
 probe q-escaped-space   'echo a\ b'
 probe q-at-expands      'set -- "a b" c; for i in "$@"; do echo "[$i]"; done'
 probe q-at-empty        'set -- ; for i in "$@"; do echo no; done; echo empty'

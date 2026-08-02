@@ -19,6 +19,9 @@ PYTHON  ?= python3
 # Leave REF_SHELL empty so posix-diff.sh picks a modern bash itself; macOS
 # /bin/bash is 3.2 and misreports conformance.
 REF_SHELL ?=
+# yash for `make posix-yash'. Resolved from PATH so it works wherever it is
+# installed; the target reports plainly if it is absent.
+YASH ?= $(shell command -v yash 2>/dev/null)
 # Iterations etc. for `make fuzz'; findings are reproducible from the seed.
 FUZZ_ARGS ?= -n 1000
 # Spec files from third_party/oils that are in scope for a POSIX shell.
@@ -58,6 +61,18 @@ jobs: $(BIN)
 ## posix: differential conformance suite against a reference shell
 posix: $(BIN)
 	./test/posix-diff.sh ./$(BIN) $(REF_SHELL)
+
+## posix-yash: same suite against yash, the strictest reference available
+posix-yash: $(BIN)
+	@test -n "$(YASH)" || { echo "posix-yash: yash not found (brew install yash / apt install yash)"; exit 1; }
+	@./test/posix-diff.sh ./$(BIN) $(YASH) || true
+
+# Not part of `check': yash is a scoreboard, not a gate. It is the only shell
+# here whose POSIX mode actually REJECTS extensions (arrays, `function',
+# here-strings are all parse errors under --posix), and by default it lacks
+# `**', `${v:o:l}' and `source', so it is the reference that finds bashisms we
+# ship without noticing. It also has idiosyncrasies of its own -- see
+# CLAUDE.md before treating one of its divergences as our bug.
 
 ## oils: Oils cross-shell spec tests (needs the submodule + a python2)
 oils: $(BIN)
