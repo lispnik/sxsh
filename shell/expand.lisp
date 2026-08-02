@@ -41,7 +41,8 @@ pathname expansion. When ASSIGNMENT is true, tilde expands after ':' too."
       (let ((out '()))
         (dolist (f fields)
           (if (and glob (not (opt sh :noglob)) (field-has-glob-p f))
-              (let ((matches (glob-field f :dotglob (shopt-p sh "dotglob"))))
+              (let ((matches (glob-field f :dotglob (shopt-p sh "dotglob")
+                                       :skipdots (shopt-p sh "globskipdots"))))
                 (cond
                   (matches (dolist (m matches) (push m out)))
                   ;; bash `nullglob': a pattern that matches nothing expands
@@ -1074,16 +1075,21 @@ exempt, which is what keeps `echo \"*\"' literal."
                           (member (xchar-char xc) '(#\* #\? #\[))))
         field))
 
+(defvar *glob-skipdots* t
+  "Whether globbing skips `.' and `..'; mirrors shopt globskipdots, which bash
+has ON by default.")
+
 (defvar *glob-dotglob* nil
   "Bound by GLOB-FIELD from shopt dotglob; consulted deep in the walk.")
 
-(defun glob-field (field &key dotglob)
+(defun glob-field (field &key dotglob (skipdots t))
   "Expand a field containing active glob metacharacters against the filesystem.
 Returns a sorted list of matching pathnames, or NIL if none match.
 
 DOTGLOB is bash's shopt of the same name: when set, a leading `*' or `?' also
 matches names beginning with a dot."
   (let* ((*glob-dotglob* dotglob)
+         (*glob-skipdots* skipdots)
          (pat (field->glob-pattern field))
          (absolute (and (plusp (length pat)) (char= (char pat 0) #\/)))
          (segments (remove "" (split-on-slash pat) :test #'string=))
@@ -1103,7 +1109,9 @@ NUL sentinels so they match literally."
     (dolist (xc field)
       (unless (member (xchar-class xc) '(:anchor :field-sep))
         (let ((c (xchar-char xc)))
-          (if (and (member c '(#\* #\? #\[ #\]))
+          ;; `-' belongs here too: quoted, it must not form a range, which
+          ;; is what `[C\\-D]' relies on.
+          (if (and (member c '(#\* #\? #\[ #\] #\- #\\))
                    (not (glob-active-p (xchar-class xc))))
               (progn (write-char #\Nul s) (write-char c s))  ; literal metachar
               (write-char c s)))))))
@@ -1152,27 +1160,28 @@ unless shopt dotglob is set."
                (plusp (length name)) (char= (char name 0) #\.)
                (not (and (plusp (length real)) (char= (char real 0) #\.))))
       (return-from glob-segment-match nil))
-    (and (not (string= name ".")) (not (string= name ".."))
-         (shell-pattern-match real name))
-    ;; allow . and .. only on explicit literal patterns
+    ;; `.' and `..' are skipped unless shopt globskipdots is unset -- bash
+    ;; enables it by default, so `.*' normally shows neither.
     (cond
       ((or (string= real ".") (string= real "..")) (string= real name))
-      ((or (string= name ".") (string= name "..")) nil)
+      ((and (or (string= name ".") (string= name "..")) *glob-skipdots*) nil)
       (t (shell-pattern-match real name)))))
 
 (defun unescape-glob (pattern)
-  "Remove NUL sentinels but keep the following char literal for matching by
-converting it into a bracket expression when it's a metachar."
+  "Turn NUL sentinels into backslash escapes, which both PAT-MATCH and
+MATCH-BRACKET already read as `the next character is literal'.
+
+Wrapping the character in a bracket expression instead -- `[' became `[[]' --
+works only OUTSIDE a bracket expression. Inside one it is nonsense: `[\[z]'
+arrived as [ NUL [ z ] and came back out as `[[[]z]', so the escaped forms of
+the very cases brackets exist to express could never match."
   (with-output-to-string (s)
     (let ((i 0) (n (length pattern)))
       (loop while (< i n) do
         (if (and (char= (char pattern i) #\Nul) (< (1+ i) n))
-            (let ((c (char pattern (1+ i))))
-              ;; escape metachar by wrapping in [ ]
-              (if (member c '(#\* #\? #\[ #\]))
-                  (progn (write-char #\[ s) (write-char c s) (write-char #\] s))
-                  (write-char c s))
-              (incf i 2))
+            (progn (write-char #\\ s)
+                   (write-char (char pattern (1+ i)) s)
+                   (incf i 2))
             (progn (write-char (char pattern i) s) (incf i)))))))
 
 ;;; ---------------------------------------------------------------------------

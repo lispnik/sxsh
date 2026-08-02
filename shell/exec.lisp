@@ -85,16 +85,40 @@ slash. A sourced file only has to be READABLE; requiring execute permission
       (shell-last-status sh))))
 
 (defun run-string (sh src)
-  (run sh (parse-string src)))
+  "Execute SRC, running each complete command as soon as it parses.
+
+See MAP-COMPLETE-COMMANDS: a syntax error late in a script must not undo the
+commands before it, and an EXIT trap set earlier has to be in place when the
+error terminates the shell."
+  (handler-case
+      (handler-case
+          (progn (map-complete-commands src (lambda (node) (exec-node sh node)))
+                 (shell-last-status sh))
+        (shell-exit (e)
+          (setf (shell-last-status sh) (or (shell-exit-code e) 0))
+          (shell-last-status sh)))
+    (func-return (e)
+      (setf (shell-last-status sh) (cf-code e))
+      (shell-last-status sh))))
 
 (defun run-trap (sh condition-name)
   "Run the trap action registered for CONDITION-NAME (already normalized), if
-any. Errors in the trap are contained."
+any. Errors in the trap are contained.
+
+The status a trap leaves behind is its own business: `$?' after the handler
+returns is whatever it was before the signal arrived. A trap ending in
+`( exit 42 )' otherwise made the next `echo $?' report 42, as though the
+interrupted command had failed."
   (multiple-value-bind (action found) (gethash condition-name (shell-traps sh))
     (when (and found (plusp (length action)))
-      (handler-case (run sh (parse-string action))
-        (shell-exit (e) (setf (shell-last-status sh) (or (shell-exit-code e) 0)))
-        (error () nil)))))
+      (let ((entry-status (shell-last-status sh))
+            (exited nil))
+        (handler-case (run sh (parse-string action))
+          (shell-exit (e)
+            (setf exited t)
+            (setf (shell-last-status sh) (or (shell-exit-code e) 0)))
+          (error () nil))
+        (unless exited (setf (shell-last-status sh) entry-status))))))
 
 (defun run-exit-traps (sh)
   "Execute the EXIT trap, if set. Called once when the shell terminates.
@@ -261,7 +285,14 @@ safe points between commands. Signals are handled in the order received."
             ;; carried on -- `trap "exit 9" TERM' did nothing on TERM.
             (let ((*trap-entry-status* (shell-last-status sh)))
              (handler-case
-                (dolist (node (parse-string action)) (exec-node sh node))
+                (progn
+                  (dolist (node (parse-string action)) (exec-node sh node))
+                  ;; What the handler left in `$?' is its own business: after
+                  ;; it returns, `$?' is whatever it was when the signal
+                  ;; arrived. A trap ending in `( exit 42 )' otherwise made
+                  ;; the next `echo $?' report 42, as though the command the
+                  ;; signal interrupted had failed.
+                  (setf (shell-last-status sh) *trap-entry-status*))
               (shell-exit (e)
                 (setf (shell-last-status sh) (or (shell-exit-code e) 0))
                 (signal 'shell-exit :code (shell-last-status sh)))

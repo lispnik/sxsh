@@ -1379,7 +1379,8 @@ and RETURN are bash extensions.")
 (defparameter +shopt-names+
   '("extglob" "nullglob" "dotglob" "nocaseglob" "globstar" "failglob"
     "expand_aliases" "checkwinsize" "cmdhist" "histappend" "huponexit"
-    "interactive_comments" "lithist" "login_shell" "nocasematch" "xpg_echo")
+    "interactive_comments" "lithist" "login_shell" "nocasematch" "xpg_echo"
+    "globskipdots")
   "shopt names we recognise. Only some change behaviour -- see SHOPT-P uses --
 but an unknown name has to be an error, since scripts test the exit status of
 `shopt -q name' to feature-detect.")
@@ -1569,6 +1570,14 @@ but an unknown name has to be an error, since scripts test the exit status of
   (cond
     ((null args) (print-traps sh out))
     ((string= (first args) "-p") (print-traps sh out (rest args)))
+    ;; A leading `-SOMETHING' that is not `-' or a known option is an invalid
+    ;; option, not an action: `trap -1 EXIT' must fail rather than register a
+    ;; handler that runs the command `-1'.
+    ((and (> (length (first args)) 1) (char= (char (first args) 0) #\-)
+          (not (string= (first args) "--")))
+     (format *error-output* "trap: ~A: invalid option~%" (first args))
+     (format *error-output* "trap: usage: trap [-lp] [[action] signal_spec ...]~%")
+     2)
     ;; `trap EXIT' / `trap 0 2' -- operands only, no action. POSIX says a
     ;; leading unsigned integer means every operand is a condition; shells
     ;; extend that to names. Treating the first operand as an action here
@@ -1584,11 +1593,14 @@ but an unknown name has to be an error, since scripts test the exit status of
        (when (null conds)
          (format *error-output* "trap: usage: trap [action] condition ...~%")
          (return-from builtin 2))
+       ;; Applied in order, stopping at the first bad spec -- the ones before
+       ;; it have already taken effect. Validating them all up front and
+       ;; bailing meant `trap - 0 -99' left the EXIT trap installed, where
+       ;; bash has already removed it by the time it rejects `-99'.
        (dolist (c conds)
          (unless (valid-condition-p c)
            (format *error-output* "trap: ~A: bad signal specification~%" c)
-           (return-from builtin 1)))
-       (dolist (c conds)
+           (return-from builtin 1))
          (let ((sig (normalize-signal c)))
            (cond
              ((string= action "-")

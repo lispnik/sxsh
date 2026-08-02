@@ -732,6 +732,34 @@ the form; the body is otherwise the same compound command."
 ;;; Public entry points
 ;;; ---------------------------------------------------------------------------
 
+(defun map-complete-commands (string fn)
+  "Parse STRING one complete_command at a time, calling FN on each AS SOON AS
+it parses, rather than parsing the whole text first.
+
+That ordering is observable. Parsing everything up front meant a syntax error
+ANYWHERE discarded the entire script: `echo one' followed by a bare `for'
+printed nothing, where every other shell prints `one' and then reports the
+error -- and a `trap ... EXIT' earlier in the file never got installed, so it
+could not run either. A SHELL-PARSE-ERROR is signalled at the point of
+failure, after everything before it has already been executed.
+
+The parser instance is shared across the loop, so multi-line constructs and
+here-documents parse exactly as they did; this is not the line-at-a-time
+reader."
+  (let ((p (make-parser string)))
+    (skip-newlines p)
+    (loop
+      (when (eq (cur-type p) :eof) (return))
+      (when (at-list-end-p p)
+        (perr p "unexpected token ~S" (or (cur-text p) (cur-type p))))
+      ;; SKIP-NEWLINES before the callback, not after: consuming the trailing
+      ;; newline is what collects any here-document bodies queued by the
+      ;; command just parsed, so executing first would run `cat <<E' with an
+      ;; empty body.
+      (let ((node (parse-complete-command p)))
+        (skip-newlines p)
+        (funcall fn node)))))
+
 (defun parse-string (string)
   "Parse STRING as a shell program.
 

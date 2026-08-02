@@ -245,6 +245,55 @@ check set-allexport     '1'          0 'set -a; V=x; env | grep -c "^V=x"'
 check set-noexec        ''           0 'set -n; echo NOTRUN'
 check set-invalid-opt   ''           2 'set -Z 2>/dev/null'
 
+# --- globbing: escaped members, bracket literals, globskipdots -------------
+# Expectations diffed against bash before being written down.
+gdir="$tmp/glob"; mkdir -p "$gdir"; : > "$gdir/foo.-"; : > "$gdir/c.C"
+: > "$gdir/[";   : > "$gdir/]";   : > "$gdir/_G"
+gcheck() { local back=$PWD; cd "$gdir" || return; check "$@"; cd "$back" || return; }
+# An escaped `-' inside a class is a literal member, not a range endpoint.
+gcheck glob-range      'c.C'      0 'echo *.[C-D]'
+gcheck glob-escaped-dash 'c.C foo.-' 0 'echo *.[C\-D]'
+# `[' and `]' as class members, escaped and bare. The escaped forms are the
+# ones that were broken: the NUL sentinel used to unescape into `[[]', which
+# is nonsense INSIDE a bracket expression.
+gcheck glob-bracket-esc  '[ ]'    0 'echo [\[z] [\]z]'
+gcheck glob-bracket-bare '[ ]'    0 'echo [[z] []z]'
+gcheck glob-negate-esc   '_G _G'  0 'echo _[^\[z] _[^\]z]'
+gcheck glob-negate-bare  '_G _G'  0 'echo _[^[z] _[^]z]'
+# globskipdots is ON by default, so `.*' shows neither `.' nor `..'.
+gcheck glob-skipdots-on  'hi .*'  0 'echo hi .*'
+gcheck glob-skipdots-off 'hi . ..' 0 'shopt -u globskipdots; echo hi .*'
+gcheck glob-skipdots-dflt 'default=0' 0 'shopt -q globskipdots; echo default=$?'
+
+# --- trap: signal specs, options, status isolation, parse errors -----------
+# `trap -' applies operands in order and stops at the first bad one; the ones
+# before it have already taken effect.
+check trap-partial-reset 'st=1'   0 'trap "echo e" EXIT; trap - 0 -99 2>/dev/null; echo "st=$?"'
+# A leading -SOMETHING is an invalid OPTION, not an action to run.
+check trap-bad-option    'st=2
+t'                                0 'trap "echo t" EXIT; trap -1 EXIT 2>/dev/null; echo st=$?'
+# A bare unsigned integer operand is a signal spec, so these RESET the trap.
+check trap-reset-by-num  'ok0'    0 'trap "echo noprint" EXIT; trap 0 EXIT; echo ok0'
+check trap-reset-octalish 'ok07'  0 'trap "echo noprint" EXIT; trap 07 EXIT; echo ok07'
+# What a handler leaves in $? is its own business.
+check trap-status-isolated 'before=0
+USR1 status=0
+after=0'                          0 'trap "echo USR1 status=$?; ( exit 42 )" USR1; echo before=$?; sh -c "kill -USR1 $$"; echo after=$?'
+check trap-exit-status   'x'      3 'trap "echo x" EXIT; exit 3'
+
+# Commands run as they parse: a syntax error later must not undo them, and an
+# EXIT trap set before it has to be installed when the error ends the shell.
+check incr-prefix-runs   'one
+FAILED'                           2 'echo one
+trap "echo FAILED" EXIT
+for'
+check incr-trap-can-exit 'FAILED' 0 'trap "echo FAILED; exit 0" EXIT
+for'
+# ...but a here-document body is still attached before its command runs.
+check incr-heredoc       'hi 2'   0 'cat <<E
+hi $((1+1))
+E'
+
 # --- word splitting: operand quoting, empty params, $* joining -------------
 # Expectations diffed against bash before being written down. `av' prints its
 # arguments one per line so field boundaries are visible.

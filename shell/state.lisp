@@ -2,6 +2,10 @@
 
 (in-package #:sxsh-shell)
 
+(defparameter +shopts-default-on+ '("globskipdots")
+  "shopt names bash enables by default. SHOPT-P reads presence in the table,
+so a default-on option has to be seeded there rather than inferred.")
+
 (defstruct (shell (:constructor %make-shell))
   ;; variable table: name -> (value . exported-p)
   (vars (make-hash-table :test 'equal))
@@ -73,7 +77,9 @@
   (history-base 1)
   ;; bash `shopt' options. Separate from SHELL-OPTIONS, which holds the
   ;; POSIX `set -o' flags -- bash keeps the two namespaces apart and so do we.
-  (shopts (make-hash-table :test 'equal))
+  (shopts (let ((h (make-hash-table :test 'equal)))
+            ;; bash has these ON by default; every other shopt starts off.
+            (dolist (n +shopts-default-on+ h) (setf (gethash n h) t))))
   ;; bash namerefs (`declare -n r=v'): NAME -> the name it stands for. Reads
   ;; and writes through the alias reach the target variable.
   (namerefs (make-hash-table :test 'equal))
