@@ -68,8 +68,20 @@ this is simply the reader for a script arriving on standard input."
         (when (shell-interactive sh) (terpri))
         (return))
       (unless (string= (string-trim '(#\Space #\Tab #\Newline) line) "")
+        ;; Record before running: this is the call whose absence made history
+        ;; permanently empty, so `history' printed nothing and `fc' always
+        ;; reported an empty list. HISTORY-ADD does its own blank/duplicate
+        ;; filtering, so it needs no guard beyond being interactive.
+        (when (shell-interactive sh) (history-add sh line))
         (handler-case
-            (run-string sh line)
+            ;; Dispatch the nodes directly rather than through RUN-STRING.
+            ;; RUN catches SHELL-EXIT as a top-level backstop and turns it
+            ;; into a status, so `exit' typed at the prompt never reached the
+            ;; handler below -- it set $? and the loop carried on. The shell
+            ;; could only be left with Ctrl-D or a signal, and because the
+            ;; exit path never ran, $HISTFILE was never written either.
+            (dolist (node (parse-string line))
+              (exec-node sh node))
           (sxsh:shell-parse-error (e)
             (format *error-output* "sxsh: ~A~%" e))
           (shell-exit (e)
@@ -175,6 +187,9 @@ interactive/stdin session."
                                           (stdin-is-interactive-p)))))
     (multiple-value-bind (mode operand rest) (parse-shell-options sh argv)
       (when (eq mode :error) (return-from main 2))
+      ;; After option parsing, because `-i' can turn interactivity on. A
+      ;; missing or unreadable $HISTFILE is not an error.
+      (when (shell-interactive sh) (ignore-errors (history-load sh)))
       (unwind-protect
            (handler-case
                (ecase mode
@@ -198,7 +213,12 @@ interactive/stdin session."
                     (run-string sh text)))
                  (:stdin
                   (set-positional sh rest)
-                  (if (and (shell-interactive sh) (stdin-is-interactive-p))
+                  ;; `-i' asks for an interactive shell explicitly. Requiring
+                  ;; stdin-is-interactive-p as well meant `sxsh -i' set the
+                  ;; flag and then took the script path anyway, so the option
+                  ;; did nothing. An explicit -i is honoured; without it we
+                  ;; still infer interactivity from the terminal.
+                  (if (shell-interactive sh)
                       (repl sh)
                       ;; A non-interactive shell reading a script from standard
                       ;; input parses the whole text at once, exactly as it would
@@ -231,5 +251,10 @@ interactive/stdin session."
              (setf (shell-last-status sh) 1)))
         ;; POSIX: the EXIT trap runs when the shell terminates, whatever the
         ;; cause
-        (run-exit-traps sh))
+        (progn
+          (run-exit-traps sh)
+          ;; Persist history last, so anything the EXIT trap ran is included.
+          ;; Best effort: a read-only home must not change the exit status.
+          (when (shell-interactive sh)
+            (ignore-errors (history-save sh)))))
       (shell-last-status sh))))

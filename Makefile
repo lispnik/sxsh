@@ -58,6 +58,10 @@ smoke: $(BIN)
 jobs: $(BIN)
 	$(PYTHON) test/jobs-pty.py ./$(BIN)
 
+## history: history and `fc', driven through a real pty
+history-tests: $(BIN)
+	$(PYTHON) test/history-pty.py ./$(BIN)
+
 ## posix: differential conformance suite against a reference shell
 posix: $(BIN)
 	./test/posix-diff.sh ./$(BIN) $(REF_SHELL)
@@ -99,7 +103,7 @@ fuzz: $(BIN)
 	$(PYTHON) test/fuzz-parser.py $(FUZZ_ARGS)
 
 ## check: everything -- both suites, smoke, job control, POSIX conformance
-check: test smoke jobs posix
+check: test smoke jobs history-tests posix
 
 ## clean: remove built executables and this project's compiled fasls
 clean:

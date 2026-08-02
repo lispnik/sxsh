@@ -647,6 +647,39 @@ Three constraints on that fork, each learned the hard way:
   `jobs` calls waitpid on its own siblings, gets ECHILD, and reports every running job as Done.
   Their output is a job table, so running them inline risks no deadlock.
 
+### Interactive behaviour can only be tested through a pty
+
+History is recorded only at an interactive prompt, and a shell is only interactive when it has a
+terminal — so none of it is reachable from `sxsh -c` or a pipe. `test/history-pty.py` forks a
+pty and drives the shell, the same way `test/jobs-pty.py` does for job control. Both are in
+`make check`.
+
+Two traps when writing these tests. A pty transcript contains the terminal's **echo of what you
+typed**, so asserting on the raw text finds your own input and reports a result that has nothing
+to do with the shell — two of these tests "failed" that way before the assertions were narrowed
+to the numbered `history` lines. And the shell often prints the prompt and the command's output
+back to back (`$     4  echo c`), so anything anchored to the start of a line misses the first
+line of every command's output unless the prompt is stripped first; `clean()` does that.
+
+### `exit` must not go through `run`
+
+`repl` dispatches parsed nodes directly rather than calling `run-string`. `run` catches
+`shell-exit` as a top-level backstop and turns it into a status, so `exit` typed at an
+interactive prompt set `$?` and the loop carried on — the shell could only be left with Ctrl-D
+or a signal. Because the exit path never ran, `$HISTFILE` was never written either. This is the
+same shape as the `eval`/`.` bug: anything that must let `shell-exit` escape cannot route
+through `run`.
+
+### `fc` removes itself from the history list
+
+POSIX requires it, and it is not cosmetic. The REPL records each line *before* running it, so
+when `fc -s` resolves "the most recent entry" it finds **itself** and re-executes forever. The
+`fc` builtin drops the newest entry on entry (when interactive) and then adds whatever it
+actually ran, which is exactly POSIX's "replacing the fc command".
+
+Note also that `fc -l` and `history` have *different* output formats — `NUMBER<TAB><SPACE>` and
+`%5d␠␠` respectively — and must not share a formatter.
+
 ### git's test suite is the most demanding real script we have
 
 `make git-tests` runs git's own t/ suite under sxsh (`test/git-suite.py`, submodule

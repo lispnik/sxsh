@@ -65,6 +65,12 @@
   ;; Names declared with `declare -i': every assignment to one is evaluated
   ;; as an arithmetic expression rather than stored verbatim.
   (int-vars (make-hash-table :test 'equal))
+  ;; Command history, oldest first. POSIX requires it for `fc'; bash also
+  ;; exposes it through `history'. Only an interactive shell records anything.
+  (history (make-array 0 :adjustable t :fill-pointer t))
+  ;; Number of the OLDEST entry still held. History numbers keep climbing as
+  ;; entries are dropped, so `fc -l' shows stable numbers within a session.
+  (history-base 1)
   ;; bash `shopt' options. Separate from SHELL-OPTIONS, which holds the
   ;; POSIX `set -o' flags -- bash keeps the two namespaces apart and so do we.
   (shopts (make-hash-table :test 'equal))
@@ -348,6 +354,90 @@ it rather than hanging. We simply stop and use the last name reached."
                           (opt sh :allexport)
                           (and cell (cdr cell))))))
   value)
+
+;;; ---------------------------------------------------------------------------
+;;; History
+;;; ---------------------------------------------------------------------------
+
+(defun history-limit (sh)
+  "$HISTSIZE, defaulting to 500 as bash does. A non-numeric value means the
+default; zero or less disables recording entirely."
+  (let ((v (nth-value 0 (get-var sh "HISTSIZE"))))
+    (or (and v (ignore-errors (parse-integer (string-trim " " v)))) 500)))
+
+(defun history-file (sh)
+  (let ((v (nth-value 0 (get-var sh "HISTFILE"))))
+    (if (and v (plusp (length v)))
+        v
+        (let ((home (nth-value 0 (get-var sh "HOME"))))
+          (and home (concatenate 'string home "/.sxsh_history"))))))
+
+(defun history-add (sh line)
+  "Record LINE, trimming to $HISTSIZE. Consecutive duplicates and blank lines
+are dropped, which is what makes the list usable rather than a transcript."
+  (let ((text (string-trim '(#\Space #\Tab #\Newline) line))
+        (limit (history-limit sh)))
+    (when (and (plusp (length text)) (plusp limit))
+      (let ((h (shell-history sh)))
+        (unless (and (plusp (fill-pointer h))
+                     (string= text (aref h (1- (fill-pointer h)))))
+          (vector-push-extend text h)
+          ;; Drop from the front, advancing the base so numbering is stable.
+          (loop while (> (fill-pointer h) limit)
+                do (replace h h :start2 1)
+                   (decf (fill-pointer h))
+                   (incf (shell-history-base sh))))))))
+
+(defun history-count (sh) (fill-pointer (shell-history sh)))
+
+(defun history-number (sh index)
+  "History number of the entry at INDEX (0-based)."
+  (+ (shell-history-base sh) index))
+
+(defun history-index (sh number)
+  "Index of the entry with history NUMBER, or NIL if it has been dropped."
+  (let ((i (- number (shell-history-base sh))))
+    (and (<= 0 i) (< i (history-count sh)) i)))
+
+(defun history-resolve (sh spec default)
+  "Resolve an `fc' operand: a positive number is a history number, a negative
+one counts back from the most recent, and a string selects the most recent
+command STARTING WITH it. Returns an index, or NIL."
+  (cond
+    ((null spec) default)
+    ((ignore-errors (parse-integer (string-trim " " spec)))
+     (let ((n (parse-integer (string-trim " " spec))))
+       (if (minusp n)
+           (let ((i (+ (history-count sh) n)))
+             (and (<= 0 i) (< i (history-count sh)) i))
+           (history-index sh n))))
+    (t
+     ;; Most recent command starting with SPEC.
+     (loop for i from (1- (history-count sh)) downto 0
+           when (let ((e (aref (shell-history sh) i)))
+                  (and (>= (length e) (length spec))
+                       (string= spec e :end2 (length spec))))
+             do (return i)))))
+
+(defun history-load (sh)
+  "Read $HISTFILE at startup. A missing or unreadable file is not an error."
+  (let ((path (history-file sh)))
+    (when (and path (probe-file path))
+      (ignore-errors
+       (with-open-file (in path :if-does-not-exist nil)
+         (when in
+           (loop for line = (read-line in nil nil)
+                 while line do (history-add sh line))))))))
+
+(defun history-save (sh)
+  "Write $HISTFILE on exit. Best effort: a read-only home is not fatal."
+  (let ((path (history-file sh)))
+    (when (and path (plusp (history-limit sh)))
+      (ignore-errors
+       (with-open-file (out path :direction :output
+                                 :if-exists :supersede
+                                 :if-does-not-exist :create)
+         (loop for e across (shell-history sh) do (write-line e out)))))))
 
 (defun push-local-frame (sh)
   (push '() (shell-local-frames sh)))

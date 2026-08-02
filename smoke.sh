@@ -990,6 +990,20 @@ check bx-sigpipe-status '141'           0 'yes 2>/dev/null | head -1 >/dev/null;
 check bx-sigpipe-seq    '1
 2'                                      0 'seq 1 100000 2>/dev/null | head -2'
 
+# --- history and fc -------------------------------------------------------
+# POSIX requires `fc'; it is meaningless without a history list. These cover
+# the non-interactive paths -- recording only happens at a real prompt, so the
+# interactive behaviour is tested in test/history-pty.py instead.
+check hist-empty        ''              0 'history'
+check_err fc-empty      'history is empty' 1 'fc -l'
+check hist-clear        ''              0 'history -c'
+# a script must not accumulate history: recording is REPL-only
+check hist-not-in-script '0'            0 'echo a >/dev/null; echo b >/dev/null; history | wc -l | tr -d " "'
+# HISTSIZE=0 disables recording entirely
+check hist-size-zero    ''              0 'HISTSIZE=0; history'
+# the non-interactive path must be untouched by any of this
+check noninteractive-c  'hi'            0 'echo hi'
+
 # --- stdin / REPL mode ----------------------------------------------------
 got=$(printf 'echo from-stdin\nexit 0\n' | "$SXSH" 2>/dev/null)
 if printf '%s' "$got" | grep -q 'from-stdin'; then

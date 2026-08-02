@@ -1249,6 +1249,144 @@ but an unknown name has to be an error, since scripts test the exit status of
 (defun shopt-p (sh name)
   (nth-value 1 (gethash name (shell-shopts sh))))
 
+(define-builtin "history" (sh args out)
+  ;; bash: history [N] | -c | -w | -r. Not POSIX -- `fc -l' is the standard
+  ;; spelling -- but universally expected at a prompt.
+  (cond
+    ((and args (string= (first args) "-c"))
+     ;; Advance the base past everything dropped: history numbers keep
+     ;; climbing for the life of the session, so clearing must not make the
+     ;; next entry reuse a number already shown.
+     (incf (shell-history-base sh) (history-count sh))
+     (setf (fill-pointer (shell-history sh)) 0)
+     0)
+    ((and args (string= (first args) "-w")) (history-save sh) 0)
+    ((and args (string= (first args) "-r")) (history-load sh) 0)
+    (t
+     (let* ((n (history-count sh))
+            (want (or (and args (ignore-errors (parse-integer (first args)))) n))
+            (start (max 0 (- n want))))
+       (loop for i from start below n
+             do (format out "~5D  ~A~%" (history-number sh i)
+                        (aref (shell-history sh) i)))
+       0))))
+
+(define-builtin "fc" (sh args out)
+  ;; POSIX: fc [-r] [-e editor] [first [last]]
+  ;;        fc -l [-nr] [first [last]]
+  ;;        fc -s [old=new] [first]
+  ;; `fc' means "fix command": list, or re-run, earlier commands.
+  (let ((listp nil) (nonum nil) (reversep nil) (subst nil) (editor nil)
+        (rest args))
+    (loop while (and rest (> (length (first rest)) 1)
+                     (char= (char (first rest) 0) #\-)
+                     ;; A lone `-' or a negative number is an operand.
+                     (not (digit-char-p (char (first rest) 1))))
+          do (let ((a (pop rest)))
+               (loop for i from 1 below (length a)
+                     do (case (char a i)
+                          (#\l (setf listp t))
+                          (#\n (setf nonum t))
+                          (#\r (setf reversep t))
+                          (#\s (setf subst t))
+                          (#\e (setf editor (if (> (length a) (1+ i))
+                                                (subseq a (1+ i))
+                                                (pop rest)))
+                                (return))
+                          (t nil)))))
+    ;; POSIX: the `fc' command itself is removed from the history list and
+    ;; replaced by whatever it re-executes. The REPL records each line before
+    ;; running it, so the newest entry IS this invocation -- without dropping
+    ;; it, `fc -s' with no operand resolves to itself and re-executes forever.
+    ;; That is an infinite loop, not a cosmetic wart.
+    (when (and (shell-interactive sh) (plusp (history-count sh)))
+      (decf (fill-pointer (shell-history sh))))
+    (when (zerop (history-count sh))
+      (format *error-output* "fc: history is empty~%")
+      (return-from builtin 1))
+    (cond
+      ;; -s: re-execute, optionally with a substitution. The command is echoed
+      ;; first, as POSIX requires, so the user sees what actually ran.
+      (subst
+       (let* ((pair (and rest (find #\= (first rest)) (pop rest)))
+              (idx (history-resolve sh (first rest) (1- (history-count sh)))))
+         (unless idx
+           (format *error-output* "fc: no such command~%")
+           (return-from builtin 1))
+         (let ((cmd (aref (shell-history sh) idx)))
+           (when pair
+             (let ((eq (position #\= pair)))
+               (setf cmd (substitute-first cmd (subseq pair 0 eq)
+                                           (subseq pair (1+ eq))))))
+           ;; POSIX and bash both write the command being re-run to STDERR,
+           ;; not stdout -- confirmed by running bash under a pty with
+           ;; 2>/dev/null, which suppressed the echo. Writing it to stdout
+           ;; would corrupt `x=$(fc -s ...)'.
+           (format *error-output* "~A~%" cmd)
+           (finish-output *error-output*)
+           (history-add sh cmd)
+           (return-from builtin (run-string-capturing sh cmd out)))))
+      ;; -l: list a range.
+      (listp
+       (let* ((n (history-count sh))
+              (first-i (history-resolve sh (first rest) (max 0 (- n 16))))
+              (last-i (history-resolve sh (second rest) (1- n))))
+         (unless (and first-i last-i)
+           (format *error-output* "fc: no such command~%")
+           (return-from builtin 1))
+         (when (> first-i last-i) (rotatef first-i last-i) (setf reversep t))
+         (let ((idxs (loop for i from first-i to last-i collect i)))
+           ;; bash uses NUMBER<TAB><SPACE> here, and keeps the <TAB><SPACE>
+           ;; even under -n. That is NOT the `history' builtin's format
+           ;; (%5d then two spaces), so the two must not share a formatter.
+           (dolist (i (if reversep (reverse idxs) idxs))
+             (if nonum
+                 (format out "~C ~A~%" #\Tab (aref (shell-history sh) i))
+                 (format out "~D~C ~A~%" (history-number sh i) #\Tab
+                         (aref (shell-history sh) i)))))
+         0))
+      ;; No -l and no -s: edit the range, then run whatever comes back.
+      (t
+       (let* ((n (history-count sh))
+              (first-i (history-resolve sh (first rest) (1- n)))
+              (last-i (history-resolve sh (second rest) first-i)))
+         (unless (and first-i last-i)
+           (format *error-output* "fc: no such command~%")
+           (return-from builtin 1))
+         (when (> first-i last-i) (rotatef first-i last-i))
+         (let ((path (format nil "/tmp/sxsh-fc-~A-~A"
+                             (sb-posix:getpid) (random 1000000)))
+               (ed (or editor
+                       (nth-value 0 (get-var sh "FCEDIT"))
+                       (nth-value 0 (get-var sh "EDITOR"))
+                       "vi")))
+           (unwind-protect
+                (progn
+                  (with-open-file (o path :direction :output
+                                          :if-exists :supersede
+                                          :if-does-not-exist :create)
+                    (loop for i from first-i to last-i
+                          do (write-line (aref (shell-history sh) i) o)))
+                  (let ((st (run-string-capturing
+                             sh (format nil "~A ~A" ed (shell-quote path)) out)))
+                    (unless (zerop st)
+                      (format *error-output* "fc: editor exited ~D~%" st)
+                      (return-from builtin 1)))
+                  (let ((text (slurp-file path)))
+                    (format out "~A" text)
+                    (finish-output out)
+                    (history-add sh (string-right-trim '(#\Newline) text))
+                    (run-string-capturing sh text out)))
+             (ignore-errors (delete-file path)))))))))
+
+(defun substitute-first (string old new)
+  "Replace the first occurrence of OLD in STRING with NEW."
+  (let ((i (search old string)))
+    (if i
+        (concatenate 'string (subseq string 0 i) new
+                     (subseq string (+ i (length old))))
+        string)))
+
 (define-builtin "shopt" (sh args out)
   (let ((mode nil) (quiet nil) (names args))
     (loop while (and names (> (length (first names)) 1)
