@@ -37,6 +37,11 @@
   target
   heredoc)                              ; (delimiter body quoted-p strip-p) once collected
 
+;;; bash `select NAME in WORDS; do ... done' -- menu loop
+(defstruct (select-clause (:include node)
+                          (:constructor make-select-clause (name words body redirects)))
+  name words body redirects)
+
 ;;; bash `[[ ... ]]' -- conditional expression, kept as raw text and parsed
 ;;; at execution time, where expansion happens
 (defstruct (cond-expr (:include node)

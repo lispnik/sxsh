@@ -29,6 +29,8 @@
    #:simple-command #:simple-command-assignments
    #:simple-command-words #:simple-command-redirects
    #:assignment #:assignment-name #:assignment-value #:assignment-append
+   #:select-clause #:select-clause-name #:select-clause-words
+   #:select-clause-body #:select-clause-redirects
    #:cond-expr #:cond-expr-text #:cond-expr-redirects
    #:arith-command #:arith-command-expr #:arith-command-redirects
    #:arith-for #:arith-for-init #:arith-for-cond #:arith-for-step

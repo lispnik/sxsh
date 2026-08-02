@@ -136,6 +136,7 @@ because the trap's own `echo' overwrote the 3."
     (when (plusp line)
       (setf (gethash "LINENO" (shell-vars sh))
             (cons (princ-to-string line) nil))))
+  (maybe-debug-trap sh node)
   (let ((status
           (handler-case
               (ecase (ast-type node)
@@ -153,6 +154,7 @@ because the trap's own `echo' overwrote the 3."
                 (:func     (exec-func-def sh node))
                 (:arith    (exec-arith-command sh node))
                 (:cond     (exec-cond-expr sh node))
+                (:select   (exec-select sh node))
                 (:arith-for (exec-arith-for sh node)))
             (shell-unset-var (e)
               (format *error-output* "sxsh: ~A~%" e)
@@ -170,6 +172,9 @@ because the trap's own `echo' overwrote the 3."
                 (signal 'shell-exit :code 1))
               1))))
     (setf (shell-last-status sh) status)
+    ;; ERR runs before errexit, so a trap that reports the failure still gets
+    ;; to run when `set -e' is about to end the shell.
+    (maybe-err-trap sh status node)
     (maybe-errexit sh status node)
     status))
 
@@ -196,6 +201,29 @@ because the trap's own `echo' overwrote the 3."
 (defmacro without-errexit (&body body)
   "Execute BODY with `set -e` suppressed (a condition context)."
   `(let ((*errexit-suppressed* t)) ,@body))
+
+(defvar *in-trap-action* nil
+  "True while a trap action runs, so ERR/DEBUG cannot recurse into themselves.")
+
+(defun maybe-err-trap (sh status node)
+  "Fire the bash ERR trap. Same exemptions as `set -e': a condition context is
+not a failure, and container nodes have already given their child a turn."
+  (when (and (/= status 0)
+             (not *in-trap-action*)
+             (not *errexit-suppressed*)
+             (not (and (eq (ast-type node) :pipeline) (pipeline-bang node)))
+             (not (member (ast-type node) '(:list :and-or)))
+             (gethash "ERR" (shell-traps sh)))
+    (let ((*in-trap-action* t))
+      (run-trap sh "ERR"))))
+
+(defun maybe-debug-trap (sh node)
+  "Fire the bash DEBUG trap before a command runs."
+  (when (and (not *in-trap-action*)
+             (member (ast-type node) '(:simple :cond :arith))
+             (gethash "DEBUG" (shell-traps sh)))
+    (let ((*in-trap-action* t))
+      (run-trap sh "DEBUG"))))
 
 (defun maybe-errexit (sh status node)
   (when (and (opt sh :errexit)
@@ -1265,6 +1293,51 @@ loop condition -- an arithmetic 0 is false, like C."
              (when (> (cf-n e) 1) (signal 'loop-continue :n (1- (cf-n e))))))
          (unless (string= (string-trim " " (arith-for-step node)) "")
            (eval-arith sh (arith-for-step node))))))))
+
+(defun exec-select (sh node)
+  "bash `select NAME in WORDS; do ... done'.
+
+The menu goes to stderr, not stdout, so the loop body's output can still be
+redirected on its own. An empty reply reprints the menu; an out-of-range one
+sets NAME empty but still runs the body; EOF ends the loop."
+  (exec-with-redirects
+   sh (select-clause-redirects node)
+   (lambda ()
+     (let* ((raw (select-clause-words node))
+            (items (if (eq raw :default)
+                       (coerce (shell-positional sh) 'list)
+                       (loop for w in raw
+                             append (expand-word-to-fields sh (word-text w)))))
+            (status 0))
+       (loop
+         (print-select-menu items)
+         (write-string (or (nth-value 0 (get-var sh "PS3")) "#? ") *error-output*)
+         (finish-output *error-output*)
+         (multiple-value-bind (line escaped eof) (read-one-logical-line 0 nil)
+           (declare (ignore escaped))
+           (when (or (eq line :eof) (and eof (string= line "")))
+             ;; bash ends the prompt line before giving up on EOF.
+             (terpri *error-output*)
+             (finish-output *error-output*)
+             (return status))
+           (set-var sh "REPLY" line)
+           (let* ((idx (ignore-errors (parse-integer (string-trim " " line))))
+                  (choice (and idx (<= 1 idx (length items)) (nth (1- idx) items))))
+             ;; An empty line reprints the menu without running the body.
+             (unless (string= (string-trim " " line) "")
+               (set-var sh (select-clause-name node) (or choice ""))
+               (handler-case (setf status (exec-node sh (select-clause-body node)))
+                 (loop-break (e)
+                   (when (> (cf-n e) 1) (signal 'loop-break :n (1- (cf-n e))))
+                   (return status))
+                 (loop-continue (e)
+                   (when (> (cf-n e) 1)
+                     (signal 'loop-continue :n (1- (cf-n e))))))))))))))
+
+(defun print-select-menu (items)
+  (loop for it in items for i from 1
+        do (format *error-output* "~D) ~A~%" i it))
+  (finish-output *error-output*))
 
 (defun exec-case (sh node)
   (exec-with-redirects

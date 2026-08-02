@@ -404,8 +404,24 @@ or a group matched inside a rejected branch leaks into `BASH_REMATCH`; and a quo
 the `=~` operand is escaped rather than quote-removed, so `[[ $x =~ "a.c" ]]` wants a literal
 dot.
 
-Still missing: `select`; `shopt` and extglob; process substitution; `trap ERR`/`DEBUG`;
-`coproc`; and a subscript containing whitespace (`m[a b]=v`, which the lexer splits)
+Tranche 7 added `shopt` (a namespace separate from `set -o`, as in bash), the `ERR` and `DEBUG`
+traps, and `select`. `nullglob` and `dotglob` genuinely take effect rather than merely being
+remembered -- a shopt that is stored and ignored is worse than an absent one, because scripts
+feature-detect with `shopt -q`.
+
+`select` is deliberately NOT in `+reserved+`. `reservedp` compares token text and does not
+consult that list, so the `select` branch in `parse-command` still fires; but `any-reserved-p`
+does consult it, and listing `select` there stopped `select() { ...; }` being recognised as a
+function definition. `select` is not POSIX, so a conforming script may legitimately define a
+function with that name -- bash rejects it, we do not. The same reasoning does not apply to
+`function`, which stays listed.
+
+`shell/regex.lisp` has direct unit coverage in `shell/test-shell.lisp` (`run-regex-tests`),
+because reaching the engine's corners through `[[ =~ ]]` alone is awkward: empty matches,
+greedy backtracking, and group spans that must be undone when an alternative is rejected.
+
+Still missing: extglob; process substitution; `coproc`; namerefs (`local -n`); and a subscript
+containing whitespace (`m[a b]=v`, which the lexer splits)
 -- which drag in `declare`/`local` options, `PIPESTATUS`, `read -a`, `mapfile` and namerefs, and
 which touch the variable model everywhere, so they want their own tranche.
 

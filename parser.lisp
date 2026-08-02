@@ -61,6 +61,12 @@ NEWLINE is consumed."
 (defparameter +reserved+
   '("if" "then" "else" "elif" "fi" "do" "done" "case" "esac"
     "while" "until" "for" "in" "{" "}" "!" "time" "function"))
+;; NOTE: `select' is deliberately absent. RESERVEDP compares token text and
+;; does not consult this list, so the select branch in PARSE-COMMAND still
+;; fires; but ANY-RESERVED-P does consult it, and listing `select' there
+;; stopped `select() { ...; }' being recognised as a function definition.
+;; `select' is not POSIX, so a conforming script may legitimately define a
+;; function with that name. bash rejects it; we do not.
 
 (defun reservedp (p word)
   "True if the current token is a WORD whose text equals the given reserved
@@ -220,6 +226,7 @@ It is NOT the keyword when followed by a pipe/operator/terminator (e.g.
     ((reservedp p "while") (parse-while p))
     ((reservedp p "until") (parse-until p))
     ((reservedp p "case")  (parse-case p))
+    ((and (reservedp p "select") (select-ahead-p p)) (parse-select p))
     ;; bash `[[ ... ]]' conditional expression
     ((eq (cur-type p) :dlbracket)
      (let ((text (cur-text p)))
@@ -533,6 +540,39 @@ true, as in C."
     (push (subseq text start) parts)
     (let ((out (nreverse parts)))
       (list (or (first out) "") (or (second out) "") (or (third out) "")))))
+
+(defun select-ahead-p (p)
+  "True if `select' introduces the loop rather than naming a command. Like
+`function' and `time', it is not reserved in POSIX and must stay usable as a
+command name, so it is the keyword only when a NAME follows."
+  (let* ((lx (parser-lexer p))
+         (saved-pos (lexer-pos lx)) (saved-line (lexer-line lx))
+         (saved-col (lexer-column lx))
+         (saved-hd (copy-list (lexer-pending-heredocs lx))))
+    (let ((tok (next-token lx)))
+      (setf (lexer-pos lx) saved-pos (lexer-line lx) saved-line
+            (lexer-column lx) saved-col (lexer-pending-heredocs lx) saved-hd)
+      (and (eq (token-type tok) :word) (valid-name-p (token-text tok))))))
+
+(defun parse-select (p)
+  "bash: select NAME [in WORDS] ; do COMPOUND-LIST done"
+  (advance p)                           ; select
+  (let ((name (cur-text p)) (words :default))
+    (advance p)
+    (when (reservedp p "in")
+      (advance p)
+      (setf words '())
+      (loop while (member (cur-type p) '(:word :assignment-word))
+            do (push (make-word (cur-text p)) words)
+               (advance p))
+      (setf words (nreverse words)))
+    (loop while (member (cur-type p) '(:semi :newline)) do (advance p))
+    (unless (reservedp p "do") (perr p "expected 'do' after select"))
+    (advance p)
+    (let ((body (parse-compound-list p)))
+      (unless (reservedp p "done") (perr p "expected 'done'"))
+      (advance p)
+      (make-select-clause name words body (parse-redirect-list p)))))
 
 (defun parse-case (p)
   (advance p)                           ; case

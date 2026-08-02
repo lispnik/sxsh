@@ -55,8 +55,72 @@
                 (format t "~&FAIL ~A: want status ~A got ~A~%"
                         ,name ,expected-status st)))))
 
+(defmacro check-rx (pattern string expected)
+  "Assert REGEX-MATCH returns EXPECTED (a list, or NIL for no match)."
+  `(let ((got (sxsh-shell::regex-match ,pattern ,string)))
+     (if (equal got ,expected)
+         (incf *pass*)
+         (progn (incf *fail*)
+                (format t "~&FAIL rx ~S vs ~S~%  want: ~S~%  got:  ~S~%"
+                        ,pattern ,string ,expected got)))))
+
+(defun run-regex-tests ()
+  "Direct coverage for shell/regex.lisp.
+
+The engine is reached from shell source only through `[[ =~ ]]', which makes
+it awkward to probe the corners -- empty matches, backtracking, and group
+spans that have to be undone when an alternative is rejected. These call it
+directly."
+  ;; literals and anchors
+  (check-rx "a" "abc" '("a"))
+  (check-rx "^a" "abc" '("a"))
+  (check-rx "^b" "abc" nil)
+  (check-rx "c$" "abc" '("c"))
+  (check-rx "^abc$" "abc" '("abc"))
+  (check-rx "^$" "" '(""))
+  (check-rx "b" "abc" '("b"))            ; unanchored search
+  ;; any, classes, ranges, negation
+  (check-rx "a.c" "abc" '("abc"))
+  (check-rx "a.c" "ac" nil)
+  (check-rx "[0-9]+" "x123y" '("123"))
+  (check-rx "[^0-9]+" "123abc" '("abc"))
+  (check-rx "[[:alpha:]]+" "12ab34" '("ab"))
+  (check-rx "[[:digit:]][[:alpha:]]" "1a" '("1a"))
+  (check-rx "[]]" "]" '("]"))            ; a leading ] is literal
+  (check-rx "[a-]" "-" '("-"))           ; a trailing - is literal
+  ;; repetition, including the greedy/backtracking cases
+  (check-rx "a*" "" '(""))
+  (check-rx "a*b" "aaab" '("aaab"))
+  (check-rx "a+b" "b" nil)
+  (check-rx "colou?r" "color" '("color"))
+  (check-rx "colou?r" "colour" '("colour"))
+  (check-rx "a{2,3}" "aaaa" '("aaa"))
+  (check-rx "a{2}" "aaa" '("aa"))
+  (check-rx "a{2,}" "aaaa" '("aaaa"))
+  ;; greedy .* must give characters back so the trailing c can match
+  (check-rx "a.*c" "abcxc" '("abcxc"))
+  (check-rx "^a.*b$" "ab" '("ab"))
+  ;; a `{' that is not a valid bound is a literal
+  (check-rx "a{x" "a{x" '("a{x"))
+  ;; alternation and groups
+  (check-rx "x|y" "zzy" '("y"))
+  (check-rx "(a|b)c" "bc" '("bc" "b"))
+  (check-rx "^(a+)(b+)$" "aabbb" '("aabbb" "aa" "bbb"))
+  (check-rx "(a)(b)(c)" "abc" '("abc" "a" "b" "c"))
+  ;; a group inside a REJECTED alternative must not leak into the captures
+  (check-rx "(x)y|(a)b" "ab" '("ab" "" "a"))
+  ;; nesting
+  (check-rx "((a)b)c" "abc" '("abc" "ab" "a"))
+  ;; escapes
+  (check-rx "a\\.c" "a.c" '("a.c"))
+  (check-rx "a\\.c" "abc" nil)
+  ;; an empty-matching repetition must terminate rather than spin
+  (check-rx "(a*)*b" "b" '("b" ""))
+  (check-rx "^[a-z]+@[a-z]+\\.[a-z]+$" "me@host.com" '("me@host.com")))
+
 (defun run-all ()
   (setf *pass* 0 *fail* 0)
+  (run-regex-tests)
   (check "echo" "echo hi" (format nil "hi~%"))
   (check "echo-n" "echo -n hi" "hi")
   (check "external" "printf 'a\\nb\\n' | sort -r" (format nil "b~%a~%"))

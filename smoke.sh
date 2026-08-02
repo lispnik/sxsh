@@ -890,6 +890,38 @@ check bx-dbr-strcmp     'y'             0 '[[ a < b ]] && echo y'
 # an unquoted operand is NOT split or globbed, which is the whole point
 check bx-dbr-nosplit    'y'             0 'v="a b"; [[ $v == "a b" ]] && echo y'
 
+# --- bash extensions (tranche 7: shopt, ERR/DEBUG, select) -----------------
+# shopt is a SEPARATE namespace from `set -o'; bash keeps the two apart.
+check bx-shopt-set      'ok'            0 'shopt -s nullglob && echo ok'
+check bx-shopt-query    'nullglob            	off' 1 'shopt nullglob'
+check bx-shopt-after-set 'nullglob            	on' 0 'shopt -s nullglob; shopt nullglob'
+check bx-shopt-status   '1'             0 'shopt -q nullglob; echo $?'
+check bx-shopt-status-on '0'            0 'shopt -s nullglob; shopt -q nullglob; echo $?'
+check_err bx-shopt-bogus 'invalid shell option name' 1 'shopt bogus_zz'
+# nullglob and dotglob must actually take effect, not just be remembered
+check bx-nullglob-works '0'             0 'cd "$SMOKE_TMP" && shopt -s nullglob && echo nomatch_zz*x | wc -w | tr -d " "'
+check bx-noglob-default '1'             0 'cd "$SMOKE_TMP" && echo nomatch_zz*x | wc -w | tr -d " "'
+check bx-dotglob-off    'plain'         0 'cd "$SMOKE_TMP" && mkdir -p dg && cd dg && : >.hidden && : >plain && echo *'
+check bx-dotglob-on     '.hidden plain' 0 'cd "$SMOKE_TMP" && mkdir -p dg2 && cd dg2 && : >.hidden && : >plain && shopt -s dotglob && echo *'
+# trap ERR / DEBUG. ERR has the same exemptions as `set -e'.
+check bx-trap-err       'E
+done'                                   0 'trap "echo E" ERR; false; echo done'
+check bx-trap-err-ok    'done'          0 'trap "echo E" ERR; true; echo done'
+check bx-trap-err-cond  'done'          0 'trap "echo E" ERR; if false; then :; fi; echo done'
+check bx-trap-err-oror  'done'          0 'trap "echo E" ERR; false || true; echo done'
+check bx-trap-err-bang  'done'          0 'trap "echo E" ERR; ! false; echo done'
+check bx-trap-debug     'ok'            0 'trap "" DEBUG; echo ok'
+# select. The menu goes to STDERR so the body's stdout stays redirectable.
+check bx-select         'got=a'         0 'printf "1\n" | select x in a b; do echo "got=$x"; break; done 2>/dev/null'
+check bx-select-2       'got=b'         0 'printf "2\n" | select x in a b; do echo "got=$x"; break; done 2>/dev/null'
+check bx-select-bad     'got=[]'        0 'printf "9\n" | select x in a b; do echo "got=[$x]"; break; done 2>/dev/null'
+check bx-select-reply   'REPLY=1'       0 'printf "1\n" | select x in a b; do echo "REPLY=$REPLY"; break; done 2>/dev/null'
+check bx-select-eof     'ended'         0 'printf "" | select x in a b; do echo no; done 2>/dev/null; echo ended'
+check bx-select-args    'got=p'         0 'set -- p q; printf "1\n" | select x; do echo "got=$x"; break; done 2>/dev/null'
+# `select' stays usable as a function name -- it is not POSIX-reserved, so a
+# conforming script may define one. bash rejects this; we deliberately do not.
+check bx-select-as-name 'fn'            0 'select() { echo fn; }; select'
+
 # --- stdin / REPL mode ----------------------------------------------------
 got=$(printf 'echo from-stdin\nexit 0\n' | "$SXSH" 2>/dev/null)
 if printf '%s' "$got" | grep -q 'from-stdin'; then

@@ -1221,10 +1221,62 @@ shell does."
             (show (car e) (cdr e))))))
   0)
 
+(defparameter +pseudo-signals+ '("EXIT" "ERR" "DEBUG" "RETURN")
+  "Trappable conditions that are not real signals. EXIT is POSIX; ERR, DEBUG
+and RETURN are bash extensions.")
+
 (defun valid-condition-p (name)
-  "True if NAME designates a trappable condition (a signal or EXIT)."
+  "True if NAME designates a trappable condition."
   (let ((norm (normalize-signal name)))
-    (or (string= norm "EXIT") (and (signal-number norm) t))))
+    (or (member norm +pseudo-signals+ :test #'string=)
+        (and (signal-number norm) t))))
+
+(defparameter +shopt-names+
+  '("extglob" "nullglob" "dotglob" "nocaseglob" "globstar" "failglob"
+    "expand_aliases" "checkwinsize" "cmdhist" "histappend" "huponexit"
+    "interactive_comments" "lithist" "login_shell" "nocasematch" "xpg_echo")
+  "shopt names we recognise. Only some change behaviour -- see SHOPT-P uses --
+but an unknown name has to be an error, since scripts test the exit status of
+`shopt -q name' to feature-detect.")
+
+(defun shopt-p (sh name)
+  (nth-value 1 (gethash name (shell-shopts sh))))
+
+(define-builtin "shopt" (sh args out)
+  (let ((mode nil) (quiet nil) (names args))
+    (loop while (and names (> (length (first names)) 1)
+                     (char= (char (first names) 0) #\-))
+          do (let ((a (pop names)))
+               (loop for i from 1 below (length a)
+                     do (case (char a i)
+                          (#\s (setf mode :set))
+                          (#\u (setf mode :unset))
+                          (#\q (setf quiet t))
+                          (#\o nil)      ; `shopt -o' addresses set -o names
+                          (t nil)))))
+    (cond
+      ;; No names: list them all.
+      ((null names)
+       (unless quiet
+         (dolist (n (sort (copy-list +shopt-names+) #'string<))
+           ;; bash pads the name to 20 columns before the tab.
+           (format out "~20A~C~A~%" n #\Tab (if (shopt-p sh n) "on" "off"))))
+       0)
+      (t
+       (let ((status 0))
+         (dolist (n names status)
+           (cond
+             ((not (member n +shopt-names+ :test #'string=))
+              (unless quiet
+                (format *error-output* "shopt: ~A: invalid shell option name~%" n))
+              (setf status 1))
+             ((eq mode :set) (setf (gethash n (shell-shopts sh)) t))
+             ((eq mode :unset) (remhash n (shell-shopts sh)))
+             (t
+              ;; Query form: the status reports the state.
+              (unless quiet
+                (format out "~20A~C~A~%" n #\Tab (if (shopt-p sh n) "on" "off")))
+              (unless (shopt-p sh n) (setf status 1))))))))))
 
 (define-builtin "trap" (sh args out)
   ;; `--' is accepted and ignored, as for any POSIX utility.

@@ -65,6 +65,9 @@
   ;; Names declared with `declare -i': every assignment to one is evaluated
   ;; as an arithmetic expression rather than stored verbatim.
   (int-vars (make-hash-table :test 'equal))
+  ;; bash `shopt' options. Separate from SHELL-OPTIONS, which holds the
+  ;; POSIX `set -o' flags -- bash keeps the two namespaces apart and so do we.
+  (shopts (make-hash-table :test 'equal))
   ;; control-flow signals for break/continue/return handled via catch tags
   )
 

@@ -41,10 +41,13 @@ pathname expansion. When ASSIGNMENT is true, tilde expands after ':' too."
       (let ((out '()))
         (dolist (f fields)
           (if (and glob (not (opt sh :noglob)) (field-has-glob-p f))
-              (let ((matches (glob-field f)))
-                (if matches
-                    (dolist (m matches) (push m out))
-                    (push (xchars->string f) out)))  ; no match -> literal
+              (let ((matches (glob-field f :dotglob (shopt-p sh "dotglob"))))
+                (cond
+                  (matches (dolist (m matches) (push m out)))
+                  ;; bash `nullglob': a pattern that matches nothing expands
+                  ;; to nothing at all rather than to itself.
+                  ((shopt-p sh "nullglob"))
+                  (t (push (xchars->string f) out))))
               (push (xchars->string f) out)))
         (nreverse out)))))
 
@@ -983,10 +986,17 @@ exempt, which is what keeps `echo \"*\"' literal."
                           (member (xchar-char xc) '(#\* #\? #\[))))
         field))
 
-(defun glob-field (field)
+(defvar *glob-dotglob* nil
+  "Bound by GLOB-FIELD from shopt dotglob; consulted deep in the walk.")
+
+(defun glob-field (field &key dotglob)
   "Expand a field containing active glob metacharacters against the filesystem.
-Returns a sorted list of matching pathnames, or NIL if none match."
-  (let* ((pat (field->glob-pattern field))
+Returns a sorted list of matching pathnames, or NIL if none match.
+
+DOTGLOB is bash's shopt of the same name: when set, a leading `*' or `?' also
+matches names beginning with a dot."
+  (let* ((*glob-dotglob* dotglob)
+         (pat (field->glob-pattern field))
          (absolute (and (plusp (length pat)) (char= (char pat 0) #\/)))
          (segments (remove "" (split-on-slash pat) :test #'string=))
          (start (if absolute (list "/") (list "."))))
@@ -1047,9 +1057,11 @@ NUL sentinels so they match literally."
     (error () '())))
 
 (defun glob-segment-match (pattern name)
-  "Match one path segment. Leading-dot files are not matched by a leading * or ?."
+  "Match one path segment. Leading-dot files are not matched by a leading * or ?
+unless shopt dotglob is set."
   (let ((real (unescape-glob pattern)))
-    (when (and (plusp (length name)) (char= (char name 0) #\.)
+    (when (and (not *glob-dotglob*)
+               (plusp (length name)) (char= (char name 0) #\.)
                (not (and (plusp (length real)) (char= (char real 0) #\.))))
       (return-from glob-segment-match nil))
     (and (not (string= name ".")) (not (string= name ".."))

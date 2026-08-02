@@ -109,7 +109,9 @@ c 'type -a'          'type -a echo >/dev/null; echo ok'
 c 'echo -e'          'echo -e "a\tb"'
 c 'trap ERR'         'trap "echo E" ERR; false; echo done'
 c 'trap DEBUG'       'trap "" DEBUG; echo ok'
-c 'time keyword'     'time true 2>/dev/null; echo ok'
+# The elapsed times obviously differ run to run, so compare only the SHAPE of
+# the output: three lines named real/user/sys, plus the command's own status.
+c 'time keyword'     '{ time true; } 2>&1 | grep -c "^real\|^user\|^sys"'
 
 printf '\nbashisms: %d supported, %d missing (ref: %s)\n' \
   "$have" "$miss" "$("$REF" --version 2>/dev/null | head -1)"
