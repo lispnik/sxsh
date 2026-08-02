@@ -111,8 +111,13 @@ CHILD-SIGDEFAULTS.)"
      (sb-sys:enable-interrupt
       num
       (lambda (signo info context)
-        (declare (ignore signo info context))
-        ;; Returning to the read loop is the entire behaviour.
+        (declare (ignore info context))
+        ;; Still a HANDLER rather than SIG_IGN, for the reason above. The flag
+        ;; is what lets the line editor tell "the user pressed Ctrl-C" apart
+        ;; from "the read failed": without it the editor sees only EINTR and
+        ;; cannot discard the partly typed line.
+        (when (= signo sb-unix:sigint)
+          (setf *sigint-pending* t))
         nil)))))
 
 (defun disable-job-control (sh)

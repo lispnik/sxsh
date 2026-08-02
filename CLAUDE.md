@@ -647,6 +647,44 @@ Three constraints on that fork, each learned the hard way:
   `jobs` calls waitpid on its own siblings, gets ECHILD, and reports every running job as Done.
   Their output is a job table, so running them inline risks no deadlock.
 
+### The line editor
+
+`shell/lineedit.lisp` supplies lines to the REPL; `shell/term.lisp` is the device layer beneath
+it. Two structural choices, both load-bearing:
+
+**Raw mode is per LINE, not per REPL.** `edit-one-line` enters and restores, so between prompts
+— for the whole duration of every command — the terminal is in whatever cooked state the user's
+`stty` left it. Children inherit a sane line discipline with no coordination, `fg-give-terminal`
+needs no changes, Ctrl-Z on a foreground job keeps working, and a command that legitimately
+reconfigures the terminal becomes the new baseline instead of being reverted.
+
+**One physical line at a time**, looping above it. `edit-read-command` mirrors
+`read-complete-command`'s contract and both share `command-complete-p`, so the editor and the
+plain reader cannot disagree about where a command ends. `$PS2` finally does something.
+
+Three bugs worth remembering, each of which produced symptoms far from its cause:
+
+- **`led-text` must copy.** It was `(coerce buf 'string)`, and the buffer already *is* an
+  adjustable fill-pointer string — so `coerce` returned the buffer **itself**. Every saved
+  snapshot was a live alias. Undo restored the buffer to what it already was, `hist-saved` came
+  back as the recalled entry instead of the typed line, and C-g restored the search hit instead
+  of the line the search began from. One aliasing bug, three unrelated-looking failures. Use
+  `subseq`.
+- **`read-input-byte` polls; it must not block.** SBCL *restarts* an interrupted read, so a
+  SIGINT set the pending flag and then went unnoticed until the next byte arrived — and that
+  byte was swallowed into the buffer the interrupt was about to discard. `Ctrl-C` then `echo ok`
+  ran `cho ok`. An 80 ms poll slice checks the flags while the terminal is idle, which is
+  exactly when signals arrive; measured cost is ~10 ms of CPU per 6 s idle.
+- **Undo coalescing must key on the CURRENT command, not the previous one.** Testing only
+  `last-fn` suppressed the snapshot for whatever followed a burst of typing — so the very kill
+  the user wanted to undo was the one never recorded.
+
+The SIGINT handler in jobs.lisp is still a *handler* rather than `SIG_IGN` (so `exec` resets it
+for children); it now sets `*sigint-pending*` instead of doing nothing.
+
+Escape hatches, all tested: `set +o emacs`, `SXSH_NO_LINEEDIT=1`, `TERM=dumb`, and
+`*lineedit-disabled*` after a failure. Each routes back to the plain reader unchanged.
+
 ### The terminal must never be left in raw mode
 
 `shell/term.lisp` is the raw-mode layer under the line editor. One invariant governs it: **no

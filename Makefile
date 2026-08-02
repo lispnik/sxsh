@@ -62,6 +62,10 @@ jobs: $(BIN)
 term-tests: $(BIN)
 	$(PYTHON) test/term-pty.py
 
+## lineedit: the line editor, driven through a real pty
+lineedit-tests: $(BIN)
+	$(PYTHON) test/lineedit-pty.py ./$(BIN)
+
 ## history: history and `fc', driven through a real pty
 history-tests: $(BIN)
 	$(PYTHON) test/history-pty.py ./$(BIN)
@@ -107,7 +111,7 @@ fuzz: $(BIN)
 	$(PYTHON) test/fuzz-parser.py $(FUZZ_ARGS)
 
 ## check: everything -- both suites, smoke, job control, POSIX conformance
-check: test smoke jobs term-tests history-tests posix
+check: test smoke jobs term-tests history-tests lineedit-tests posix
 
 ## clean: remove built executables and this project's compiled fasls
 clean:

@@ -87,6 +87,13 @@ Closed by EXEC-SIMPLE once the command has finished. Leaving them open leaks a
 descriptor per `<(...)' and, worse, keeps the pipe's read end alive so a
 consumer that waits for EOF never sees it.")
 
+(defvar *sigint-pending* nil
+  "Set by the SIGINT handler so the line editor can tell an interrupt apart
+from a read failure. Defined here rather than in term.lisp because jobs.lisp
+installs the handler and loads earlier.")
+(defvar *winch-pending* nil)
+(defvar *cont-pending* nil)
+
 (defvar *trap-entry-status* nil
   "The exit status in effect when the current trap action began, or NIL.
 
@@ -120,6 +127,8 @@ configure run reported success.")
     ;; sensible defaults
     (unless (nth-value 1 (get-var sh "IFS"))
       (set-var sh "IFS" (format nil " ~C~C" #\Tab #\Newline)))
+    ;; Line editing is on by default for an interactive shell, as in bash.
+    (when interactive (setf (gethash :emacs (shell-options sh)) t))
     (set-var sh "PS1" (if interactive "$ " ""))
     (set-var sh "PS2" "> ")
     ;; POSIX-mandated variables the shell itself must provide.

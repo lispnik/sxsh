@@ -848,6 +848,9 @@ are never delimiters, so `read x y' on `a\\ b c' gives x=\"a b\" and y=\"c\"."
     ;; -o only, no single-letter form
     ;; bash extension: a pipeline's status is the last non-zero stage's.
     (nil "pipefail"  :pipefail)
+    ;; Emacs-style line editing. `set +o emacs' is the documented way to fall
+    ;; back to the plain line-at-a-time reader.
+    (nil "emacs"     :emacs)
     (nil "ignoreeof" :ignoreeof)
     (nil "nolog"     :nolog)
     (nil "vi"        :vi)))

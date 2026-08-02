@@ -19,6 +19,11 @@
 user pressed a bare ESC. readline's keyseq-timeout default; short enough not
 to be felt, long enough that a slow terminal's arrow key still arrives whole.")
 
+(defconstant +poll-slice-ms+ 80
+  "How long READ-INPUT-BYTE waits for input before re-checking the pending
+signal flags. Small enough that Ctrl-C feels instant, large enough that an
+idle prompt is not a busy loop.")
+
 (defconstant +fallback-columns+ 80)
 (defconstant +min-columns+ 20)
 (defconstant +max-columns+ 1000)
@@ -177,10 +182,6 @@ sees no flicker.")
 ;;; Signals the editor cares about
 ;;; ---------------------------------------------------------------------------
 
-(defvar *sigint-pending* nil)
-(defvar *winch-pending* nil)
-(defvar *cont-pending* nil)
-
 (defparameter +paste-on+ (format nil "~C[?2004h" #\Escape))
 (defparameter +paste-off+ (format nil "~C[?2004l" #\Escape))
 
@@ -221,17 +222,27 @@ same trap FD-READ-LINE documents."
       (when *sigint-pending* (setf *sigint-pending* nil) (return :interrupt))
       (when *winch-pending* (setf *winch-pending* nil) (return :winch))
       (when *cont-pending* (setf *cont-pending* nil) (return :cont))
-      (let ((n (sb-sys:with-pinned-objects (buf)
-                 (multiple-value-bind (r errno)
-                     (sb-unix:unix-read (tty-fd) (sb-sys:vector-sap buf) 1)
-                   (cond
-                     (r r)
-                     ((eql errno sb-unix:eintr) :retry)
-                     (t 0))))))
-        (cond
-          ((eq n :retry))               ; loop: a pending flag will be seen above
-          ((zerop n) (return :eof))
-          (t (return (aref buf 0))))))))
+      ;; Wait for input in short slices rather than blocking in read(2).
+      ;;
+      ;; SBCL RESTARTS an interrupted read, so blocking here meant a SIGINT
+      ;; set the flag and then went unnoticed until the *next* byte arrived --
+      ;; and that byte was consumed into the very buffer the interrupt was
+      ;; about to discard. Ctrl-C followed by `echo ok' ran `cho ok'. Polling
+      ;; means the flags are seen while the terminal is idle, which is exactly
+      ;; when a signal arrives; when input IS ready we read it at once, so
+      ;; ordinary typing pays nothing.
+      (when (sb-unix:unix-simple-poll (tty-fd) :input +poll-slice-ms+)
+        (let ((n (sb-sys:with-pinned-objects (buf)
+                   (multiple-value-bind (r errno)
+                       (sb-unix:unix-read (tty-fd) (sb-sys:vector-sap buf) 1)
+                     (cond
+                       (r r)
+                       ((eql errno sb-unix:eintr) :retry)
+                       (t 0))))))
+          (cond
+            ((eq n :retry))             ; loop: a pending flag will be seen above
+            ((zerop n) (return :eof))
+            (t (return (aref buf 0)))))))))
 
 (defun decode-utf8 (lead)
   "Read the continuation bytes for LEAD and return one character.

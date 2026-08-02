@@ -50,44 +50,70 @@ with the script's real output."
   (and (plusp (sb-unix:unix-isatty 0))
        (plusp (sb-unix:unix-isatty 2))))
 
+(defun read-command (sh)
+  "One logical command from the user: a string, NIL at EOF, or :INTERRUPT.
+
+Dispatches to the line editor when it is available, and otherwise does exactly
+what this loop always did -- print PS1 and read a line at a time. The
+non-interactive paths never reach here at all: MAIN sends :file, :command and
+non-tty :stdin straight to RUN-STRING, so scripts cannot be affected by any of
+the editing machinery."
+  (if (line-editing-active-p sh)
+      (let ((r (edit-read-command sh)))
+        ;; :NO-TTY means the editor could not configure the terminal. Fall
+        ;; back permanently rather than fighting it at every prompt.
+        (if (eq r :no-tty)
+            (progn (setf *lineedit-disabled* t) (read-command sh))
+            r))
+      (progn
+        (write-string (or (nth-value 0 (get-var sh "PS1")) "$ "))
+        (finish-output)
+        (read-complete-command *standard-input*))))
+
 (defun repl (sh)
   "Read-eval-print loop. Prompts only when the shell is interactive; otherwise
 this is simply the reader for a script arriving on standard input."
   (init-job-control sh)
+  (when (line-editing-active-p sh) (install-editor-handlers))
   (loop
     (when (shell-interactive sh)
       ;; report any background jobs that finished since the last prompt
       (poll-jobs sh)
-      (notify-finished-jobs sh *error-output*)
-      (let ((ps1 (or (nth-value 0 (get-var sh "PS1")) "$ ")))
-        (write-string ps1) (finish-output)))
-    (let ((line (read-complete-command *standard-input*)))
-      (when (null line)
-        ;; the newline moves the terminal past a Ctrl-D; on a piped script it
-        ;; would be a spurious blank line appended to the program's output
-        (when (shell-interactive sh) (terpri))
-        (return))
-      (unless (string= (string-trim '(#\Space #\Tab #\Newline) line) "")
-        ;; Record before running: this is the call whose absence made history
-        ;; permanently empty, so `history' printed nothing and `fc' always
-        ;; reported an empty list. HISTORY-ADD does its own blank/duplicate
-        ;; filtering, so it needs no guard beyond being interactive.
-        (when (shell-interactive sh) (history-add sh line))
-        (handler-case
-            ;; Dispatch the nodes directly rather than through RUN-STRING.
-            ;; RUN catches SHELL-EXIT as a top-level backstop and turns it
-            ;; into a status, so `exit' typed at the prompt never reached the
-            ;; handler below -- it set $? and the loop carried on. The shell
-            ;; could only be left with Ctrl-D or a signal, and because the
-            ;; exit path never ran, $HISTFILE was never written either.
-            (dolist (node (parse-string line))
-              (exec-node sh node))
-          (sxsh:shell-parse-error (e)
-            (format *error-output* "sxsh: ~A~%" e))
-          (shell-exit (e)
-            (return (or (shell-exit-code e) 0)))
-          (error (e)
-            (format *error-output* "sxsh: ~A~%" e)))))))
+      (notify-finished-jobs sh *error-output*))
+    (let ((line (read-command sh)))
+      (cond
+        ;; Ctrl-C at the prompt: drop whatever was typed, start again, and
+        ;; report 130 as every shell does for an interrupted command.
+        ((eq line :interrupt)
+         (setf (shell-last-status sh) 130))
+        ((null line)
+         ;; the newline moves the terminal past a Ctrl-D; on a piped script it
+         ;; would be a spurious blank line appended to the program's output
+         (when (and (shell-interactive sh) (not (line-editing-active-p sh)))
+           (terpri))
+         (return))
+        ((string= (string-trim '(#\Space #\Tab #\Newline) line) ""))
+        (t
+         ;; Record before running: this is the call whose absence made history
+         ;; permanently empty, so `history' printed nothing and `fc' always
+         ;; reported an empty list. HISTORY-ADD does its own blank/duplicate
+         ;; filtering, so it needs no guard beyond being interactive.
+         (when (shell-interactive sh) (history-add sh line))
+         (handler-case
+             ;; Dispatch the nodes directly rather than through RUN-STRING.
+             ;; RUN catches SHELL-EXIT as a top-level backstop and turns it
+             ;; into a status, so `exit' typed at the prompt never reached the
+             ;; handler below -- it set $? and the loop carried on. The shell
+             ;; could only be left with Ctrl-D or a signal, and because the
+             ;; exit path never ran, $HISTFILE was never written either.
+             (dolist (node (parse-string line))
+               (exec-node sh node))
+           (sxsh:shell-parse-error (e)
+             (format *error-output* "sxsh: ~A~%" e))
+           (shell-exit (e)
+             (return (or (shell-exit-code e) 0)))
+           (error (e)
+             (format *error-output* "sxsh: ~A~%" e))))))))
 
 (defun init-job-control (sh)
   "Apply the startup default for monitor mode: on for an interactive shell with
