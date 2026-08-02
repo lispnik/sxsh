@@ -155,6 +155,7 @@ because the trap's own `echo' overwrote the 3."
                 (:arith    (exec-arith-command sh node))
                 (:cond     (exec-cond-expr sh node))
                 (:select   (exec-select sh node))
+                (:coproc   (exec-coproc sh node))
                 (:arith-for (exec-arith-for sh node)))
             (shell-unset-var (e)
               (format *error-output* "sxsh: ~A~%" e)
@@ -1042,13 +1043,23 @@ The shell sets SIGTSTP/SIGTTIN/SIGTTOU to SIG_IGN for its own job-control
 machinery, and SIG_IGN survives exec -- so without this a child would ignore
 Ctrl-Z and could never be stopped. A signal the user explicitly ignored with
 `trap '' SIG` is deliberately left out: POSIX requires that disposition to be
-inherited by children."
-  (when (shell-job-control sh)
-    (loop for (name . num) in `(("TSTP" . ,sb-unix:sigtstp)
-                                ("TTIN" . ,sb-unix:sigttin)
-                                ("TTOU" . ,sb-unix:sigttou))
-          unless (equal "" (gethash name (shell-traps sh)))
-            collect num)))
+inherited by children.
+
+SIGPIPE is reset ALWAYS, not just under job control, and for a different
+reason: SBCL ignores it so that writes report an error instead, and that
+disposition is inherited by every child we spawn. The effect is that a
+producer outliving its consumer does not die quietly the way it should --
+`yes | head -2' printed `yes: standard output: Broken pipe' and the producer
+exited 1 rather than 141. Every shell relies on the default disposition here."
+  (append
+   (unless (equal "" (gethash "PIPE" (shell-traps sh)))
+     (list sb-unix:sigpipe))
+   (when (shell-job-control sh)
+     (loop for (name . num) in `(("TSTP" . ,sb-unix:sigtstp)
+                                 ("TTIN" . ,sb-unix:sigttin)
+                                 ("TTOU" . ,sb-unix:sigttou))
+           unless (equal "" (gethash name (shell-traps sh)))
+             collect num))))
 
 (defun spawn-external (sh node &key extra-actions setpgroup (pgroup 0) words)
   "Spawn the external command described by simple-command NODE. Temporary
@@ -1344,6 +1355,52 @@ loop condition -- an arithmetic 0 is false, like C."
              (when (> (cf-n e) 1) (signal 'loop-continue :n (1- (cf-n e))))))
          (unless (string= (string-trim " " (arith-for-step node)) "")
            (eval-arith sh (arith-for-step node))))))))
+
+(defun exec-coproc (sh node)
+  "bash `coproc [NAME] command'.
+
+Two pipes: the command's stdout comes back to us, and our writes go to its
+stdin. NAME becomes a two-element array holding OUR ends -- [0] to read the
+coprocess's output, [1] to write to its input -- and NAME_PID holds its pid.
+
+Our ends are left inheritable on purpose. `read -u ${COPROC[0]}' is the point
+of the feature, and a later spawned command must be able to reach them; they
+outlive this command, unlike a process substitution's."
+  (let ((name (coproc-clause-name node))
+        (self (self-exec-path))
+        (body (ignore-errors (deparse (coproc-clause-body node)))))
+    (if (not (and self body))
+        (progn (format *error-output* "coproc: cannot start coprocess~%") 1)
+        (multiple-value-bind (from-r from-w) (sb-posix:pipe)   ; coproc stdout
+          (multiple-value-bind (to-r to-w) (sb-posix:pipe)     ; coproc stdin
+            (handler-case
+                (let ((pid (spawn self
+                                  (list "sxsh" "-c"
+                                        (concatenate 'string (async-prelude sh) body))
+                                  :env (exported-environ sh)
+                                  :setpgroup t :pgroup 0
+                                  :sigdefault (child-sigdefaults sh)
+                                  :file-actions
+                                  (list (fa-dup2 to-r 0)
+                                        (fa-dup2 from-w 1)
+                                        (fa-close from-r)
+                                        (fa-close to-w)))))
+                  ;; The child owns the far ends now.
+                  (sb-posix:close from-w)
+                  (sb-posix:close to-r)
+                  (set-var sh name
+                           (array-from-list (list (princ-to-string from-r)
+                                                  (princ-to-string to-w))))
+                  (set-var sh (concatenate 'string name "_PID")
+                           (princ-to-string pid))
+                  (setf (shell-last-bg-pid sh) pid)
+                  (add-job sh pid (list pid) (or body "coproc"))
+                  0)
+              (error ()
+                (dolist (fd (list from-r from-w to-r to-w))
+                  (ignore-errors (sb-posix:close fd)))
+                (format *error-output* "coproc: cannot start coprocess~%")
+                1)))))))
 
 (defun exec-select (sh node)
   "bash `select NAME in WORDS; do ... done'.

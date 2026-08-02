@@ -227,6 +227,7 @@ It is NOT the keyword when followed by a pipe/operator/terminator (e.g.
     ((reservedp p "until") (parse-until p))
     ((reservedp p "case")  (parse-case p))
     ((and (reservedp p "select") (select-ahead-p p)) (parse-select p))
+    ((and (reservedp p "coproc") (coproc-ahead-p p)) (parse-coproc p))
     ;; bash `[[ ... ]]' conditional expression
     ((eq (cur-type p) :dlbracket)
      (let ((text (cur-text p)))
@@ -553,6 +554,48 @@ command name, so it is the keyword only when a NAME follows."
       (setf (lexer-pos lx) saved-pos (lexer-line lx) saved-line
             (lexer-column lx) saved-col (lexer-pending-heredocs lx) saved-hd)
       (and (eq (token-type tok) :word) (valid-name-p (token-text tok))))))
+
+(defun coproc-ahead-p (p)
+  "True if `coproc' introduces a coprocess rather than naming a command.
+Like `select' and `function', it is not POSIX-reserved, so it stays usable as
+a command name; it is the keyword only when something follows on the line."
+  (let* ((lx (parser-lexer p))
+         (saved-pos (lexer-pos lx)) (saved-line (lexer-line lx))
+         (saved-col (lexer-column lx))
+         (saved-hd (copy-list (lexer-pending-heredocs lx))))
+    (let ((tok (next-token lx)))
+      (setf (lexer-pos lx) saved-pos (lexer-line lx) saved-line
+            (lexer-column lx) saved-col (lexer-pending-heredocs lx) saved-hd)
+      (member (token-type tok) '(:word :assignment-word)))))
+
+(defun parse-coproc (p)
+  "bash: coproc [NAME] command
+
+The optional NAME is only a name when a compound command follows it --
+`coproc foo' runs the command `foo', while `coproc foo { ...; }' names the
+coprocess foo."
+  (advance p)                           ; coproc
+  (let ((name "COPROC"))
+    (when (and (eq (cur-type p) :word)
+               (valid-name-p (cur-text p))
+               (coproc-name-followed-p p))
+      (setf name (cur-text p))
+      (advance p))
+    (make-coproc-clause name (parse-command p))))
+
+(defun coproc-name-followed-p (p)
+  "True if the current word is a coprocess NAME rather than the command: a
+compound command must follow it."
+  (let* ((lx (parser-lexer p))
+         (saved-pos (lexer-pos lx)) (saved-line (lexer-line lx))
+         (saved-col (lexer-column lx))
+         (saved-hd (copy-list (lexer-pending-heredocs lx))))
+    (let ((tok (next-token lx)))
+      (setf (lexer-pos lx) saved-pos (lexer-line lx) saved-line
+            (lexer-column lx) saved-col (lexer-pending-heredocs lx) saved-hd)
+      (or (eq (token-type tok) :lparen)
+          (and (eq (token-type tok) :word)
+               (member (token-text tok) '("{" "(") :test #'string=))))))
 
 (defun parse-select (p)
   "bash: select NAME [in WORDS] ; do COMPOUND-LIST done"

@@ -75,7 +75,11 @@ c 'process sub'      'cat <(echo hi)'
 c '&> redirect'      'echo hi &>/dev/null; echo ok'
 c '&>> redirect'     'echo hi &>>/dev/null; echo ok'
 c '|& pipe'          'echo hi |& cat'
-c 'extglob'          'shopt -s extglob; case abc in ab?(c)) echo y;; esac'
+# Via [[ ]], whose operands are matched at RUNTIME. The `case' form cannot be
+# used here: bash parses the whole -c line before the shopt runs, so it is a
+# syntax error THERE too -- the case would be testing bash's parse order
+# rather than extglob. (sxsh accepts it; see CLAUDE.md.)
+c 'extglob'          'shopt -s extglob; v=abc; [[ $v == ab?(c) ]] && echo y'
 
 echo "== syntax =="
 c 'function keyword' 'function f { echo hi; }; f'

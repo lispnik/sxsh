@@ -210,6 +210,22 @@ interactive/stdin session."
            (sxsh:shell-parse-error (e)
              (format *error-output* "sxsh: ~A~%" e)
              (setf (shell-last-status sh) 2))
+           ;; A failed write -- in practice a closed pipe. Die quietly with
+           ;; 141 (128 + SIGPIPE), as every other program does. Caught BEFORE
+           ;; the generic handler below, which would otherwise print a Lisp
+           ;; stream error after the reader has gone away: visible whenever
+           ;; sxsh is a pipeline producer, and in every coprocess whose output
+           ;; nobody reads. SBCL ignores SIGPIPE and reinstates that at
+           ;; startup, so resetting the disposition before exec cannot help a
+           ;; child that is itself an sxsh -- it has to be handled here.
+           ;;
+           ;; Deliberately NOT narrowed by comparing the condition's stream to
+           ;; *standard-output*: RUN-BUILTIN rebinds that to a fresh fd-stream,
+           ;; so the identity test failed and the message came out anyway. A
+           ;; stream error reaching this point is an I/O failure on the
+           ;; shell's own output either way, and no Lisp-level report of it
+           ;; has ever helped anyone.
+           (stream-error () (setf (shell-last-status sh) 141))
            (error (e)
              (format *error-output* "sxsh: ~A~%" e)
              (setf (shell-last-status sh) 1)))

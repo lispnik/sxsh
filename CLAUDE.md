@@ -458,8 +458,32 @@ Two traps in the lexing, both of which bit:
 
 The `(` must be adjacent: `cat < (echo x)` stays a redirection of a subshell, as in bash.
 
-Still missing: `coproc`, and a subscript containing whitespace (`m[a b]=v`, which the lexer
-splits)
+Tranche 10 finished the list: `coproc`, whitespace in subscripts, and a SIGPIPE bug that the
+coproc work exposed.
+
+**A subscript may contain whitespace** (`m[a b]=v`). `scan-word` pulls the bracket group into
+the word only when a valid name precedes the `[` AND an `=` or `+=` follows the matching `]`,
+so `echo [a b]` -- which really is two words -- is untouched. The read side already worked,
+because `${m[a b]}` is scanned whole.
+
+**SIGPIPE was ignored by every child.** SBCL ignores it so writes report an error instead, and
+that disposition is inherited across exec -- so `yes | head -2` printed `yes: standard output:
+Broken pipe` and the producer exited 1 rather than 141. `child-sigdefaults` now resets SIGPIPE
+always, not just under job control. That fixes external commands; a child that is itself an
+sxsh needs more, because SBCL reinstates the disposition at startup, so `main` also catches
+`stream-error` and exits 141 quietly.
+
+Note what did NOT work there: narrowing that handler by comparing the condition's stream to
+`*standard-output*`. `run-builtin` rebinds that to a fresh fd-stream, so the identity test
+failed and the message came out anyway. A stream error reaching the top of `main` is an I/O
+failure on the shell's own output regardless of which stream object carries it.
+
+The bashisms scoreboard is at 57/57. Two of its cases were wrong before they were right, both
+in the same way -- they compared against bash doing something for an unrelated reason. The
+`time` case compared elapsed times, which made the count flap between runs; the `extglob` case
+put `shopt -s extglob` on the same `-c` line as a `case` pattern, where **bash also fails**
+because it parses the line before the shopt runs. When a reference shell "agrees", check that
+it agrees for the reason you think.
 -- which drag in `declare`/`local` options, `PIPESTATUS`, `read -a`, `mapfile` and namerefs, and
 which touch the variable model everywhere, so they want their own tranche.
 

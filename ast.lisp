@@ -37,6 +37,11 @@
   target
   heredoc)                              ; (delimiter body quoted-p strip-p) once collected
 
+;;; bash `coproc [NAME] command' -- background job with two pipes
+(defstruct (coproc-clause (:include node)
+                          (:constructor make-coproc-clause (name body)))
+  name body)
+
 ;;; bash `select NAME in WORDS; do ... done' -- menu loop
 (defstruct (select-clause (:include node)
                           (:constructor make-select-clause (name words body redirects)))

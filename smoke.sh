@@ -970,6 +970,26 @@ check bx-procsub-redir  '2'             0 'wc -l < <(printf "a\nb\n") | tr -d " 
 check bx-redir-plain    'ok'            0 'echo a > /dev/null; echo ok'
 check bx-redir-in       'ok'            0 'cat < /etc/hosts | head -1 >/dev/null; echo ok'
 
+# --- bash extensions (tranche 10: coproc, subscripts, SIGPIPE) -------------
+# coproc: two pipes, NAME[0] reads its output, NAME[1] writes to its input
+check bx-coproc         'ok'            0 'coproc c { echo hi; }; echo ok'
+check bx-coproc-fds     'n=2'           0 'coproc { echo hi; }; echo "n=${#COPROC[@]}"'
+check bx-coproc-read    'l=hello'       0 'coproc MY { echo hello; }; read -u ${MY[0]} l; echo "l=$l"'
+check bx-coproc-pid     'haspid'        0 'coproc MY { echo x; }; [ -n "$MY_PID" ] && echo haspid'
+check bx-coproc-two     'ab'            0 'coproc C { echo a; echo b; }; read -u ${C[0]} x; read -u ${C[0]} y; echo "$x$y"'
+# a subscript may contain whitespace; `echo [a b]' must stay two words
+check bx-sub-space      'v'             0 'declare -A m; m[a b]=v; echo "${m[a b]}"'
+check bx-sub-space-two  'vw'            0 'declare -A m; m[a b]=v; m[c d]=w; echo "${m[a b]}${m[c d]}"'
+check bx-sub-space-app  'xy'            0 'declare -A m; m[a b]+=x; m[a b]+=y; echo "${m[a b]}"'
+check bx-sub-arith      'x'             0 'a=(0); a[1 + 1]=x; echo "${a[2]}"'
+check bx-glob-not-sub   '[a b]'         0 'echo [a b]'
+# SIGPIPE: a producer outliving its consumer dies quietly, status 141
+check bx-sigpipe-quiet  'y
+y'                                      0 'yes | head -2'
+check bx-sigpipe-status '141'           0 'yes 2>/dev/null | head -1 >/dev/null; echo ${PIPESTATUS[0]}'
+check bx-sigpipe-seq    '1
+2'                                      0 'seq 1 100000 2>/dev/null | head -2'
+
 # --- stdin / REPL mode ----------------------------------------------------
 got=$(printf 'echo from-stdin\nexit 0\n' | "$SXSH" 2>/dev/null)
 if printf '%s' "$got" | grep -q 'from-stdin'; then

@@ -256,6 +256,28 @@ tracking nesting, quotes and nested substitutions. Assumes point is on OPEN."
        (every #'digit-char-p text)
        (member next-char '(#\< #\>))))
 
+(defun subscript-assignment-ahead-p (lx)
+  "Point is on `['. True if a matching `]' exists and is followed by `=' or
+`+=' -- that is, this really is the left side of an element assignment."
+  (let ((s (lexer-string lx)) (i (lexer-pos lx)) (n (lexer-len lx)) (depth 0))
+    (loop while (< i n) do
+      (let ((c (char s i)))
+        (cond
+          ((char= c #\[) (incf depth) (incf i))
+          ((char= c #\])
+           (decf depth) (incf i)
+           (when (zerop depth)
+             (return-from subscript-assignment-ahead-p
+               (and (< i n)
+                    (or (char= (char s i) #\=)
+                        (and (char= (char s i) #\+)
+                             (< (1+ i) n)
+                             (char= (char s (1+ i)) #\=)))))))
+          ;; a newline never appears inside a subscript
+          ((char= c #\Newline) (return-from subscript-assignment-ahead-p nil))
+          (t (incf i)))))
+    nil))
+
 (defun scan-word (lx)
   "Scan one WORD token starting at point. Returns the raw text string.
 Detects assignment-word shape as a side product via classify."
@@ -284,6 +306,15 @@ Detects assignment-word shape as a side product via classify."
           ((char= c #\`) (scan-backquote lx out))
           ((and (char= c #\$) (eql (lx-peek lx 1) #\()) (scan-dollar-paren lx out))
           ((and (char= c #\$) (eql (lx-peek lx 1) #\{)) (scan-dollar-brace lx out))
+          ;; `NAME[subscript]=' where the subscript contains whitespace, as an
+          ;; associative-array key may: `m[a b]=v'. The blank would otherwise
+          ;; end the word. Requires a valid name before the `[' and an `=' or
+          ;; `+=' after the matching `]', so a glob like `echo [a b]' -- which
+          ;; really is two words -- is untouched.
+          ((and (char= c #\[) (plusp (fill-pointer out))
+                (valid-name-p (coerce out 'string))
+                (subscript-assignment-ahead-p lx))
+           (scan-balanced lx out #\[ #\]))
           ;; extglob `?(a|b)' and friends. The `(' would otherwise end the
           ;; word -- it is an operator character -- so the group is pulled in
           ;; here.

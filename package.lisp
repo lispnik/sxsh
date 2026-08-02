@@ -29,6 +29,7 @@
    #:simple-command #:simple-command-assignments
    #:simple-command-words #:simple-command-redirects
    #:assignment #:assignment-name #:assignment-value #:assignment-append
+   #:coproc-clause #:coproc-clause-name #:coproc-clause-body
    #:select-clause #:select-clause-name #:select-clause-words
    #:select-clause-body #:select-clause-redirects
    #:cond-expr #:cond-expr-text #:cond-expr-redirects
