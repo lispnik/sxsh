@@ -506,6 +506,7 @@ no-op beyond evaluating the RHS arithmetically."
             ((and (null value) (or (member #\A flags) (member #\a flags)))
              (set-var sh name (make-sh-array (if (member #\A flags)
                                                  :assoc :indexed))))
+            ((member #\n flags))          ; handled below, as a reference
             (value
              (when (and (member #\A flags) (not (var-array sh name)))
                (set-var sh name (make-sh-array :assoc)))
@@ -519,6 +520,12 @@ no-op beyond evaluating the RHS arithmetically."
                            (shell-int-vars sh))
                   t)
             (when value (assign-one sh name value appendp)))
+          ;; -n makes NAME an alias for the variable the value names.
+          (when (and (member #\n flags) value)
+            (setf (gethash name (shell-namerefs sh)) value)
+            ;; The alias itself must not also hold a value, or GET-VAR would
+            ;; find the alias's own cell before following the reference.
+            (remhash name (shell-vars sh)))
           (when (member #\x flags) (export-var sh name))
           (when (member #\r flags) (mark-readonly sh name)))))))
 
@@ -1270,8 +1277,10 @@ but an unknown name has to be an error, since scripts test the exit status of
               (unless quiet
                 (format *error-output* "shopt: ~A: invalid shell option name~%" n))
               (setf status 1))
-             ((eq mode :set) (setf (gethash n (shell-shopts sh)) t))
-             ((eq mode :unset) (remhash n (shell-shopts sh)))
+             ((eq mode :set) (setf (gethash n (shell-shopts sh)) t)
+              (when (string= n "extglob") (setf *extglob* t)))
+             ((eq mode :unset) (remhash n (shell-shopts sh))
+              (when (string= n "extglob") (setf *extglob* nil)))
              (t
               ;; Query form: the status reports the state.
               (unless quiet

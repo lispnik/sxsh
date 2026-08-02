@@ -68,6 +68,9 @@
   ;; bash `shopt' options. Separate from SHELL-OPTIONS, which holds the
   ;; POSIX `set -o' flags -- bash keeps the two namespaces apart and so do we.
   (shopts (make-hash-table :test 'equal))
+  ;; bash namerefs (`declare -n r=v'): NAME -> the name it stands for. Reads
+  ;; and writes through the alias reach the target variable.
+  (namerefs (make-hash-table :test 'equal))
   ;; control-flow signals for break/continue/return handled via catch tags
   )
 
@@ -284,12 +287,25 @@ lexicographic for an associative one (bash's order is unspecified there)."
       (or (array-get value 0) "")
       value))
 
+(defun resolve-nameref (sh name)
+  "Follow a nameref chain to the name it ultimately designates.
+
+Depth-limited: `declare -n a=b; declare -n b=a' is a cycle, and bash reports
+it rather than hanging. We simply stop and use the last name reached."
+  (let ((seen '()))
+    (loop repeat 32
+          for target = (gethash name (shell-namerefs sh))
+          while (and target (not (member target seen :test #'string=)))
+          do (push name seen) (setf name target))
+    name))
+
 (defun get-var (sh name)
   "Return (values value found-p exported-p)."
-  (multiple-value-bind (cell found) (gethash name (shell-vars sh))
-    (if found
-        (values (scalar-of (car cell)) t (cdr cell))
-        (values nil nil nil))))
+  (let ((name (resolve-nameref sh name)))
+    (multiple-value-bind (cell found) (gethash name (shell-vars sh))
+      (if found
+          (values (scalar-of (car cell)) t (cdr cell))
+          (values nil nil nil)))))
 
 (define-condition readonly-violation (error)
   ((name :initarg :name :reader readonly-violation-name))
@@ -299,6 +315,8 @@ lexicographic for an associative one (bash's order is unspecified there)."
 (defun readonly-p (sh name) (nth-value 1 (gethash name (shell-readonly sh))))
 
 (defun set-var (sh name value &key export)
+  ;; An assignment through a nameref lands on the target, not the alias.
+  (setf name (resolve-nameref sh name))
   (when (readonly-p sh name)
     (error 'readonly-violation :name name))
   ;; bash: assigning to RANDOM SEEDS the generator rather than replacing it,

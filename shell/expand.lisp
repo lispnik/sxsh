@@ -1091,9 +1091,82 @@ converting it into a bracket expression when it's a metachar."
 ;;; Shell pattern matching (fnmatch-like: * ? [set])
 ;;; ---------------------------------------------------------------------------
 
+(defvar *extglob* nil
+  "Whether ?() *() +() @() !() are active, mirroring shopt extglob.
+
+A global rather than a parameter because SHELL-PATTERN-MATCH is reached from
+many places that have no SHELL handy (case, [[ ]], parameter expansion,
+globbing), and there is one shell per process. The SHOPT builtin keeps it in
+step. It is gated at all because without extglob `ab?(c)' means `ab?' followed
+by a literal `(c)', so switching it on unconditionally would change the
+meaning of ordinary patterns.")
+
 (defun shell-pattern-match (pattern string)
-  "Match STRING fully against a shell PATTERN (*, ?, [..])."
+  "Match STRING fully against a shell PATTERN (*, ?, [..], and extglob)."
   (pat-match pattern 0 (length pattern) string 0 (length string)))
+
+(defun extglob-group-end (p pp pe)
+  "PP is at the `(' of an extglob group. Return the index just past its `)'."
+  (let ((depth 0) (i pp))
+    (loop while (< i pe) do
+      (let ((c (char p i)))
+        (cond
+          ((char= c #\\) (incf i 2))
+          ((char= c #\() (incf depth) (incf i))
+          ((char= c #\)) (decf depth) (incf i)
+           (when (zerop depth) (return-from extglob-group-end i)))
+          (t (incf i)))))
+    nil))
+
+(defun extglob-alternatives (p start end)
+  "Split an extglob group body on top-level `|'."
+  (let ((alts '()) (from start) (depth 0) (i start))
+    (loop while (< i end) do
+      (let ((c (char p i)))
+        (cond
+          ((char= c #\\) (incf i 2))
+          ((char= c #\() (incf depth) (incf i))
+          ((char= c #\)) (decf depth) (incf i))
+          ((and (char= c #\|) (zerop depth))
+           (push (subseq p from i) alts) (setf from (1+ i)) (incf i))
+          (t (incf i)))))
+    (push (subseq p from end) alts)
+    (nreverse alts)))
+
+(defun extglob-match (kind alts p pp pe s si sn)
+  "Match an extglob group at SI, then the rest of the pattern from PP.
+
+KIND is one of #\? #\* #\+ #\@ #\!. Each alternative is itself a pattern, so
+matching is recursive; the continuation is `the rest of the outer pattern',
+which is what lets the group give back characters on failure."
+  (labels ((rest-matches (k) (pat-match p pp pe s k sn))
+           ;; How far can one alternative reach from position K?
+           (alt-ends (k)
+             (let ((ends '()))
+               (dolist (a alts ends)
+                 (loop for e from k to sn
+                       when (pat-match a 0 (length a) s k e)
+                         do (push e ends)))))
+           (repeat (k seen)
+             ;; Zero or more, longest-first, refusing empty progress.
+             (or (rest-matches k)
+                 (some (lambda (e)
+                         (and (> e k) (not (member e seen))
+                              (repeat e (cons e seen))))
+                       (sort (alt-ends k) #'>)))))
+    (ecase kind
+      (#\@ (some #'rest-matches (alt-ends si)))
+      (#\? (or (rest-matches si) (some #'rest-matches (alt-ends si))))
+      (#\* (repeat si '()))
+      (#\+ (some (lambda (e) (and (> e si) (repeat e (list e))))
+                 (sort (alt-ends si) #'>)))
+      ;; !(...) matches any run that no alternative matches in full.
+      (#\! (loop for e from sn downto si
+                 when (and (notany (lambda (a)
+                                     (pat-match a 0 (length a) s si e))
+                                   alts)
+                           (rest-matches e))
+                   do (return t))))))
 
 (defun pat-match (p pp pe s si sn)
   (loop
@@ -1105,6 +1178,15 @@ converting it into a bracket expression when it's a metachar."
          (when (>= si sn) (return nil))
          (unless (char= (char p (1+ pp)) (char s si)) (return nil))
          (incf pp 2) (incf si))
+        ;; extglob, BEFORE the plain * and ? branches or those would
+        ;; consume the quantifier character first: ?(a|b) *(a|b) +(a|b)
+        ;; @(a|b) !(a|b) ?(a|b) *(a|b) +(a|b) @(a|b) !(a|b)
+        ((and *extglob* (member pc '(#\? #\* #\+ #\@ #\!))
+              (< (1+ pp) pe) (char= (char p (1+ pp)) #\()
+              (extglob-group-end p (1+ pp) pe))
+         (let* ((close (extglob-group-end p (1+ pp) pe))
+                (alts (extglob-alternatives p (+ pp 2) (1- close))))
+           (return (extglob-match pc alts p close pe s si sn))))
         ((char= pc #\*)
          (incf pp)
          ;; collapse consecutive *

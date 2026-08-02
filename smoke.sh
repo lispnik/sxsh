@@ -922,6 +922,36 @@ check bx-select-args    'got=p'         0 'set -- p q; printf "1\n" | select x; 
 # conforming script may define one. bash rejects this; we deliberately do not.
 check bx-select-as-name 'fn'            0 'select() { echo fn; }; select'
 
+# --- bash extensions (tranche 8: namerefs, extglob) ------------------------
+# namerefs: reads and writes through the alias reach the target
+check bx-nameref-read   'hi'            0 'f() { local -n r=$1; echo $r; }; v=hi; f v'
+check bx-nameref-write  'changed'       0 'f() { local -n r=$1; r=changed; }; v=orig; f v; echo $v'
+check bx-nameref-decl   '1'             0 'declare -n r=v; v=1; echo $r'
+check bx-nameref-assign '2'             0 'declare -n r=v; r=2; echo $v'
+# a cycle must terminate rather than hang (bash warns; we just stop)
+check bx-nameref-cycle  '[]'            0 'declare -n a=b; declare -n b=a; echo "[${a}]"'
+
+# extglob. The MATCHER is gated on the shopt; the LEXER is not, because sxsh
+# parses a whole script before running it, so `shopt -s extglob' on line 1 has
+# not executed when line 2 is lexed. Accepting the shape unconditionally is
+# safe: the alternative reading is a syntax error in bash too.
+check bx-extglob-opt    'y'             0 'shopt -s extglob; case abc in ab?(c)) echo y;; esac'
+check bx-extglob-opt0   'y'             0 'shopt -s extglob; case ab in ab?(c)) echo y;; esac'
+check bx-extglob-opt2   'n'             0 'shopt -s extglob; case abcc in ab?(c)) echo y;; *) echo n;; esac'
+check bx-extglob-star   'y'             0 'shopt -s extglob; case abccc in ab*(c)) echo y;; esac'
+check bx-extglob-plus   'n'             0 'shopt -s extglob; case ab in ab+(c)) echo y;; *) echo n;; esac'
+check bx-extglob-at     'y'             0 'shopt -s extglob; case abc in ab@(c|d)) echo y;; esac'
+check bx-extglob-at-no  'n'             0 'shopt -s extglob; case abx in ab@(c|d)) echo y;; *) echo n;; esac'
+check bx-extglob-not    'y'             0 'shopt -s extglob; case abx in ab!(c)) echo y;; esac'
+check bx-extglob-not-h  'y'             0 'shopt -s extglob; case foo.c in !(*.h)) echo y;; esac'
+check bx-extglob-not-h2 'n'             0 'shopt -s extglob; case foo.h in !(*.h)) echo y;; *) echo n;; esac'
+check bx-extglob-rep    'y'             0 'shopt -s extglob; case abab in +(ab)) echo y;; esac'
+check bx-extglob-multi  'y'             0 'shopt -s extglob; case aXbXc in a@(X|Y)b@(X|Y)c) echo y;; esac'
+check bx-extglob-dbr    'y'             0 'shopt -s extglob; v=abc; [[ $v == ab?(c) ]] && echo y'
+check bx-extglob-subst  'fooZ'          0 'shopt -s extglob; v=fooX; echo ${v/@(X|Y)/Z}'
+# with extglob OFF the pattern keeps its ordinary meaning
+check bx-extglob-off    'y'             0 'case abx in ab?) echo y;; *) echo n;; esac'
+
 # --- stdin / REPL mode ----------------------------------------------------
 got=$(printf 'echo from-stdin\nexit 0\n' | "$SXSH" 2>/dev/null)
 if printf '%s' "$got" | grep -q 'from-stdin'; then

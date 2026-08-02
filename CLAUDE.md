@@ -420,8 +420,28 @@ function with that name -- bash rejects it, we do not. The same reasoning does n
 because reaching the engine's corners through `[[ =~ ]]` alone is awkward: empty matches,
 greedy backtracking, and group spans that must be undone when an alternative is rejected.
 
-Still missing: extglob; process substitution; `coproc`; namerefs (`local -n`); and a subscript
-containing whitespace (`m[a b]=v`, which the lexer splits)
+Tranche 8 added namerefs (`declare -n` / `local -n`) and extglob.
+
+Namerefs live in `shell-namerefs` and are resolved by `get-var` and `set-var`, so a read or a
+write through the alias reaches the target. `resolve-nameref` is depth-limited: `declare -n a=b;
+declare -n b=a` is a cycle, and bash reports it rather than hanging.
+
+**extglob is gated in the matcher but NOT in the lexer, deliberately.** The matcher checks
+`*extglob*` because without the option `ab?(c)` really does mean `ab?` followed by something
+else. The lexer cannot be gated the same way: sxsh parses a whole script before running any of
+it, so `shopt -s extglob` on line 1 has not executed when line 2 is lexed, and `case x in
+a?(b))` would still fail to parse. Scanning the group into the word unconditionally is safe
+because the alternative reading -- a subshell in pattern position -- is a syntax error in bash
+too, so this only makes sxsh more permissive at parse time while the *meaning* of a pattern
+still changes only when extglob is on.
+
+Note the extglob branch in `pat-match` must come BEFORE the plain `*` and `?` branches, or
+those consume the quantifier character first and `?(...)`/`*(...)` silently fall back to
+ordinary wildcards. `@`, `+` and `!` are not wildcards, so they worked while the other two did
+not -- a good reminder that partial success here is not success.
+
+Still missing: process substitution; `coproc`; and a subscript containing whitespace
+(`m[a b]=v`, which the lexer splits)
 -- which drag in `declare`/`local` options, `PIPESTATUS`, `read -a`, `mapfile` and namerefs, and
 which touch the variable model everywhere, so they want their own tranche.
 

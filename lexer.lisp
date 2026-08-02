@@ -276,6 +276,23 @@ Detects assignment-word shape as a side product via classify."
           ((char= c #\`) (scan-backquote lx out))
           ((and (char= c #\$) (eql (lx-peek lx 1) #\()) (scan-dollar-paren lx out))
           ((and (char= c #\$) (eql (lx-peek lx 1) #\{)) (scan-dollar-brace lx out))
+          ;; extglob `?(a|b)' and friends. The `(' would otherwise end the
+          ;; word -- it is an operator character -- so the group is pulled in
+          ;; here.
+          ;;
+          ;; Deliberately NOT gated on shopt extglob, even though the MATCHER
+          ;; is. Gating here cannot work: sxsh parses a whole script before
+          ;; running any of it, so `shopt -s extglob' on line 1 has not
+          ;; executed when line 2 is lexed, and `case x in a?(b))' would still
+          ;; fail to parse. Accepting the shape unconditionally is safe
+          ;; because the alternative reading -- `a?' followed by a subshell in
+          ;; pattern position -- is a syntax error in bash too. So this only
+          ;; makes sxsh more permissive at parse time, while the meaning of
+          ;; the pattern still changes only when extglob is on.
+          ((and (member c '(#\? #\* #\+ #\@ #\!))
+                (eql (lx-peek lx 1) #\())
+           (vector-push-extend (lx-advance lx) out)   ; the quantifier
+           (scan-balanced lx out #\( #\)))
           (t (vector-push-extend (lx-advance lx) out)))))
     (coerce out 'string)))
 
