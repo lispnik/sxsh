@@ -94,14 +94,11 @@ PATH=~/a:~/b rule)."
             ;; double quotes: expand $ and ` but mark chars quoted (no split/glob)
             ((char= c #\")
              (incf i)
-             ;; POSIX special case: "$@" with no positionals produces no field
-             ;; at all. Only emit the empty-field anchor when the quoted section
-             ;; is NOT exactly $@ (so plain "" still yields one empty field).
-             (unless (and (< (1+ i) n)
-                          (char= (char raw i) #\$)
-                          (char= (char raw (1+ i)) #\@)
-                          (or (= (+ i 2) n)
-                              (char= (char raw (+ i 2)) #\")))
+             ;; POSIX special case: an at-expansion that yields nothing must
+             ;; produce NO field, so the empty-field anchor is suppressed when
+             ;; the quoted section is exactly one at-expansion. Plain "" still
+             ;; yields one empty field.
+             (unless (quoted-at-only-p raw i n)
                (emit-anchor))
              (setf i (expand-double sh raw i n #'emit #'emit-field-sep))
              (setf start-of-field nil))
@@ -316,6 +313,27 @@ There is no field splitting or pathname expansion here either."
                (setf i next)))
             (t (emit c) (incf i))))))
     (nreverse out)))
+
+(defun quoted-at-only-p (raw i n)
+  "True if the double-quoted section starting at I is exactly one at-expansion
+-- `$@' or `${name[@]}' -- and nothing else.
+
+Whether the array exists is deliberately not consulted: \"${undefined[@]}\" and
+\"${empty[@]}\" both have to expand to zero fields, and neither has an array to
+ask. Matching only the literal `$@', as this once did, meant `read -a' on an
+empty line produced one empty field instead of none."
+  (let ((end nil))
+    (cond
+      ((and (< (1+ i) n) (char= (char raw i) #\$) (char= (char raw (1+ i)) #\@))
+       (setf end (+ i 2)))
+      ((and (< (1+ i) n) (char= (char raw i) #\$) (char= (char raw (1+ i)) #\{))
+       (let ((close (position #\} raw :start (+ i 2))))
+         (when close
+           (multiple-value-bind (base sub)
+               (split-subscript (subseq raw (+ i 2) close))
+             (declare (ignore base))
+             (when (and sub (string= sub "@")) (setf end (1+ close))))))))
+    (and end (or (= end n) (char= (char raw end) #\")))))
 
 (defun braced-array-at-p (sh raw i n)
   "If RAW at I is `${name[@]}', return (values array end-index); else NIL.

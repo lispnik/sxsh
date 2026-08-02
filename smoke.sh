@@ -242,6 +242,45 @@ check set-allexport     '1'          0 'set -a; V=x; env | grep -c "^V=x"'
 check set-noexec        ''           0 'set -n; echo NOTRUN'
 check set-invalid-opt   ''           2 'set -Z 2>/dev/null'
 
+# --- read: option clusters, -n counting, IFS field counts -----------------
+# Every expectation here was diffed against bash before being written down.
+check read-smooshed     'v=h'    0 'echo hi | { read -rn1 v; echo "v=$v"; }'
+check read-rd-empty     '[foo
+bar]'                            0 "printf 'foo\nbar\n' | { read -rd '' v; echo \"[\$v]\"; }"
+# -n counts characters AFTER escape processing, so \b\c\d collapse first.
+check read-n-postescape '[abcde]' 0 "echo 'a\b\c\d\e\f' | { read -n 5; echo \"[\$REPLY]\"; }"
+check read-n-incomplete '[abcd]'  0 "echo 'abc\def\ghijklmn' | { read -n 4; echo \"[\$REPLY]\"; }"
+check read-n-zero       '[]'      0 "echo 'a\b' | { read -n 0; echo \"[\$REPLY]\"; }"
+# backslash-newline is a continuation whatever -d says
+check read-d-continues  '[a bc d
+]'                               0 "printf '%s\n' 'a b\\' 'c d' | { read -d , ; echo \"[\$REPLY]\"; }"
+# A -p prompt goes to a terminal only; on a pipe it would corrupt stderr.
+# read's stderr is folded into stdout here so the prompt WOULD show if emitted
+# -- an empty-`want' check_err would pass either way and prove nothing.
+check read-p-no-tty     'v=hi'    0 'echo hi | { read -p PROMPT v 2>&1; echo "v=$v"; }'
+# Usage errors: bash separates a bad option (2) from a bad number (1).
+check_err read-bad-opt  'invalid option' 2 'read -z </dev/null'
+check_err read-bad-num  'invalid number' 1 'read -n abc </dev/null'
+check read-bad-num-st   'st=1'   0 'echo hi | { read -n abc; }; echo "st=$?"' 
+check read-bad-timeout  'st=1'   0 'echo hi | { read -t -0.5; }; echo "st=$?"'
+
+# An at-expansion yielding nothing must produce NO field, for arrays as well
+# as for "$@" -- `read -a' on an empty line otherwise gave one empty field.
+check at-empty-array    'count=0' 0 'a=(); set -- "${a[@]}"; echo "count=$#"'
+check at-unset-array    'count=0' 0 'set -- "${nope[@]}"; echo "count=$#"'
+check at-read-a-empty   'count=0' 0 'echo "" | { read -a arr; set -- "${arr[@]}"; echo "count=$#"; }'
+check at-plain-empty    'count=1' 0 'set -- ""; echo "count=$#"'
+
+# A trailing IFS non-whitespace delimiter generates no field (POSIX 2.6.5), so
+# `xx' is exactly two fields and b gets "" rather than the raw remainder.
+check read-ifs-exact2   '[][]'    0 'IFS="x "; echo xx | { read a b; echo "[$a][$b]"; }'
+check read-ifs-overflow '[][xx]'  0 'IFS="x "; echo xxx | { read a b; echo "[$a][$b]"; }'
+check read-ifs-trailing '[][a]'   0 'IFS="x "; echo "xax   " | { read a b; echo "[$a][$b]"; }'
+check read-ifs-remain   '[][axx]' 0 'IFS="x "; echo "xaxx  " | { read a b; echo "[$a][$b]"; }'
+# An escaped space is quoted: it forms a field and survives the trailing trim.
+check read-esc-space    '[][ ]'   0 'IFS="x "; echo "x \\ " | { read a b; echo "[$a][$b]"; }'
+check read-esc-space2   '[][ ]'   0 'IFS="x "; echo "x\\  " | { read a b; echo "[$a][$b]"; }'
+
 # --- echo -e escape decoding ----------------------------------------------
 # echo and printf share DECODE-ESCAPE-AT; these pin the forms that differ or
 # that a partial decoder silently passes through as literal text.

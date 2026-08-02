@@ -633,38 +633,67 @@ no-op beyond evaluating the RHS arithmetically."
   (let ((raw-mode nil) (silent nil) (prompt nil) (names args)
         (fd 0) (delim #\Newline) (max nil) (exact nil) (timeout nil)
         (array-name nil))
-    (labels ((opt-arg (opt)
-               ;; -n3 and -n 3 are both accepted, as in bash.
-               (if (> (length opt) 2) (subseq opt 2) (pop names))))
-      (loop while (and names (> (length (first names)) 1)
-                       (char= (char (first names) 0) #\-))
-            do (let* ((opt (first names)) (kind (char opt 1)))
-                 (case kind
-                   (#\r (setf raw-mode t) (pop names))
-                   (#\s (setf silent t) (pop names))
-                   (#\p (pop names) (setf prompt (opt-arg opt)))
-                   (#\n (pop names)
-                        (setf max (ignore-errors (parse-integer (opt-arg opt)))))
-                   (#\N (pop names)
-                        (setf max (ignore-errors (parse-integer (opt-arg opt)))
-                              exact t))
-                   (#\d (pop names)
-                        (let ((d (opt-arg opt)))
-                          ;; `read -d ""' means NUL-delimited.
-                          (setf delim (if (plusp (length d))
-                                          (char d 0)
-                                          (code-char 0)))))
-                   (#\a (pop names) (setf array-name (opt-arg opt)))
-                   (#\u (pop names)
-                        (setf fd (or (ignore-errors (parse-integer (opt-arg opt))) 0)))
-                   (#\t (pop names)
-                        (setf timeout
-                              (or (ignore-errors
-                                    (let ((*read-default-float-format* 'double-float))
-                                      (float (read-from-string (opt-arg opt)) 1d0)))
-                                  0d0)))
-                   (t (return))))))
-    (when prompt (write-string prompt *error-output*) (finish-output *error-output*))
+    ;; Options come in clusters, and the letter that takes an argument may sit
+    ;; anywhere in one: bash accepts `-rn1 var' and `-rd "" var'. Reading only
+    ;; (char opt 1) and discarding the word silently dropped the argument, so
+    ;; `-rn1' behaved as a bare `-r'.
+    (block options
+      (labels ((count-arg (s)
+                 ;; bash: a bad number is status 1, distinct from the status 2
+                 ;; it uses for a bad option letter.
+                 (let ((v (ignore-errors (parse-integer s))))
+                   (unless (and v (>= v 0))
+                     (format *error-output* "read: ~A: invalid number~%" s)
+                     (return-from builtin 1))
+                   v)))
+        (loop while (and names (> (length (first names)) 1)
+                         (char= (char (first names) 0) #\-))
+              do (let ((opt (pop names)) (k 1))
+                   ;; `--' ends the options; the next word is a name.
+                   (when (string= opt "--") (return-from options))
+                   (loop while (< k (length opt))
+                         do (let ((kind (char opt k)))
+                              (flet ((opt-arg ()
+                                       ;; The rest of the cluster is the argument
+                                       ;; if there is any, else the next word.
+                                       (let ((rest (subseq opt (1+ k))))
+                                         (setf k (length opt))
+                                         (or (and (plusp (length rest)) rest)
+                                             (pop names)
+                                             ""))))
+                                (case kind
+                                  (#\r (setf raw-mode t) (incf k))
+                                  (#\s (setf silent t) (incf k))
+                                  (#\p (setf prompt (opt-arg)))
+                                  (#\n (setf max (count-arg (opt-arg))))
+                                  (#\N (setf max (count-arg (opt-arg))
+                                             exact t))
+                                  (#\d (let ((d (opt-arg)))
+                                         ;; `read -d ""' means NUL-delimited.
+                                         (setf delim (if (plusp (length d))
+                                                         (char d 0)
+                                                         (code-char 0)))))
+                                  (#\a (setf array-name (opt-arg)))
+                                  (#\u (setf fd (count-arg (opt-arg))))
+                                  (#\t (let* ((s (opt-arg))
+                                              (v (ignore-errors
+                                                   (let ((*read-default-float-format*
+                                                           'double-float))
+                                                     (float (read-from-string s) 1d0)))))
+                                         (unless (and (realp v) (>= v 0))
+                                           (format *error-output*
+                                                   "read: ~A: invalid timeout specification~%"
+                                                   s)
+                                           (return-from builtin 1))
+                                         (setf timeout v)))
+                                  (t
+                                   (format *error-output*
+                                           "read: -~A: invalid option~%" kind)
+                                   (return-from builtin 2))))))))))
+    ;; bash writes the -p prompt only when it is actually prompting someone;
+    ;; on a pipe it would corrupt the stderr of every script that uses it.
+    (when (and prompt (plusp (sb-unix:unix-isatty fd)))
+      (write-string prompt *error-output*) (finish-output *error-output*))
     ;; -t: bash exits 142 (128+SIGALRM) when the deadline passes with nothing
     ;; read. -t 0 is the polling form: report whether input is available and
     ;; consume nothing.
@@ -788,7 +817,14 @@ escaped are reported because they must NOT be treated as IFS delimiters
 afterwards -- `read x' on `a\ b' yields the single field `a b'.
 
 EOF-WITHOUT-NEWLINE drives the exit status: POSIX requires a non-zero status
-when input ends before a newline, even though the fields are still assigned."
+when input ends before a newline, even though the fields are still assigned.
+
+MAX (`read -n') counts characters AFTER escape processing, which is why the
+limit is applied here rather than in the byte reader: bash reads `a\bc' with
+-n 3 as `abc', not as the three raw bytes `a\b'.
+
+A backslash-newline pair is a line continuation and is swallowed whatever -d
+says -- `read -d ,' still joins continued lines."
   (let ((text (make-string-output-stream))
         (escaped '())
         (pos 0)
@@ -797,35 +833,55 @@ when input ends before a newline, even though the fields are still assigned."
     (labels ((emit (ch esc)
                (write-char ch text)
                (when esc (push pos escaped))
-               (incf pos)))
-      (loop
-        (multiple-value-bind (line missing-newline)
-            (fd-read-line fd :delim delim :max max :exact exact)
-          (when (eq line :eof)
-            (unless got-any
-              (return-from read-one-logical-line (values :eof nil nil)))
-            (setf eof-no-newline t)
-            (return))
-          (setf got-any t)
-          (when missing-newline (setf eof-no-newline t))
-          (cond
-            (raw-mode
-             (loop for ch across line do (emit ch nil))
-             (return))
-            (t
-             (let ((i 0) (n (length line)) (continues nil))
-               (loop while (< i n) do
-                 (let ((c (char line i)))
-                   (cond
-                     ((and (char= c #\\) (< (1+ i) n))
-                      (emit (char line (1+ i)) t)
-                      (incf i 2))
-                     ((char= c #\\)      ; trailing backslash: line continuation
-                      (setf continues t)
-                      (incf i))
-                     (t (emit c nil) (incf i)))))
-               (when (or (not continues) missing-newline max) (return))))))))
+               (incf pos))
+             (limit-reached-p () (and max (>= pos max))))
+      (block reading
+        ;; `read -n 0' consumes nothing at all and assigns the empty string.
+        (when (and max (zerop max)) (return-from reading))
+        (loop
+          (let ((ch (fd-read-char fd)))
+            (cond
+              ((null ch)
+               (unless got-any
+                 (return-from read-one-logical-line (values :eof nil nil)))
+               (setf eof-no-newline t)
+               (return-from reading))
+              (t
+               (setf got-any t)
+               (cond
+                 ((and (not raw-mode) (char= ch #\\))
+                  (let ((next (fd-read-char fd)))
+                    (cond
+                      ((null next)      ; trailing backslash at end of input
+                       (emit #\\ nil)
+                       (setf eof-no-newline t)
+                       (return-from reading))
+                      ((char= next #\Newline)) ; continuation: emit nothing
+                      (t (emit next t)
+                         (when (limit-reached-p) (return-from reading))))))
+                 ;; -N takes the bytes verbatim: no byte is a delimiter.
+                 ((and (not exact) (char= ch delim)) (return-from reading))
+                 (t (emit ch nil)
+                    (when (limit-reached-p) (return-from reading))))))))))
     (values (get-output-stream-string text) (nreverse escaped) eof-no-newline)))
+
+(defun fd-read-char (fd)
+  "One byte from FD as a character, or NIL at end of input.
+
+Single-byte reads for the reason FD-READ-LINE documents: `read' must leave the
+offset just past what it consumed."
+  (let ((buf (make-array 1 :element-type '(unsigned-byte 8))))
+    (sb-sys:with-pinned-objects (buf)
+      (loop
+        (multiple-value-bind (r errno)
+            (sb-unix:unix-read fd (sb-sys:vector-sap buf) 1)
+          (cond
+            ((and r (plusp r)) (return (code-char (aref buf 0))))
+            ((and r (zerop r)) (return nil))
+            ;; EINTR is not end of input: a trap firing mid-read would
+            ;; otherwise look like EOF.
+            ((eql errno sb-unix:eintr))
+            (t (return nil))))))))
 
 (defun split-on-ifs (line ifs maxfields &optional escaped)
   "Split LINE into at most MAXFIELDS fields using POSIX IFS rules.
@@ -841,18 +897,23 @@ IFS holds two kinds of character and they behave differently (POSIX 2.6.5):
 Treating IFS as whitespace-only, as this once did, meant `IFS=: read x y z'
 performed no splitting at all and dumped the whole line into x.
 
-Once MAXFIELDS-1 fields have been taken the rest of the line goes to the final
-field verbatim (delimiters included), minus trailing IFS whitespace.
+The line is always split in FULL first, and the leftover-goes-to-the-last-field
+rule applies only when that yields MORE fields than MAXFIELDS. Truncating the
+scan at MAXFIELDS-1 instead is subtly wrong at the end of the line, because a
+trailing IFS-non-whitespace delimiter generates no field (POSIX 2.6.5): with
+IFS=x, `read a b' on `xx' has exactly two fields and so gives b=\"\", while the
+truncating version handed b the raw remainder `x'.
 
 ESCAPED lists character positions that were backslash-escaped on input; those
-are never delimiters, so `read x y' on `a\\ b c' gives x=\"a b\" and y=\"c\"."
+are never delimiters, so `read x y' on `a\\ b c' gives x=\"a b\" and y=\"c\".
+An escaped character is also immune to the trailing-whitespace trim -- `read a
+b' on `x \\ ' must leave b holding that one quoted space."
   (let* ((ws '()) (delims '()))
     (loop for c across ifs
           do (if (member c '(#\Space #\Tab #\Newline))
                  (pushnew c ws)
                  (pushnew c delims)))
-    (let ((ws-str (coerce ws 'string))
-          (fields '()) (i 0) (n (length line)) (count 0))
+    (let ((all '()) (i 0) (n (length line)))
       (flet ((ifs-char-p (c &optional (at -1))
                (and (not (member at escaped))
                     (or (member c ws) (member c delims))))
@@ -862,24 +923,37 @@ are never delimiters, so `read x y' on `a\\ b c' gives x=\"a b\" and y=\"c\"."
         (skip-ws)                       ; leading IFS whitespace is discarded
         (loop
           (when (>= i n) (return))
-          ;; NIL means unlimited -- `read -a' wants every field, not N of them.
-          (when (and maxfields (>= (1+ count) maxfields)) (return))
           (let ((start i))
             (loop while (and (< i n) (not (ifs-char-p (char line i) i)))
                   do (incf i))
-            (push (subseq line start i) fields)
-            (incf count))
+            ;; Each field is kept with the offset it began at, so the leftover
+            ;; can be taken verbatim from the right place.
+            (push (cons (subseq line start i) start) all))
           ;; A delimiter is: an optional IFS-whitespace run, then at most one
           ;; non-whitespace IFS character, then another optional run.
           (skip-ws)
           (when (and (< i n) (member (char line i) delims)
                      (not (member i escaped)))
             (incf i)
-            (skip-ws)))
-        ;; whatever is left belongs to the last requested field
-        (when (< i n)
-          (push (string-right-trim ws-str (subseq line i)) fields)))
-      (nreverse fields))))
+            (skip-ws))))
+      (setf all (nreverse all))
+      (cond
+        ;; NIL means unlimited -- `read -a' wants every field, not N of them.
+        ((or (null maxfields) (<= (length all) maxfields)) (mapcar #'car all))
+        (t
+         (append (mapcar #'car (subseq all 0 (1- maxfields)))
+                 (list (trim-trailing-ifs-ws line (cdr (nth (1- maxfields) all))
+                                             ws escaped))))))))
+
+(defun trim-trailing-ifs-ws (line start ws escaped)
+  "LINE from START to the end, less any trailing IFS whitespace that was not
+backslash-escaped."
+  (let ((end (length line)))
+    (loop while (and (> end start)
+                     (member (char line (1- end)) ws)
+                     (not (member (1- end) escaped)))
+          do (decf end))
+    (subseq line start end)))
 
 (defparameter +shell-options+
   ;; (letter long-name keyword) -- POSIX 2.14 `set'. The long name is what
