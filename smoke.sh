@@ -242,6 +242,51 @@ check set-allexport     '1'          0 'set -a; V=x; env | grep -c "^V=x"'
 check set-noexec        ''           0 'set -n; echo NOTRUN'
 check set-invalid-opt   ''           2 'set -Z 2>/dev/null'
 
+# --- arithmetic: bases, constant validation, subscripts, short circuit -----
+# Expectations diffed against bash before being written down.
+# BASE#DIGITS: 0-9, a-z = 10..35, A-Z = 36..61, @ = 62, _ = 63. Case only
+# carries information above base 36, so 36#A and 36#a are both 10.
+check arith-base36      '10-35 10'  0 'echo $((36#a))-$((36#z)) $((36#A))'
+check arith-base64      '10 35 36 61 62 63' 0 'echo $((64#a)) $((64#z)) $((64#A)) $((64#Z)) $((64#@)) $((64#_))'
+check arith-base-multi  '123 27 6151' 0 'echo $((10#0123)) $((16#1b)) $((24#ag7))'
+check arith-base-dyn    '10'        0 'base=16; echo $(( ${base}#a ))'
+check arith-prefixes    '298 10 511 8 9' 0 'echo $((0x12A)) $((0x0A)) $((0777)) $((0010)) $((011))'
+check arith-dyn-octal   '9'         0 'zero=0; echo $(( ${zero}11 ))'
+# Malformed constants are errors, not a number followed by a name.
+check_err arith-bad-hex   'invalid' 1 'echo $(( 0x1X ))'
+check_err arith-bad-octal 'invalid' 1 'echo $(( 09 ))'
+check_err arith-digit-base 'base'   1 'echo $(( 2#A ))'
+check_err arith-zero-base 'base'    1 'echo $(( 02#0110 ))'
+check_err arith-base-low  'base'    1 'echo $((1#0))'
+check_err arith-base-high 'base'    1 'echo $((65#a))'
+# Array subscripts are part of the arithmetic grammar.
+check arith-subscript   '11'        0 'a=(1 2 3 4); echo $((a[1] + a[2]*3))'
+check arith-scalar-sub  '42 0'      0 's=42; echo $((s[0])) $((s[1]))'
+check arith-sub-assign  '12
+1 12 3'                             0 'a=(1 2 3); echo $((a[1]+=10)); echo "${a[@]}"'
+check arith-sub-incdec  '6 7 6 7'   0 'a=(5 6 7 8); (( a[0]++, ++a[1], a[2]--, --a[3] )); echo "${a[@]}"'
+check arith-sub-undef   '1 1 -1 -1' 0 '(( undef[0]++, ++undef[1], undef[2]--, --undef[3] )); echo "${undef[@]}"'
+check arith-dyn-name    '42
+xbar[5]=42'                         0 'foo=bar; echo $(( x$foo[5] = 42 )); echo "xbar[5]=${xbar[5]}"'
+check_err arith-double-sub 'syntax' 1 'a=(1 2 3); echo $((a[1][1]))'
+# An out-of-range element of an array that EXISTS is 0; a subscript of a name
+# that does not exist is still an unset error. (bash -c reports 127 for this
+# where a bash script reports 1; run as a script the two agree.)
+check arith-sub-range   '0'         0 'set -u; a=(1); echo $(( a[5] ))'
+check_err arith-sub-unset 'not set' 1 'set -u; echo $(( undef[0] ))'
+# Short circuit: the untaken operand must not take effect.
+check arith-or-skips    '11'        0 'x=11; (( 1 || (x = 22) )); echo $x'
+check arith-or-runs     '33'        0 'x=11; (( 0 || (x = 33) )); echo $x'
+check arith-and-skips   '11'        0 'x=11; (( 0 && (x = 44) )); echo $x'
+check arith-and-runs    '55'        0 'x=11; (( 1 && (x = 55) )); echo $x'
+check arith-ternary-t   '2'         0 'x=1; (( 1 ? (x=2) : (x=3) )); echo $x'
+check arith-ternary-f   '3'         0 'x=1; (( 0 ? (x=2) : (x=3) )); echo $x'
+check arith-comma       '42
+last=6'                             0 'a=(4 5 6); echo $(( a, last = a[2], 42 )); echo last=$last'
+# [[ ]] evaluates -eq operands as arithmetic; [ ] does not.
+check arith-cond-eq     'yes'       0 'e=1+2; [[ e -eq 3 ]] && echo yes'
+check arith-test-noeval 'st=2'      0 'e=1+2; [ e -eq 3 ] 2>/dev/null; echo st=$?'
+
 # --- declaration utilities and command-scoped assignments ------------------
 # Expectations diffed against bash before being written down.
 # declare/typeset/local are declaration utilities too: no splitting, no glob.

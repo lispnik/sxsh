@@ -2035,7 +2035,20 @@ removal, but NO field splitting or globbing -- that is the whole point of the
       ;; code-point order, which agrees for the C locale.
       ((string= op "<") (string< l (cond-word sh right)))
       ((string= op ">") (string> l (cond-word sh right)))
-      ;; Arithmetic and file comparisons: hand to the `test' evaluator.
+      ;; The numeric operators evaluate their operands as ARITHMETIC here,
+      ;; which `[ ]' does not: `e=1+2; [[ e -eq 3 ]]' is true, while
+      ;; `[ e -eq 3 ]' is an "integer expression expected" error.
+      ((member op '("-eq" "-ne" "-lt" "-le" "-gt" "-ge") :test #'string=)
+       (let ((a (ignore-errors (eval-arith sh l)))
+             (b (ignore-errors (eval-arith sh (cond-word sh right)))))
+         (and a b
+              (cond ((string= op "-eq") (= a b))
+                    ((string= op "-ne") (/= a b))
+                    ((string= op "-lt") (< a b))
+                    ((string= op "-le") (<= a b))
+                    ((string= op "-gt") (> a b))
+                    ((string= op "-ge") (>= a b))))))
+      ;; File comparisons: hand to the `test' evaluator.
       (t (handler-case (eval-test (list l op (cond-word sh right)))
            (error () nil))))))
 
