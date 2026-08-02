@@ -13,6 +13,9 @@
                 #:simple-command-words #:simple-command-redirects
                 #:assignment #:assignment-name #:assignment-value
                 #:assignment-append
+                #:arith-command #:arith-command-expr #:arith-command-redirects
+                #:arith-for #:arith-for-init #:arith-for-cond #:arith-for-step
+                #:arith-for-body #:arith-for-redirects
                 #:redirect #:redirect-op #:redirect-fd #:redirect-target
                 #:redirect-heredoc
                 #:subshell #:subshell-body #:subshell-redirects
@@ -52,4 +55,6 @@
     (until-clause :until)
     (case-clause :case)
     (function-def :func)
+    (arith-command :arith)
+    (arith-for :arith-for)
     (t (error "unknown AST node ~S" node))))

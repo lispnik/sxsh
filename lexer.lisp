@@ -310,6 +310,49 @@ instead of replacing it. The `+' belongs to the operator, not the name, so
 ;;; The main entry: NEXT-TOKEN
 ;;; ---------------------------------------------------------------------------
 
+(defun arith-command-end (lx)
+  "True if a `((' at point has a matching `))'. Scans a copy of the position so
+the caller is unaffected."
+  (let ((s (lexer-string lx)) (i (+ (lexer-pos lx) 2)) (n (lexer-len lx))
+        (depth 1))
+    (loop while (< i n) do
+      (let ((c (char s i)))
+        (cond
+          ((char= c #\() (incf depth) (incf i))
+          ((char= c #\))
+           (decf depth)
+           (when (zerop depth)
+             ;; the closing `)' of the inner group must be followed by another
+             (return-from arith-command-end
+               (and (< (1+ i) n) (char= (char s (1+ i)) #\)))))
+           (incf i))
+          ((char= c #\') (let ((j (position #\' s :start (1+ i))))
+                           (setf i (if j (1+ j) n))))
+          (t (incf i)))))
+    nil))
+
+(defun scan-arith-command (lx)
+  "Consume `((expr))' and return EXPR."
+  (lx-advance lx) (lx-advance lx)        ; ((
+  (let ((out (make-array 0 :element-type 'character
+                           :adjustable t :fill-pointer t))
+        (depth 1))
+    (loop
+      (when (lx-eof-p lx)
+        (parse-error* (lexer-line lx) (lexer-column lx)
+                      "unterminated (( ))"))
+      (let ((c (lx-peek lx)))
+        (cond
+          ((char= c #\() (incf depth) (vector-push-extend (lx-advance lx) out))
+          ((char= c #\))
+           (decf depth)
+           (when (zerop depth)
+             (lx-advance lx) (lx-advance lx)   ; ))
+             (return))
+           (vector-push-extend (lx-advance lx) out))
+          (t (vector-push-extend (lx-advance lx) out)))))
+    (coerce out 'string)))
+
 (defun next-token (lx &key command-position accept-assignment)
   "Return the next TOKEN. When COMMAND-POSITION is true, a bare word that is a
 valid NAME may be tagged :name (used for function-def / for / case detection);
@@ -329,6 +372,15 @@ are returned as :assignment-word."
         ;; { and } as standalone tokens only matter to the parser as reserved
         ;; words; lexically they are word constituents. But when they stand
         ;; alone we still emit words and let the parser test reserved-ness.
+        ;; bash `((expr))' arithmetic command / `for ((init;cond;step))'.
+        ;; Recognised only in command position, and only when a matching `))'
+        ;; exists -- otherwise `((a); (b))' would stop being a subshell whose
+        ;; first element is a subshell. bash resolves the ambiguity the same
+        ;; way, toward arithmetic.
+        ((and (char= c #\() (eql (lx-peek lx 1) #\()
+              (arith-command-end lx))
+         (let ((text (scan-arith-command lx)))
+           (make-token :dlparen text line col)))
         ;; Operators:
         ((member c +operator-start+ :test #'char=)
          ;; { and } are NOT operators lexically; skip them here so they fold

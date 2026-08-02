@@ -755,6 +755,47 @@ check bx-read-u-d       '[a]'           0 'read -u 3 -d : x 3<<<"a:b"; echo "[$x
 check bx-read-t-poll    '0'             0 'read -t 0 </dev/null; echo $?'
 check bx-read-s         '[hi]'          0 'echo hi | { read -s x; echo "[$x]"; }'
 
+# --- bash extensions (tranche 4: syntax) -----------------------------------
+# case fall-through: `;&' runs the next body without testing it, `;;&' keeps
+# testing the patterns that follow
+check bx-case-fall      '1
+2'                                      0 'case a in a) echo 1;& b) echo 2;; esac'
+check bx-case-retest    '1
+2'                                      0 'case a in a) echo 1;;& a*) echo 2;; esac'
+check bx-case-fall-chain '1
+2
+3'                                      0 'case a in a) echo 1;& b) echo 2;& c) echo 3;; esac'
+check bx-case-retest-miss '1'           0 'case a in a) echo 1;;& z) echo 2;; esac'
+check bx-case-mixed     '1
+2
+3'                                      0 'case ab in a*) echo 1;;& *b) echo 2;;& *) echo 3;; esac'
+check bx-case-fall-empty '2'            0 'case a in a) ;& b) echo 2;; esac'
+check bx-case-plain     '1'             0 'case a in a) echo 1;; b) echo 2;; esac'
+# ((expr)) -- status is INVERTED from the value, so 0 is false as in C
+check bx-arith-cmd      'y'             0 '((1+1)) && echo y'
+check bx-arith-false    'n'             0 '((0)) && echo y || echo n'
+check bx-arith-status1  '0'             0 '((1)); echo $?'
+check bx-arith-status0  '1'             0 '((0)); echo $?'
+check bx-arith-compare  'big'           0 'x=5; ((x > 3)) && echo big'
+check bx-arith-incr     '1'             0 'x=0; ((x++)); echo $x'
+check bx-arith-preincr  '1'             0 'x=0; ((++x)); echo $x'
+check bx-arith-mul-eq   '6'             0 'x=2; ((x*=3)); echo $x'
+check bx-arith-if       'lt'            0 'if ((1<2)); then echo lt; fi'
+check bx-arith-while    '123'           0 'x=1; while ((x<=3)); do printf %s $x; ((x++)); done; echo'
+# for ((init; cond; step))
+check bx-arith-for      '012'           0 'for ((i=0;i<3;i++)); do printf %s $i; done; echo'
+check bx-arith-for-down '321'           0 'for ((i=3;i>0;i--)); do printf %s $i; done; echo'
+check bx-arith-for-step '024'           0 'for ((i=0;i<5;i+=2)); do printf %s $i; done; echo'
+check bx-arith-for-break '01'           0 'for ((i=0;i<5;i++)); do [ $i -eq 2 ] && break; printf %s $i; done; echo'
+check bx-arith-for-cont '023'           0 'for ((i=0;i<4;i++)); do [ $i -eq 1 ] && continue; printf %s $i; done; echo'
+check bx-arith-for-nest '00 01 10 11 '  0 'for ((i=0;i<2;i++)); do for ((j=0;j<2;j++)); do printf "%s%s " $i $j; done; done; echo'
+check bx-arith-for-noinit '910'         0 'i=9; for ((;i<11;i++)); do printf %s $i; done; echo'
+check bx-arith-for-nosemi '012'         0 'for ((i=0;i<3;i++)) do printf %s $i; done; echo'
+# (( )) must not swallow nested subshells
+check bx-subshell-nest  'a
+b'                                      0 '( (echo a); (echo b) )'
+check bx-subshell-deep  'n'             0 '( ( echo n ) )'
+
 # --- stdin / REPL mode ----------------------------------------------------
 got=$(printf 'echo from-stdin\nexit 0\n' | "$SXSH" 2>/dev/null)
 if printf '%s' "$got" | grep -q 'from-stdin'; then

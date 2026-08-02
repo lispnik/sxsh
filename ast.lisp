@@ -37,6 +37,17 @@
   target
   heredoc)                              ; (delimiter body quoted-p strip-p) once collected
 
+;;; bash `((expr))' -- evaluate arithmetic, status 0 if non-zero
+(defstruct (arith-command (:include node)
+                          (:constructor make-arith-command (expr redirects)))
+  (expr "" :type string)
+  redirects)
+
+;;; bash `for ((init; cond; step)) do ... done'
+(defstruct (arith-for (:include node)
+                      (:constructor make-arith-for (init cond step body redirects)))
+  init cond step body redirects)
+
 ;;; simple command: assignments + words + redirects, any of which may be empty
 (defstruct (simple-command (:include node)
                            (:constructor make-simple-command (assignments words redirects)))

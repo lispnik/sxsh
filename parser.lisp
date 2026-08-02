@@ -220,6 +220,11 @@ It is NOT the keyword when followed by a pipe/operator/terminator (e.g.
     ((reservedp p "while") (parse-while p))
     ((reservedp p "until") (parse-until p))
     ((reservedp p "case")  (parse-case p))
+    ;; bash `((expr))' as a command
+    ((eq (cur-type p) :dlparen)
+     (let ((expr (cur-text p)))
+       (advance p)
+       (make-arith-command expr (parse-redirect-list p))))
     ;; function definition:  NAME ( )   -- and bash's `function NAME [()]'
     ((and (reservedp p "function") (function-keyword-ahead-p p))
      (parse-function-keyword-def p))
@@ -460,6 +465,10 @@ Returns a COMPLETE-COMMAND node (reusing the same structure)."
 
 (defun parse-for (p)
   (advance p)                           ; for
+  ;; bash C-style `for ((init; cond; step))'. The lexer already delivered the
+  ;; whole `((...))' as one token, so the three clauses are split here.
+  (when (eq (cur-type p) :dlparen)
+    (return-from parse-for (parse-arith-for p)))
   (unless (and (eq (cur-type p) :word) (valid-name-p (cur-text p)))
     (perr p "expected name after 'for'"))
   (let ((name (cur-text p))
@@ -488,6 +497,37 @@ Returns a COMPLETE-COMMAND node (reusing the same structure)."
 ;;; ---------------------------------------------------------------------------
 ;;; case
 ;;; ---------------------------------------------------------------------------
+
+(defun parse-arith-for (p)
+  "bash: for ((init; cond; step)) do ... done"
+  (let ((parts (split-arith-for-clauses (cur-text p))))
+    (advance p)
+    ;; an optional `;' or newline may separate the header from `do'
+    (loop while (member (cur-type p) '(:semi :newline)) do (advance p))
+    (unless (reservedp p "do") (perr p "expected 'do' after for (( ))"))
+    (advance p)
+    (let ((body (parse-compound-list p)))
+      (unless (reservedp p "done") (perr p "expected 'done'"))
+      (advance p)
+      (make-arith-for (first parts) (second parts) (third parts)
+                      body (parse-redirect-list p)))))
+
+(defun split-arith-for-clauses (text)
+  "Split `init; cond; step' on top-level semicolons. An omitted clause is the
+empty string, which the executor reads as `absent' -- an empty condition is
+true, as in C."
+  (let ((parts '()) (start 0) (depth 0) (n (length text)) (i 0))
+    (loop while (< i n) do
+      (let ((c (char text i)))
+        (cond
+          ((char= c #\() (incf depth) (incf i))
+          ((char= c #\)) (decf depth) (incf i))
+          ((and (char= c #\;) (zerop depth))
+           (push (subseq text start i) parts) (setf start (1+ i)) (incf i))
+          (t (incf i)))))
+    (push (subseq text start) parts)
+    (let ((out (nreverse parts)))
+      (list (or (first out) "") (or (second out) "") (or (third out) "")))))
 
 (defun parse-case (p)
   (advance p)                           ; case

@@ -150,7 +150,9 @@ because the trap's own `echo' overwrote the 3."
                 (:while    (exec-while sh node nil))
                 (:until    (exec-while sh node t))
                 (:case     (exec-case sh node))
-                (:func     (exec-func-def sh node)))
+                (:func     (exec-func-def sh node))
+                (:arith    (exec-arith-command sh node))
+                (:arith-for (exec-arith-for sh node)))
             (shell-unset-var (e)
               (format *error-output* "sxsh: ~A~%" e)
               ;; set -u in a non-interactive shell is fatal
@@ -1081,6 +1083,39 @@ and run it in-process. State changes (cd, var sets) are rolled back."
                         (signal 'loop-break :n (1- (cf-n e))))))
     status))
 
+(defun exec-arith-command (sh node)
+  "bash `((expr))': evaluate, status 0 when the value is non-zero.
+
+The inverted sense is deliberate and is what makes `((i < n))' usable as a
+loop condition -- an arithmetic 0 is false, like C."
+  (exec-with-redirects
+   sh (arith-command-redirects node)
+   (lambda ()
+     (if (zerop (eval-arith sh (arith-command-expr node))) 1 0))))
+
+(defun exec-arith-for (sh node)
+  "bash `for ((init; cond; step)) do ... done'."
+  (exec-with-redirects
+   sh (arith-for-redirects node)
+   (lambda ()
+     (let ((status 0))
+       (unless (string= (string-trim " " (arith-for-init node)) "")
+         (eval-arith sh (arith-for-init node)))
+       (loop
+         ;; An omitted condition is true, as in C.
+         (let ((test (arith-for-cond node)))
+           (unless (or (string= (string-trim " " test) "")
+                       (/= 0 (eval-arith sh test)))
+             (return status)))
+         (handler-case (setf status (exec-node sh (arith-for-body node)))
+           (loop-break (e)
+             (when (> (cf-n e) 1) (signal 'loop-break :n (1- (cf-n e))))
+             (return status))
+           (loop-continue (e)
+             (when (> (cf-n e) 1) (signal 'loop-continue :n (1- (cf-n e))))))
+         (unless (string= (string-trim " " (arith-for-step node)) "")
+           (eval-arith sh (arith-for-step node))))))))
+
 (defun exec-case (sh node)
   (exec-with-redirects
    sh (case-clause-redirects node)
@@ -1089,19 +1124,31 @@ and run it in-process. State changes (cd, var sets) are rolled back."
 (defun exec-case-1 (sh node)
   (let ((word (first (expand-word-to-fields sh (word-text (case-clause-word node))
                                             :split nil :glob nil)))
-        (status 0))
+        (status 0)
+        ;; bash `;&' runs the NEXT clause's body without testing its pattern.
+        (falling nil))
     (setf word (or word ""))
-    (dolist (item (case-clause-items node) status)
-      (when (some (lambda (pat)
-                    ;; Render with quoting preserved: plain quote removal would
-                    ;; turn `a\*b' into a live wildcard.
-                    (let ((p (xchars->pattern
-                              (expand-pass sh (word-text pat) :tilde nil))))
-                      (shell-pattern-match (or p "") word)))
-                  (case-item-patterns item))
-        (return (if (case-item-body item)
-                    (exec-node sh (case-item-body item))
-                    0))))))
+    (flet ((matches-p (item)
+             (some (lambda (pat)
+                     ;; Render with quoting preserved: plain quote removal
+                     ;; would turn `a\*b' into a live wildcard.
+                     (let ((p (xchars->pattern
+                               (expand-pass sh (word-text pat) :tilde nil))))
+                       (shell-pattern-match (or p "") word)))
+                   (case-item-patterns item))))
+      (dolist (item (case-clause-items node) status)
+        (when (or falling (matches-p item))
+          (setf status (if (case-item-body item)
+                           (exec-node sh (case-item-body item))
+                           0))
+          (ecase (or (case-item-terminator item) :\;\;)
+            ;; `;;' -- done.
+            (:\;\; (return status))
+            ;; `;&' -- fall through into the next body unconditionally.
+            (:\;& (setf falling t))
+            ;; `;;&' -- stop falling through, but keep testing the patterns
+            ;; that follow, so more than one clause can run.
+            (:\;\;& (setf falling nil))))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Background execution & waiting

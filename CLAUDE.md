@@ -349,9 +349,19 @@ Tranche 3 added the builtin batch: `printf -v` and `%q`, and `read`'s `-n -N -d 
 delimiter *and* skips IFS trimming entirely. `read -s` echoes its newline only on a terminal;
 unconditionally meant a stray blank line in every piped `read -s`.
 
-Still missing, roughly in the order worth doing: `for ((;;))` and `((expr))`; `select`;
-`case ;&` and `;;&`; `shopt` and extglob; process substitution; `trap ERR`/`DEBUG`; then the two
-big ones, `[[ ]]` with `=~`, and arrays
+Tranche 4 added syntax: `case` fall-through (`;&` runs the next body without testing it, `;;&`
+keeps testing the patterns that follow -- the parser already recorded both terminators, only
+`exec-case` ignored them), plus `((expr))` and `for ((init;cond;step))`.
+
+`((` is lexed as a single `:dlparen` token carrying the inner text, recognised whenever a
+matching `))` follows. It deliberately does NOT check for command position -- the parser never
+passes that flag -- so `((a); (b))` stops being a subshell-of-subshell. bash resolves the same
+ambiguity the same way, and `( (a); (b) )` with spaces is unaffected. Note `((expr))`'s status
+is INVERTED from the value: an arithmetic 0 is false, which is what makes `((i < n))` work as a
+loop condition.
+
+Still missing, roughly in the order worth doing: `select`; `shopt` and extglob; process
+substitution; `trap ERR`/`DEBUG`; then the two big ones, `[[ ]]` with `=~`, and arrays
 -- which drag in `declare`/`local` options, `PIPESTATUS`, `read -a`, `mapfile` and namerefs, and
 which touch the variable model everywhere, so they want their own tranche.
 
