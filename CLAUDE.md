@@ -404,6 +404,24 @@ or a group matched inside a rejected branch leaks into `BASH_REMATCH`; and a quo
 the `=~` operand is escaped rather than quote-removed, so `[[ $x =~ "a.c" ]]` wants a literal
 dot.
 
+**It memoises failures, and must keep doing so.** A plain backtracker goes exponential on
+patterns like `^(a+)+$`: it tries every way to split the input into groups and each one fails at
+the same place. 26 characters took 5.44s and every further two roughly quadrupled it, so a regex
+reaching `[[ =~ ]]` from untrusted input could hang the shell. `*rx-memo*` records
+(NODE . POSITION) pairs already known to fail and skips the subtree on a revisit; 200 characters
+now finish in milliseconds.
+
+Soundness rests on one property: a node's CONTINUATION is structurally fixed within an attempt.
+What must match after a node is decided by where it sits in the tree -- the rest of its
+concatenation, then its parent's -- and that is the same on every visit, including visits from
+different iterations of an enclosing repetition. So a failure at (node, position) is permanent
+for that attempt. Only failures are cached, since a success is consumed by the caller and never
+re-asked; the table resets per starting position, because anchoring differs there. A step
+ceiling backstops anything the memo cannot tame.
+
+The tests pair each blowup pattern with a case that must still MATCH, so a broken memo cannot
+pass by returning nil everywhere.
+
 Tranche 7 added `shopt` (a namespace separate from `set -o`, as in bash), the `ERR` and `DEBUG`
 traps, and `select`. `nullglob` and `dotglob` genuinely take effect rather than merely being
 remembered -- a shopt that is stored and ignored is worse than an absent one, because scripts
