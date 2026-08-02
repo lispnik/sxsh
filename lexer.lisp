@@ -184,31 +184,69 @@ of the line was read as a new one (\"unterminated single-quoted string\")."
 
 (defun scan-balanced (lx out open close)
   "Consume from an already-open OPEN paren/brace to its matching CLOSE,
-tracking nesting, quotes and nested substitutions. Assumes point is on OPEN."
-  (let ((depth 0))
-    (loop
-      (when (lx-eof-p lx)
-        (parse-error* (lexer-line lx) (lexer-column lx)
-                      "unterminated substitution (expected ~C)" close))
-      (let ((c (lx-peek lx)))
-        (cond
-          ((char= c open)
-           (incf depth) (vector-push-extend (lx-advance lx) out))
-          ((char= c close)
-           (decf depth) (vector-push-extend (lx-advance lx) out)
-           (when (zerop depth) (return)))
-          ((and (char= c #\$) (eql (lx-peek lx 1) #\')) (scan-dollar-quote lx out))
-          ((char= c #\') (scan-single-quote lx out))
-          ((char= c #\") (scan-double-quote lx out))
-          ((char= c #\`) (scan-backquote lx out))
-          ((char= c #\\)
-           (vector-push-extend (lx-advance lx) out)
-           (unless (lx-eof-p lx) (vector-push-extend (lx-advance lx) out)))
-          ((and (char= c #\$) (eql (lx-peek lx 1) #\())
-           (scan-dollar-paren lx out))
-          ((and (char= c #\$) (eql (lx-peek lx 1) #\{))
-           (scan-dollar-brace lx out))
-          (t (vector-push-extend (lx-advance lx) out)))))))
+tracking nesting, quotes and nested substitutions. Assumes point is on OPEN.
+
+A `)' that ends a CASE PATTERN has no opening paren to balance it, so plain
+counting stops too early: `$(case $x in a) echo A;; esac)' ended the word at
+`a)', and the rest was then parsed as separate commands -- `echo A' ran and
+`;;' became a syntax error. Words are tracked well enough to count `case' and
+`esac', and while a case statement is open an otherwise-unbalanced CLOSE is
+taken as a pattern terminator.
+
+`case' counts only in command position, so `$(echo case)' does not open one:
+a false positive would scan to end of input looking for a close that is
+already behind it."
+  (let ((depth 0) (case-depth 0) (cmd-pos t)
+        (word (make-string-output-stream))
+        (casep (char= close #\))))
+    (labels ((take () (vector-push-extend (lx-advance lx) out))
+             (finish-word ()
+               (let ((w (get-output-stream-string word)))
+                 (when (plusp (length w))
+                   (when (and casep cmd-pos (string= w "case")) (incf case-depth))
+                   (when (and casep (string= w "esac"))
+                     (setf case-depth (max 0 (1- case-depth))))
+                   ;; `in' is the one word after which patterns follow.
+                   (setf cmd-pos (string= w "in"))))))
+      (loop
+        (when (lx-eof-p lx)
+          (parse-error* (lexer-line lx) (lexer-column lx)
+                        "unterminated substitution (expected ~C)" close))
+        (let ((c (lx-peek lx)))
+          (cond
+            ((char= c open)
+             (finish-word) (incf depth) (take) (setf cmd-pos t))
+            ((char= c close)
+             (finish-word)
+             (cond
+               ((> depth 1) (decf depth) (take) (setf cmd-pos nil))
+               ((and (= depth 1) (plusp case-depth)) (take) (setf cmd-pos t))
+               (t (decf depth) (take) (when (zerop depth) (return)))))
+            ((and (char= c #\$) (eql (lx-peek lx 1) #\'))
+             (finish-word) (scan-dollar-quote lx out) (setf cmd-pos nil))
+            ((char= c #\') (finish-word) (scan-single-quote lx out)
+                           (setf cmd-pos nil))
+            ((char= c #\") (finish-word) (scan-double-quote lx out)
+                           (setf cmd-pos nil))
+            ((char= c #\`) (finish-word) (scan-backquote lx out)
+                           (setf cmd-pos nil))
+            ((char= c #\\)
+             (finish-word) (setf cmd-pos nil)
+             (take)
+             (unless (lx-eof-p lx) (take)))
+            ((and (char= c #\$) (eql (lx-peek lx 1) #\())
+             (finish-word) (scan-dollar-paren lx out) (setf cmd-pos nil))
+            ((and (char= c #\$) (eql (lx-peek lx 1) #\{))
+             (finish-word) (scan-dollar-brace lx out) (setf cmd-pos nil))
+            ((or (alphanumericp c) (char= c #\_))
+             (write-char c word) (take))
+            (t
+             (finish-word)
+             (cond
+               ((member c '(#\; #\& #\| #\Newline)) (setf cmd-pos t))
+               ((member c '(#\Space #\Tab)))     ; blanks keep the position
+               (t (setf cmd-pos nil)))
+             (take))))))))
 
 (defun scan-dollar-paren (lx out)
   "$( ... ) command substitution (also handles $(( )) arithmetic naturally)."

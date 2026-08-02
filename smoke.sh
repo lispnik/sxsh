@@ -245,6 +245,29 @@ check set-allexport     '1'          0 'set -a; V=x; env | grep -c "^V=x"'
 check set-noexec        ''           0 'set -n; echo NOTRUN'
 check set-invalid-opt   ''           2 'set -Z 2>/dev/null'
 
+# --- command substitution: case patterns, backtick escapes -----------------
+# Expectations diffed against bash before being written down.
+# A `)' ending a case pattern has no opening paren, so plain counting stopped
+# the substitution at the first one.
+check cs-case-in-sub   'letter'  0 'echo $(foo=a; case $foo in [0-9]) echo number;; [a-z]) echo letter ;; esac)'
+check cs-case-simple   'm'       0 'echo $(case x in x) echo m;; esac)'
+check cs-case-paren    'paren'   0 'echo $(case x in (x) echo paren;; esac)'
+check cs-case-nested   'nested'  0 'echo $(case x in x) case y in y) echo nested;; esac;; esac)'
+check cs-case-inner-sub 'inner'  0 'v=$(case $(echo p) in p) echo inner;; esac); echo $v'
+# ...but `case' only counts in command position, or these would scan past the
+# close that is already behind them.
+check cs-case-as-word  'case esac case x' 0 'echo $(echo case) $(echo esac) $(echo "case x")'
+check cs-case-operand  'case'    0 'echo ${x:-case}'
+check cs-case-array    'case esac' 0 'a=(case esac); echo "${a[@]}"'
+check cs-paren-quoted  'a)b'     0 'echo $(echo "a)b")'
+check cs-subshell      'sub'     0 'x=$( (echo sub) ); echo "$x"'
+# Inside backticks a backslash also escapes " -- but only when the backticks
+# are themselves inside double quotes. $() never does this; that asymmetry is
+# the point, and virtualenv's bin/activate relies on it.
+check cs-bq-dq-escape  'x hi'    0 'echo "x `echo \"hi\"`"'
+check cs-bq-bare       '"hi"'    0 'echo `echo \"hi\"`'
+check cs-dollar-escape 'x "hi"'  0 'echo "x $(echo \"hi\")"'
+
 # --- globbing: escaped members, bracket literals, globskipdots -------------
 # Expectations diffed against bash before being written down.
 gdir="$tmp/glob"; mkdir -p "$gdir"; : > "$gdir/foo.-"; : > "$gdir/c.C"

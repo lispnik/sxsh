@@ -307,7 +307,8 @@ EMIT-FIELD-SEP, when provided, emits an explicit field boundary (used for
            (emit-expansion str emit :quoted)
            (setf i next)))
         ((char= c #\`)
-         (multiple-value-bind (str next) (expand-backquote sh raw i n)
+         (multiple-value-bind (str next)
+             (expand-backquote sh raw i n :in-dquotes t)
            (dolist (ch (coerce str 'list)) (funcall emit ch :quoted))
            (setf i next)))
         (t (funcall emit c :quoted) (incf i))))))
@@ -545,25 +546,61 @@ splitting, joined \"$*\" with nothing, and made `read' split on spaces only."
 
 (defun scan-until-close (raw start n open close initial-depth)
   "From START, find the matching CLOSE at depth 0, honoring quotes. Returns
-(values inner-string index-past-close)."
-  (let ((depth initial-depth) (i start))
-    (loop
-      (when (>= i n) (error "unterminated expansion (missing ~C)" close))
-      (let ((c (char raw i)))
-        (cond
-          ((char= c #\') (incf i)
-           (loop while (and (< i n) (char/= (char raw i) #\')) do (incf i))
-           (incf i))
-          ((char= c #\") (incf i)
-           (loop while (and (< i n) (char/= (char raw i) #\"))
-                 do (when (char= (char raw i) #\\) (incf i)) (incf i))
-           (incf i))
-          ((char= c #\\) (incf i 2))
-          ((char= c open) (incf depth) (incf i))
-          ((char= c close) (decf depth)
-           (if (zerop depth) (return (values (subseq raw start i) (1+ i)))
-               (incf i)))
-          (t (incf i)))))))
+(values inner-string index-past-close).
+
+A `)' that ends a CASE PATTERN is not a closing paren, and it has no opening
+one to balance it: `$(case $x in a) echo A;; esac)' ended the substitution at
+`a)', leaving `echo A;; esac)' to be parsed as a separate command. Words are
+therefore tracked well enough to count `case' and `esac', and while a case
+statement is open an unbalanced CLOSE is taken as a pattern terminator.
+
+`case' only counts in command position, so `echo case' does not open one --
+a false positive there would swallow the rest of the input looking for a
+close that never comes."
+  (let ((depth initial-depth) (i start) (case-depth 0) (cmd-pos t))
+    (flet ((word-at (k)
+             ;; The run of name characters starting at K, or NIL.
+             (let ((e k))
+               (loop while (and (< e n)
+                                (or (alphanumericp (char raw e))
+                                    (char= (char raw e) #\_)))
+                     do (incf e))
+               (and (> e k) (values (subseq raw k e) e)))))
+      (loop
+        (when (>= i n) (error "unterminated expansion (missing ~C)" close))
+        (let ((c (char raw i)))
+          (cond
+            ((char= c #\') (incf i)
+             (loop while (and (< i n) (char/= (char raw i) #\')) do (incf i))
+             (incf i) (setf cmd-pos nil))
+            ((char= c #\") (incf i)
+             (loop while (and (< i n) (char/= (char raw i) #\"))
+                   do (when (char= (char raw i) #\\) (incf i)) (incf i))
+             (incf i) (setf cmd-pos nil))
+            ((char= c #\\) (incf i 2) (setf cmd-pos nil))
+            ;; A separator puts us back in command position.
+            ((member c '(#\; #\& #\| #\Newline)) (incf i) (setf cmd-pos t))
+            ((member c '(#\Space #\Tab)) (incf i))
+            ((char= c open) (incf depth) (incf i) (setf cmd-pos t))
+            ((char= c close)
+             (cond
+               ((> depth 1) (decf depth) (incf i) (setf cmd-pos nil))
+               ;; Unbalanced, but a case is open: this ends a pattern.
+               ((and (= depth 1) (plusp case-depth)) (incf i) (setf cmd-pos t))
+               (t (decf depth)
+                  (if (zerop depth)
+                      (return (values (subseq raw start i) (1+ i)))
+                      (progn (incf i) (setf cmd-pos nil))))))
+            (t
+             (multiple-value-bind (w e) (word-at i)
+               (cond
+                 (w (when (and cmd-pos (string= w "case")) (incf case-depth))
+                    (when (string= w "esac")
+                      (setf case-depth (max 0 (1- case-depth))))
+                    ;; `in' keeps us in the position where patterns follow.
+                    (setf cmd-pos (string= w "in"))
+                    (setf i e))
+                 (t (setf cmd-pos nil) (incf i)))))))))))
 
 ;;; ${...} with the common operators
 (defun expand-braced-param (sh body)
@@ -963,16 +1000,23 @@ enough to keep quoted metacharacters inert."
 ;;; Backquote command substitution
 ;;; ---------------------------------------------------------------------------
 
-(defun expand-backquote (sh raw i n)
-  "RAW[i] is `. Returns (values output next-index)."
-  (let ((j (1+ i)) (buf (make-string-output-stream)))
+(defun expand-backquote (sh raw i n &key in-dquotes)
+  "RAW[i] is `. Returns (values output next-index).
+
+Inside backticks a backslash escapes ` \ and $, and -- when the backticks
+themselves sit inside DOUBLE QUOTES -- also \" (POSIX 2.6.3). So
+`echo \"x `echo \\\"hi\\\"`\"' prints `x hi': the escaped quotes become real
+quotes for the inner command. The $() form does NOT do this, which is the whole
+point of the distinction; virtualenv's bin/activate depends on it."
+  (let ((j (1+ i)) (buf (make-string-output-stream))
+        (escapable (if in-dquotes '(#\` #\\ #\$ #\") '(#\` #\\ #\$))))
     (loop
       (when (>= j n) (error "unterminated backquote"))
       (let ((c (char raw j)))
         (cond
           ((char= c #\`) (incf j) (return))
           ((and (char= c #\\) (< (1+ j) n)
-                (member (char raw (1+ j)) '(#\` #\\ #\$)))
+                (member (char raw (1+ j)) escapable))
            (write-char (char raw (1+ j)) buf) (incf j 2))
           (t (write-char c buf) (incf j)))))
     (values (command-substitute sh (get-output-stream-string buf)) j)))
