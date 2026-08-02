@@ -833,6 +833,13 @@ the same name may legitimately reappear once we have moved on to a later word."
             (rest words)
             (not (member (second words) '("-v" "-V") :test #'string=)))
        (exec-command-bypass sh node (rest words)))
+      ;; `builtin NAME ...' : NAME must be a builtin, and it runs HERE rather
+      ;; than through a nested dispatch, so `builtin break' really breaks the
+      ;; enclosing loop and `builtin exit 5' really exits. The prefixes nest
+      ;; and compose with `command', so `command builtin exit 5' and
+      ;; `builtin command return 99' both work.
+      ((and (string= (first words) "builtin") (rest words))
+       (exec-builtin-prefix sh node (rest words)))
       ;; function call
       ((gethash (first words) (shell-functions sh))
        (call-function sh (gethash (first words) (shell-functions sh)) words node))
@@ -885,6 +892,25 @@ stopped job and return; otherwise return its exit status."
   "PATH used by `command -p': a default guaranteed to find the standard
 utilities, regardless of what the caller has done to $PATH.")
 
+(defun exec-builtin-prefix (sh node cmd-words)
+  "Run `builtin NAME args'. NAME must be a shell builtin; a function or an
+external of the same name is not consulted.
+
+Further `builtin' and `command' prefixes are stripped first: bash accepts any
+mix of them, and the innermost name is what runs."
+  (loop while (and cmd-words
+                   (member (first cmd-words) '("builtin" "command")
+                           :test #'string=)
+                   (rest cmd-words))
+        do (pop cmd-words))
+  (cond
+    ((null cmd-words) 0)
+    ((builtin-p (first cmd-words))
+     (run-builtin sh (first cmd-words) (rest cmd-words) node))
+    (t (format *error-output* "builtin: ~A: not a shell builtin~%"
+               (first cmd-words))
+       1)))
+
 (defun exec-command-bypass (sh node cmd-words)
   "Run `command NAME args`: NAME resolves to a builtin or external, never a
 function. Redirections and assignments on NODE still apply."
@@ -904,6 +930,10 @@ function. Redirections and assignments on NODE still apply."
         (command-bypass-1 sh node cmd-words))))
 
 (defun command-bypass-1 (sh node cmd-words)
+  ;; `command builtin exit 5': hand the rest to the builtin prefix, which runs
+  ;; it in THIS context so the control-flow builtins still take effect.
+  (when (and (string= (first cmd-words) "builtin") (rest cmd-words))
+    (return-from command-bypass-1 (exec-builtin-prefix sh node (rest cmd-words))))
   (let ((name (first cmd-words)))
     (cond
       ((builtin-p name)
@@ -1516,6 +1546,18 @@ and run it in-process. State changes (cd, var sets) are rolled back."
                         (signal 'loop-break :n (1- (cf-n e))))))
     status))
 
+(defun expand-word-list (sh words)
+  "Expand a `for'/`select' word list into items.
+
+Brace expansion comes first and can turn one word into several, exactly as in
+EXPAND-COMMAND-WORDS. Calling EXPAND-WORD-TO-FIELDS alone skipped it, so
+`for i in -{a,b}' iterated once over the literal `-{a,b}' -- while the same
+word passed to `echo' expanded correctly, which is what made it look like
+brace expansion worked at all."
+  (loop for w in words
+        append (loop for raw in (brace-expand (word-text w))
+                     append (expand-word-to-fields sh raw))))
+
 (defun exec-for (sh node)
   (exec-with-redirects
    sh (for-clause-redirects node)
@@ -1526,8 +1568,7 @@ and run it in-process. State changes (cd, var sets) are rolled back."
          (words-spec (for-clause-words node))
          (items (if (eq words-spec :default)
                     (coerce (shell-positional sh) 'list)
-                    (loop for w in words-spec
-                          append (expand-word-to-fields sh (word-text w)))))
+                    (expand-word-list sh words-spec)))
          (status 0))
     (handler-case
         (dolist (item items)
@@ -1632,8 +1673,7 @@ sets NAME empty but still runs the body; EOF ends the loop."
      (let* ((raw (select-clause-words node))
             (items (if (eq raw :default)
                        (coerce (shell-positional sh) 'list)
-                       (loop for w in raw
-                             append (expand-word-to-fields sh (word-text w)))))
+                       (expand-word-list sh raw)))
             (status 0))
        (loop
          (print-select-menu items)
