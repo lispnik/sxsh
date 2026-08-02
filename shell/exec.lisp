@@ -1542,8 +1542,14 @@ and run it in-process. State changes (cd, var sets) are rolled back."
                                              (while-clause-body node))))
             (loop-continue (e) (when (> (cf-n e) 1)
                                  (signal 'loop-continue :n (1- (cf-n e)))))))
-      (loop-break (e) (when (> (cf-n e) 1)
-                        (signal 'loop-break :n (1- (cf-n e))))))
+      ;; `break' is the last command executed, and it succeeded, so the loop's
+      ;; status is 0 -- not whatever the body left behind on an EARLIER pass.
+      ;; The signal unwinds before the enclosing and-or can record its own
+      ;; result, so `while true; do x=$((x-1)); [ $x = 0 ] && break; done'
+      ;; kept the 1 from the first iteration's failed test.
+      (loop-break (e) (if (> (cf-n e) 1)
+                          (signal 'loop-break :n (1- (cf-n e)))
+                          (setf status 0))))
     status))
 
 (defun expand-word-list (sh words)
@@ -1578,8 +1584,10 @@ brace expansion worked at all."
               (setf status (exec-node sh (for-clause-body node)))
             (loop-continue (e) (when (> (cf-n e) 1)
                                  (signal 'loop-continue :n (1- (cf-n e)))))))
-      (loop-break (e) (when (> (cf-n e) 1)
-                        (signal 'loop-break :n (1- (cf-n e))))))
+      ;; See EXEC-WHILE-1: a completed `break' leaves status 0.
+      (loop-break (e) (if (> (cf-n e) 1)
+                          (signal 'loop-break :n (1- (cf-n e)))
+                          (setf status 0))))
     status))
 
 (defun exec-arith-command (sh node)
@@ -1751,7 +1759,20 @@ process group. Everything else -- builtins, functions, and compound commands --
 becomes a genuine asynchronous job by re-executing this sxsh binary with `-c`
 on the deparsed source (see ASYNC-COMPOUND); we cannot fork, so re-exec is the
 only way to get a second process. If no re-exec is possible the command falls
-back to running in-process, synchronously."
+back to running in-process, synchronously.
+
+A failure to START the job -- a redirection that cannot be opened, most often
+-- belongs to the job, not to the list that launched it. POSIX gives an
+asynchronous list status 0 regardless, so the diagnostic is printed and 0
+returned. Letting the condition escape aborted the whole list instead: in
+`wc f > nodir/x & echo after' the `echo' never ran."
+  (handler-case (exec-async-1 sh node)
+    (error (e)
+      (format *error-output* "sxsh: ~A~%" e)
+      (finish-output *error-output*)
+      0)))
+
+(defun exec-async-1 (sh node)
   (let ((cmd-text (ignore-errors (deparse node))))
     ;; Each command is classified exactly once and its expanded argv carried
     ;; to the spawn: EXTERNAL-SIMPLE-COMMAND-P expands, and expanding twice

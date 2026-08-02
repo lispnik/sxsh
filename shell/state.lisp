@@ -239,11 +239,18 @@ POSIX requires $PWD to be an absolute pathname, free of . and .. components,
 that actually names the current directory -- so a stale or fabricated PWD is
 ignored rather than believed."
   (let ((p (shell-logical-cwd sh)))
-    (if (and p (plusp (length p)) (char= (char p 0) #\/)
-             (not (path-has-dot-components-p p))
-             (same-directory-p p))
-        p
-        (current-directory))))
+    (cond
+      ((and p (plusp (length p)) (char= (char p 0) #\/)
+            (not (path-has-dot-components-p p))
+            (same-directory-p p))
+       p)
+      ;; The directory may simply be GONE -- `cd d; rmdir ../d' -- in which
+      ;; case getcwd fails and there is no real path to fall back to. Every
+      ;; shell keeps reporting the logical one rather than erroring, which
+      ;; also leaves $OLDPWD usable for the `cd' back out.
+      ((or (ignore-errors (current-directory))
+           (and p (plusp (length p)) p)
+           "")))))
 
 (defun shell-quote (s)
   "Wrap S in single quotes so it survives re-parsing verbatim."

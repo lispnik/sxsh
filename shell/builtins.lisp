@@ -8,6 +8,14 @@
 
 (in-package #:sxsh-shell)
 
+(defun status-byte (n)
+  "An exit status as the byte wait(2) will actually report.
+
+`return 256' is 0 and `return -1' is 255, because only the low 8 bits survive
+the exit status. Passing the number through unchanged made `f() { return 256;
+}; f; echo $?' print 256, a value no wait status can hold."
+  (if n (mod n 256) 0))
+
 (defvar *builtins* (make-hash-table :test 'equal))
 
 (defvar *builtin-help* (make-hash-table :test 'equal)
@@ -827,7 +835,8 @@ the trap began, not the status of the trap's own commands.
 Exit Status:
 N, or the last command's status."
   (signal 'shell-exit
-          :code (cond (args (parse-integer (first args) :junk-allowed t))
+          :code (cond (args (status-byte (parse-integer (first args)
+                                                        :junk-allowed t)))
                       ;; inside a trap, a bare `exit' reports the status that
                       ;; was current when the trap action began
                       (*trap-entry-status*)
@@ -843,8 +852,10 @@ N, the status of the last command executed is used.
 Exit Status:
 N, or the last command's status. Non-zero if used outside a function or a dot
 script."
-  (signal 'func-return :code (if args (parse-integer (first args) :junk-allowed t)
-                                 (shell-last-status sh)))
+  (signal 'func-return
+          :code (if args
+                    (status-byte (parse-integer (first args) :junk-allowed t))
+                    (shell-last-status sh)))
   0)
 
 (define-builtin "break" (sh args out)

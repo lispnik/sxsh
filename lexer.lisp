@@ -226,6 +226,9 @@ already behind it."
              (finish-word) (scan-dollar-quote lx out) (setf cmd-pos nil))
             ((char= c #\') (finish-word) (scan-single-quote lx out)
                            (setf cmd-pos nil))
+            ((and (char= c #\$) (eql (lx-peek lx 1) #\"))
+             (finish-word) (vector-push-extend (lx-advance lx) out)
+             (scan-double-quote lx out) (setf cmd-pos nil))
             ((char= c #\") (finish-word) (scan-double-quote lx out)
                            (setf cmd-pos nil))
             ((char= c #\`) (finish-word) (scan-backquote lx out)
@@ -352,6 +355,12 @@ Detects assignment-word shape as a side product via classify."
                (progn (vector-push-extend (lx-advance lx) out)
                       (unless (lx-eof-p lx) (vector-push-extend (lx-advance lx) out)))))
           ((and (char= c #\$) (eql (lx-peek lx 1) #\')) (scan-dollar-quote lx out))
+          ;; $"..." is a locale-translated string. With no message catalog it
+          ;; is exactly "...", so the $ is carried through and dropped during
+          ;; expansion rather than being scanned as a separate word.
+          ((and (char= c #\$) (eql (lx-peek lx 1) #\"))
+           (vector-push-extend (lx-advance lx) out)
+           (scan-double-quote lx out))
           ((char= c #\') (scan-single-quote lx out))
           ((char= c #\") (scan-double-quote lx out))
           ((char= c #\`) (scan-backquote lx out))

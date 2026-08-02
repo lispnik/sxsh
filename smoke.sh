@@ -245,6 +245,31 @@ check set-allexport     '1'          0 'set -a; V=x; env | grep -c "^V=x"'
 check set-noexec        ''           0 'set -n; echo NOTRUN'
 check set-invalid-opt   ''           2 'set -Z 2>/dev/null'
 
+# --- assorted conformance singles ------------------------------------------
+# Expectations diffed against bash before being written down.
+# `return'/`exit' truncate to the byte a wait status can actually carry.
+check ret-truncate-256  '0'    0 'f(){ return 256; }; f; echo $?'
+check ret-truncate-neg  '255'  0 'f(){ return -1; }; f; echo $?'
+check ret-plain-255     '255'  0 'f(){ return 255; }; f; echo $?'
+# $"..." is a locale-translated string; with no catalog it is exactly "...".
+check dollar-dquote     'foo
+foo x'                         0 'echo $"foo"; x=x; echo $"foo $x"'
+check dollar-dquote-var 'q'    0 'v=$"q"; echo "$v"'
+check dollar-bare       '$'    0 'echo "$"'
+# A completed `break' is the last command executed, so the loop status is 0 --
+# not what an earlier iteration left behind.
+check break-status-while 'st=0' 0 'x=3; while true; do x=$((x-1)); [ $x -eq 0 ] && break; done; echo st=$?'
+check break-status-for  'st=0' 0 'x=3; for i in 1 2 3; do x=$((x-1)); [ $x -eq 0 ] && break; done; echo st=$?'
+check break-status-n    'st=0' 0 'for i in 1 2; do for j in a b; do break 2; done; done; echo st=$?'
+check loop-status-plain 'st=1' 0 'for i in 1 2 3; do false; done; echo st=$?'
+# Failing to START a background job belongs to the job, not to the list: an
+# async list is status 0 either way, and the rest of the line must still run.
+check async-failure-contained 'after' 0 'cd /tmp; wc nosuch > no-such-dir-xyz/x.txt & echo after'
+# pwd keeps working when the directory has been removed underneath us, and
+# $OLDPWD still names it so `cd -' can get back out.
+check pwd-removed-dir   '/tmp/sxsh-gone-a' 0 'mkdir -p /tmp/sxsh-gone-a && cd /tmp/sxsh-gone-a && rmdir /tmp/sxsh-gone-a; pwd'
+check cd-from-removed-dir 'sxsh-gone-b' 0 'mkdir -p /tmp/sxsh-gone-b && cd /tmp/sxsh-gone-b && rmdir /tmp/sxsh-gone-b; cd /tmp; basename "$OLDPWD"'
+
 # --- help ------------------------------------------------------------------
 # Statuses and streams were diffed against bash; the WORDING is ours (bash's
 # help text is GPL and sxsh is MIT, and our options are not bash's anyway).

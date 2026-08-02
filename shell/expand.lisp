@@ -147,6 +147,11 @@ PATH=~/a:~/b rule)."
              (multiple-value-bind (str next) (expand-tilde sh raw i n)
                (dolist (ch (coerce str 'list)) (emit ch :quoted))
                (setf i next start-of-field nil)))
+            ;; $"..." : a locale-translated string. With no message catalog
+            ;; that is exactly "...", so the $ is dropped and the next pass of
+            ;; the loop handles the double quote normally.
+            ((and (char= c #\$) (< (1+ i) n) (char= (char raw (1+ i)) #\"))
+             (incf i))
             ;; $'...' : C-style escapes, otherwise literal (POSIX Issue 8)
             ((and (char= c #\$) (< (1+ i) n) (char= (char raw (1+ i)) #\'))
              (multiple-value-bind (str next) (expand-dollar-quote raw (+ i 2) n)
