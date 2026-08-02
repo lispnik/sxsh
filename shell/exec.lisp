@@ -332,29 +332,52 @@ fixed 'real/user/sys' layout."
   "Run a multi-stage pipeline. Each stage is spawned (external) or run in a
 child for builtins/compounds via a forked spawn of ourselves is not available,
 so builtins in non-final pipeline stages run in-process writing to the pipe."
-  (let ((n (length cmds)) (stages '()) (prev-read nil))
-    ;; STAGES accumulates, in order, one entry per command:
-    ;;   (:pid . PID)     for a spawned external stage
-    ;;   (:status . CODE) for a builtin/compound run in-process
-    (unwind-protect
-         (loop for cmd in cmds for i from 0 do
-           (let* ((last (= i (1- n)))
-                  (rw (unless last (multiple-value-list (sb-posix:pipe)))))
-             (let ((read-fd (first rw)) (write-fd (second rw)))
-               (let ((stdin (or prev-read 0))
-                     (stdout (if last 1 write-fd)))
-                 (multiple-value-bind (pid inproc-status)
-                     (spawn-stage sh cmd stdin stdout
-                                  (remove nil (list prev-read read-fd write-fd)))
-                   (if pid
-                       (push (cons :pid pid) stages)
-                       (push (cons :status inproc-status) stages))))
-               ;; parent closes fds it no longer needs
-               (when prev-read (sb-posix:close prev-read))
-               (when write-fd (sb-posix:close write-fd))
-               (setf prev-read read-fd))))
-      (when prev-read (ignore-errors (sb-posix:close prev-read))))
-    (setf stages (nreverse stages))
+  (let* ((n (length cmds))
+         ;; All pipes up front: pipe i joins stage i to stage i+1.
+         (pipes (loop repeat (1- n) collect (multiple-value-list (sb-posix:pipe))))
+         (all-fds (loop for p in pipes append (list (first p) (second p))))
+         (stages (make-array n :initial-element nil)))
+    ;; Classify every stage EXACTLY ONCE, up front. Doing it per pass would
+    ;; expand each command's words twice, and expansion is not idempotent.
+    (let ((classes (map 'vector
+                        (lambda (cmd)
+                          (multiple-value-bind (ext words)
+                              (external-simple-command-p sh cmd)
+                            (cons ext words)))
+                        cmds)))
+    (flet ((stdin-of (i) (if (zerop i) 0 (first (nth (1- i) pipes))))
+           (stdout-of (i) (if (= i (1- n)) 1 (second (nth i pipes)))))
+      (unwind-protect
+           (progn
+             ;; PASS 1: start every stage that becomes a child process. This
+             ;; must happen BEFORE any in-process stage runs. An in-process
+             ;; stage runs to completion inline, so if its reader had not been
+             ;; started yet it would block once the pipe filled --
+             ;; `{ seq 1 50000; } | cat' deadlocked exactly there, and so did
+             ;; any `while ...; do echo; done | consumer' over 64KB. That is
+             ;; what hung git's t3600-rm.
+             (loop for cmd in cmds for i from 0 do
+               (when (car (aref classes i))
+                 (multiple-value-bind (pid st)
+                     (spawn-stage sh cmd (stdin-of i) (stdout-of i) all-fds
+                                  :classified (aref classes i))
+                   (setf (aref stages i) (if pid (cons :pid pid) (cons :status st))))))
+             ;; PASS 2: the in-process stages, in pipeline order. Each one's
+             ;; reader is already running. Close our copy of a stage's write
+             ;; end as soon as it finishes, or the downstream reader never
+             ;; sees EOF.
+             (loop for cmd in cmds for i from 0 do
+               (unless (aref stages i)
+                 (multiple-value-bind (pid st)
+                     (spawn-stage sh cmd (stdin-of i) (stdout-of i) all-fds
+                                  :classified (aref classes i))
+                   (setf (aref stages i) (if pid (cons :pid pid) (cons :status st))))
+                 (when (< i (1- n))
+                   (ignore-errors (sb-posix:close (second (nth i pipes))))))))
+        ;; Every remaining parent-side pipe fd goes now: a reader still holding
+        ;; a write end would wait for an EOF that cannot arrive.
+        (dolist (fd all-fds) (ignore-errors (sb-posix:close fd))))))
+    (setf stages (coerce stages 'list))
     ;; Reap every spawned child so none are left as zombies; remember the
     ;; status of the FINAL stage specifically -- that is the pipeline's status.
     (let ((final 0) (last-index (1- n)) (rightmost-failure nil) (all '()))
@@ -376,11 +399,25 @@ so builtins in non-final pipeline stages run in-process writing to the pipe."
           rightmost-failure
           final))))
 
-(defun spawn-stage (sh cmd stdin stdout close-in-child)
-  "Run one pipeline stage. Returns (values pid nil) for external commands, or
-(values nil status) if the stage was a builtin/compound run in-process.
-STDIN/STDOUT are fds to attach. CLOSE-IN-CHILD lists pipe fds to close."
-  (multiple-value-bind (externalp words) (external-simple-command-p sh cmd)
+(defconstant +max-async-source+ 100000
+  "Ceiling on the generated `-c` source. argv+env is bounded (ARG_MAX), and a
+shell with a very large variable table could otherwise overflow it; past this
+we run synchronously instead of failing to spawn.")
+
+(defun spawn-stage (sh cmd stdin stdout close-in-child &key classified)
+  "Run one pipeline stage. Returns (values pid nil) for an external command, or
+(values nil status) for a builtin/compound run in-process.
+STDIN/STDOUT are fds to attach. CLOSE-IN-CHILD lists pipe fds to close.
+
+CLASSIFIED, when given, is the (EXTERNALP . WORDS) pair already computed for
+CMD. It must be reused rather than recomputed: EXTERNAL-SIMPLE-COMMAND-P
+expands the command's words, and expansion is not idempotent -- a command
+substitution among them runs again. Classifying a stage twice made
+`/bin/echo hi$(echo x >>f) | cat' append to f twice."
+  (multiple-value-bind (externalp words)
+      (if classified
+          (values (car classified) (cdr classified))
+          (external-simple-command-p sh cmd))
    (if externalp
       ;; A failed PATH lookup throws 'not-found; catch it here or the throw
       ;; escapes the pipeline with no catcher at all ("attempt to THROW to a
@@ -1521,10 +1558,6 @@ back to running in-process, synchronously."
 ;;; Asynchronous compounds: re-exec ourselves with the deparsed source
 ;;; ---------------------------------------------------------------------------
 
-(defconstant +max-async-source+ 100000
-  "Ceiling on the generated `-c` source. argv+env is bounded (ARG_MAX), and a
-shell with a very large variable table could otherwise overflow it; past this
-we run synchronously instead of failing to spawn.")
 
 (defun self-exec-path ()
   "Path to this sxsh executable, or NIL if we are not a saved image.
@@ -1547,12 +1580,27 @@ the environment's odd 'BASH_FUNC_x%%' cannot produce unparseable source."
 
 (defun async-prelude (sh)
   "Shell source reproducing enough of SH's state for a fresh sxsh to run a
-background command faithfully: cwd, shell (non-exported) variables, function
-definitions, and positional parameters. Exported variables need no prelude --
-they travel in the child's environment."
+background command faithfully: cwd, shell options, shell (non-exported)
+variables, function definitions, and positional parameters. Exported variables
+need no prelude -- they travel in the child's environment.
+
+The OPTIONS matter as much as the variables. A re-executed pipeline stage that
+did not inherit them ran with different globbing rules from the shell that
+started it, so `shopt -s nullglob; echo nomatch* | wc -w' reported 1 instead of
+0 -- the stage globbed under the child's defaults."
   (with-output-to-string (s)
     (let ((cwd (ignore-errors (current-directory))))
       (when cwd (format s "cd ~A~%" (shell-quote cwd))))
+    ;; `set -o' flags, then shopts.
+    (maphash (lambda (kw on)
+               (when on
+                 (let ((entry (find kw +shell-options+ :key #'third)))
+                   (when entry
+                     (format s "set -o ~A~%" (second entry))))))
+             (shell-options sh))
+    (maphash (lambda (name on)
+               (when on (format s "shopt -s ~A~%" name)))
+             (shell-shopts sh))
     (maphash (lambda (k cell)
                (when (and (not (cdr cell))         ; not exported
                           (assignable-name-p k))

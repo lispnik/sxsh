@@ -572,6 +572,32 @@ stream. Going through SBCL's `*standard-input*` slurped the whole file on the fi
 `while read l; do read X <f; done <g` the inner redirected `read` was served leftover bytes
 from `g`. `{ read first; cat; } <f` is the cheapest test that the offset is right.
 
+### A pipeline stage that runs in-process must not outrun its reader
+
+`exec-multi-pipeline` starts every stage that becomes a child process FIRST, then runs the
+in-process ones in order. That ordering is load-bearing, not tidiness. An in-process stage runs
+to completion inline, so if its reader had not been started yet it blocks as soon as the pipe
+fills: `{ seq 1 50000; } | cat` hung outright, and so did any `while ...; do echo; done |
+consumer` producing more than 64KB. That is a common enough shape that it hung git's t3600-rm.
+
+Two things to know before touching it:
+
+- **Classify each stage exactly once.** `external-simple-command-p` expands the command's words,
+  and expansion is not idempotent. Classifying per pass ran every command substitution twice --
+  `/bin/echo hi$(echo x >>f) | cat` appended to `f` twice. The `(externalp . words)` pair is
+  computed up front and threaded through `spawn-stage`.
+- **Close a stage's write end as soon as it finishes**, or the downstream reader waits for an
+  EOF that never arrives.
+
+**Known limitation.** The fix only helps when the *reader* is a child process. A pipeline whose
+stages are BOTH in-process -- `( ... ) | :`, a subshell into a builtin -- still deadlocks the
+same way, because neither side is started before the other runs. git's t3600-rm test 36 hits
+exactly that. Fixing it properly means giving every non-final stage its own process, as bash
+does. Re-executing the binary was tried and is NOT the answer: the child loses too much context
+and t1006-cat-file fell from 255/256 to 179/256. The remaining option is `fork(2)` for
+in-process stages, which would preserve context exactly -- but it contradicts this project's
+stated no-fork design, so it is a decision to take deliberately rather than drift into.
+
 ### git's test suite is the most demanding real script we have
 
 `make git-tests` runs git's own t/ suite under sxsh (`test/git-suite.py`, submodule
