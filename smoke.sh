@@ -245,6 +245,34 @@ check set-allexport     '1'          0 'set -a; V=x; env | grep -c "^V=x"'
 check set-noexec        ''           0 'set -n; echo NOTRUN'
 check set-invalid-opt   ''           2 'set -Z 2>/dev/null'
 
+# --- help ------------------------------------------------------------------
+# Statuses and streams were diffed against bash; the WORDING is ours (bash's
+# help text is GPL and sxsh is MIT, and our options are not bash's anyway).
+check help-lists        'ok'  0 'help >/dev/null && echo ok'
+check help-self         'ok'  0 'help help >/dev/null && echo ok'
+check help-dashdash     'ok'  0 'help -- help >/dev/null && echo ok'
+# The Oils corpus greps stderr for this phrase and requires status 1.
+check_err help-unknown  'no help topics' 1 'help ZZZ'
+check help-unknown-stdout '' 0 'help ZZZ 2>/dev/null; true'
+check help-desc-one-line '1' 0 'help -d cd | wc -l | tr -d " "'
+check help-synopsis     'cd: cd [-L|-P] [DIR]' 0 'help -s cd'
+# Operands are shell patterns, via the same matcher globbing uses.
+check help-pattern      'read
+readarray
+readonly
+return'                       0 'help -d "re*" | sed "s/ - .*//"'
+# Syntax topics are covered too, and are NOT in the builtin table.
+check help-syntax       'ok'  0 'help for >/dev/null && echo ok'
+check help-syntax-not-builtin 'ok' 0 'type for >/dev/null 2>&1 || echo ok'
+# help describes itself and is an ordinary builtin.
+check help-is-builtin   'help is a shell builtin' 0 'type help'
+check help-plain-text   '0'   0 'help | grep -c "$(printf "\033")" || true'
+check help-bad-option   'st=2' 0 'help -Z 2>/dev/null; echo st=$?'
+# `builtin' is registered as well as intercepted, so type/completion see it.
+check builtin-is-builtin 'builtin is a shell builtin' 0 'type builtin'
+check builtin-no-args   'st=0' 0 'builtin; echo st=$?'
+check builtin-not-a-builtin 'st=1' 0 'builtin nosuch 2>/dev/null; echo st=$?'
+
 # --- command substitution: case patterns, backtick escapes -----------------
 # Expectations diffed against bash before being written down.
 # A `)' ending a case pattern has no opening paren, so plain counting stopped

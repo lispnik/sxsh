@@ -271,8 +271,35 @@ directly."
          "fac() { if [ $1 -le 1 ]; then echo 1; else echo $(( $1 * $(fac $(($1-1))) )); fi; }; fac 5"
          (format nil "120~%"))
   (check "substr-var-offset" "v=abcdef; i=2; echo ${v:i:3}" (format nil "cde~%"))
+  (check-help-coverage)
   (format t "~&~%shell: ~D passed, ~D failed~%" *pass* *fail*)
   (values *pass* *fail*))
+
+(defun check-help-coverage ()
+  "Every builtin must have a help entry, and every help entry a builtin.
+
+This is the whole reason the text lives at each DEFINE-BUILTIN rather than in
+a table off to one side: a builtin added without documentation, or an entry
+left behind by one that was removed, fails the suite here instead of being
+discovered by someone typing `help' at the prompt."
+  (let ((missing '()) (extra '()))
+    (maphash (lambda (k v)
+               (declare (ignore v))
+               (unless (gethash k sxsh-shell::*builtin-help*) (push k missing)))
+             sxsh-shell::*builtins*)
+    (maphash (lambda (k v)
+               (declare (ignore v))
+               (unless (gethash k sxsh-shell::*builtins*) (push k extra)))
+             sxsh-shell::*builtin-help*)
+    (cond
+      ((and (null missing) (null extra))
+       (incf *pass*)
+       (format t "  ok   help-coverage~%"))
+      (t
+       (incf *fail*)
+       (format t "  FAIL help-coverage~%    builtins with no help: ~{~A ~}~%~
+                  ~4Thelp for no builtin: ~{~A ~}~%"
+               (sort missing #'string<) (sort extra #'string<))))))
 
 (defun namestring-home ()
   (string-right-trim "/" (namestring (user-homedir-pathname))))

@@ -10,14 +10,48 @@
 
 (defvar *builtins* (make-hash-table :test 'equal))
 
+(defvar *builtin-help* (make-hash-table :test 'equal)
+  "NAME -> (synopsis summary description), populated by DEFINE-BUILTIN.
+
+The text lives at each builtin's definition site so it cannot drift far from
+the argument parsing it describes; TEST-SHELL asserts that this table and
+*BUILTINS* have identical key sets, so a new builtin without help fails the
+suite rather than surprising someone at the prompt.
+
+Every word of it is written from THIS shell's source. bash's help strings are
+GPL and sxsh is MIT, and they would be wrong anyway: our `cd' has no -@, our
+`read -n' counts characters after escape processing, our `echo -e' set is its
+own. Document what the code accepts.")
+
 (defmacro define-builtin (name (sh args out) &body body)
-  `(setf (gethash ,name *builtins*)
-         (lambda (,sh ,args ,out)
-           (declare (ignorable ,sh ,args ,out))
-           (block builtin ,@body))))
+  "Define a builtin. BODY may begin with :SYNOPSIS/:SUMMARY/:DESCRIPTION pairs,
+which are recorded for `help' and stripped before the body proper."
+  (let ((help '()))
+    (loop while (and (keywordp (first body))
+                     (member (first body) '(:synopsis :summary :description))
+                     (rest body))
+          do (setf (getf help (pop body)) (pop body)))
+    `(progn
+       ,@(when help
+           `((setf (gethash ,name *builtin-help*)
+                   (list ,(getf help :synopsis)
+                         ,(getf help :summary)
+                         ,(getf help :description)))))
+       (setf (gethash ,name *builtins*)
+             (lambda (,sh ,args ,out)
+               (declare (ignorable ,sh ,args ,out))
+               (block builtin ,@body))))))
 
 (defun builtin-p (name) (nth-value 1 (gethash name *builtins*)))
 (defun find-builtin (name) (gethash name *builtins*))
+
+(defun copy-builtin-help (from to &key synopsis)
+  "Give TO its own help record, based on FROM's. Aliases share a function but
+need an entry of their own, and `[' needs a different synopsis from `test'."
+  (let ((h (gethash from *builtin-help*)))
+    (when h
+      (setf (gethash to *builtin-help*)
+            (list (or synopsis (first h)) (second h) (third h))))))
 
 ;;; control-flow conditions used by break/continue/return/exit
 (define-condition loop-break   () ((n :initarg :n :reader cf-n :initform 1)))
@@ -26,11 +60,57 @@
 
 ;;; ---------------------------------------------------------------------------
 
-(define-builtin ":" (sh args out) 0)
-(define-builtin "true" (sh args out) 0)
-(define-builtin "false" (sh args out) 1)
+(define-builtin ":" (sh args out)
+  :synopsis ":"
+  :summary "Null command."
+  :description "Expands its arguments and performs any redirections, then does nothing else.
+
+Exit Status:
+Always zero."
+  0)
+(define-builtin "true" (sh args out)
+  :synopsis "true"
+  :summary "Return a successful result."
+  :description "Does nothing and succeeds. Arguments are ignored.
+
+Exit Status:
+Always zero."
+  0)
+(define-builtin "false" (sh args out)
+  :synopsis "false"
+  :summary "Return an unsuccessful result."
+  :description "Does nothing and fails. Arguments are ignored.
+
+Exit Status:
+Always 1."
+  1)
 
 (define-builtin "echo" (sh args out)
+  :synopsis "echo [-neE] [ARG ...]"
+  :summary "Write arguments to standard output."
+  :description "Writes ARGs to standard output, separated by single spaces and followed by a
+newline.
+
+Options:
+  -n  do not append the trailing newline
+  -e  interpret the backslash escapes below
+  -E  do not interpret backslash escapes (the default)
+
+With -e the escapes are:
+  \\a alert    \\b backspace   \\e escape    \\f form feed
+  \\n newline  \\r carriage return   \\t tab   \\v vertical tab
+  \\\\ backslash
+  \\c stop output here and suppress the trailing newline
+  \\0NNN  the byte whose value is the 1-3 octal digits NNN (the leading
+         zero is required; a bare \\NNN is literal)
+  \\xHH   the byte whose value is the 1-2 hex digits HH
+  \\uHHHH, \\UHHHHHHHH  the character with that codepoint
+
+Options are only recognised while every character after the `-' is one of
+n, e or E; anything else is written out as an ordinary argument.
+
+Exit Status:
+Zero unless a write fails."
   (let ((newline t) (interpret nil) (args args))
     ;; support -n ; (-e/-E accepted, default no-escape per XSI-agnostic choice)
     (loop while (and args (let ((a (first args)))
@@ -73,6 +153,23 @@ whereas the printf FORMAT string accepts a bare `\\44'."
      stopped)))
 
 (define-builtin "printf" (sh args out)
+  :synopsis "printf [-v VAR] FORMAT [ARGUMENT ...]"
+  :summary "Format and print arguments."
+  :description "Writes ARGUMENTs formatted under the control of FORMAT.
+
+Options:
+  -v VAR  assign the result to shell variable VAR instead of printing it
+
+FORMAT is reused until all ARGUMENTs are consumed; missing arguments are
+treated as empty or zero. In addition to the C conversions (%d %i %o %u %x %X
+%c %s %f %e %g %%) with the usual flags, width and precision:
+  %b  the argument with backslash escapes interpreted, as `echo -e' does
+  %q  the argument quoted so it can be reused as shell input
+
+A `*' width or precision takes its value from the next argument.
+
+Exit Status:
+Zero unless an invalid format or number is given, or a write fails."
   ;; bash `-v NAME': put the result in a variable instead of on stdout.
   (let ((target nil))
     (loop while (and args (>= (length (first args)) 2)
@@ -399,6 +496,15 @@ arguments. Returns (values text status)."
       (t (values (princ-to-string arg) nil)))))
 
 (define-builtin "pwd" (sh args out)
+  :synopsis "pwd [-LP]"
+  :summary "Print the name of the current working directory."
+  :description "Options:
+  -L  print the logical path, keeping any symbolic links traversed to get
+      here (the default)
+  -P  print the physical path, with all symbolic links resolved
+
+Exit Status:
+Zero unless an invalid option is given or the directory cannot be read."
   ;; -L (default) prints the logical path, preserving symlinks; -P prints the
   ;; path with every symlink resolved.
   (let ((physical nil))
@@ -413,6 +519,25 @@ arguments. Returns (values text status)."
   0)
 
 (define-builtin "cd" (sh args out)
+  :synopsis "cd [-L|-P] [DIR]"
+  :summary "Change the shell working directory."
+  :description "Changes the current directory to DIR. With no DIR, $HOME is used. A DIR of
+`-' means $OLDPWD, and the new directory is printed.
+
+Options:
+  -L  treat symbolic links in the path as-is, so `cd ..' from a symlinked
+      directory returns to where you came from (the default)
+  -P  resolve symbolic links first, so `..' is the physical parent
+
+If DIR is relative, is not `.' or `..', and does not begin with `./' or
+`../', the directories in $CDPATH are searched for it; a directory found that
+way is printed.
+
+$PWD and $OLDPWD are updated on success.
+
+Exit Status:
+Zero if the directory is changed; non-zero otherwise. An empty DIR is an
+error rather than a synonym for $HOME."
   (let ((physical nil) (rest args))
     (loop while (and rest (member (first rest) '("-L" "-P") :test #'string=))
           do (setf physical (string= (pop rest) "-P")))
@@ -483,6 +608,21 @@ arguments. Returns (values text status)."
         (error (e) (format *error-output* "cd: ~A~%" e) 1)))))
 
 (define-builtin "export" (sh args out)
+  :synopsis "export [-p] [NAME[=VALUE] ...]"
+  :summary "Mark names for export to the environment of later commands."
+  :description "Marks each NAME for export, so that it appears in the environment of every
+command run afterwards. With NAME=VALUE, the assignment is performed first.
+
+Options:
+  -p  list the exported names and their values, in a form that can be reused
+      as input
+
+`export' is a declaration utility: the value in NAME=VALUE is expanded as an
+assignment would be, so it is not field-split or glob-expanded, and a tilde
+after the `=' or after an unquoted `:' is expanded.
+
+Exit Status:
+Zero unless an invalid name is given."
   ;; `export -p' is the POSIX-specified way to list exported variables in a
   ;; form that can be re-read by the shell; bare `export' is the same listing.
   (when (and args (string= (first args) "-p"))
@@ -508,6 +648,23 @@ arguments. Returns (values text status)."
         0)))
 
 (define-builtin "unset" (sh args out)
+  :synopsis "unset [-fv] [NAME ...]"
+  :summary "Unset values and attributes of variables and functions."
+  :description "Removes each NAME.
+
+Options:
+  -f  treat every NAME as a function
+  -v  treat every NAME as a variable
+With neither, a function is removed only if no variable of that name exists.
+
+`unset ARRAY[N]' removes one element and leaves the array, which becomes
+sparse rather than renumbered; `unset ARRAY[@]' removes the whole array.
+
+Unsetting a name that a `VAR=value command' prefix is currently shadowing
+reveals the value underneath rather than removing both.
+
+Exit Status:
+Zero unless a NAME is readonly."
   (let ((mode :auto) (names args))
     (loop while (and names (member (first names) '("-f" "-v") :test #'string=))
           do (setf mode (if (string= (pop names) "-f") :func :var)))
@@ -589,10 +746,43 @@ no-op beyond evaluating the RHS arithmetically."
           (when (member #\r flags) (mark-readonly sh name)))))))
 
 (define-builtin "declare" (sh args out)
+  :synopsis "declare [-aAirx] [NAME[=VALUE] ...]"
+  :summary "Set variable values and attributes."
+  :description "Declares each NAME, optionally assigning a value.
+
+Options:
+  -a  declare NAME an indexed array
+  -A  declare NAME an associative array
+  -i  give NAME the integer attribute: every later assignment to it is
+      evaluated as an arithmetic expression
+  -r  make NAME readonly
+  -x  export NAME
+  -n  make NAME a name reference to the variable its value names
+
+Declaring an existing array with -a or -A only records the type; it does not
+empty the variable. `typeset' is a synonym.
+
+Like `export', this is a declaration utility, so a value is expanded as an
+assignment rather than as an ordinary word.
+
+Exit Status:
+Zero unless an invalid option is given, a NAME is invalid, or an assignment
+to a readonly variable is attempted."
   (declare-builtin sh args nil))
 (setf (gethash "typeset" *builtins*) (gethash "declare" *builtins*))
+(copy-builtin-help "declare" "typeset" :synopsis "typeset [-aAirx] [NAME[=VALUE] ...]")
 
 (define-builtin "mapfile" (sh args out)
+  :synopsis "mapfile [-t] [ARRAY]"
+  :summary "Read lines from standard input into an array."
+  :description "Reads lines from standard input into the indexed array ARRAY, one line per
+element. The default array is MAPFILE. `readarray' is a synonym.
+
+Options:
+  -t  accepted; the trailing newline is not stored either way
+
+Exit Status:
+Zero unless an invalid option is given or ARRAY is readonly."
   ;; bash mapfile/readarray: read lines into an indexed array.
   (multiple-value-bind (flags rest) (declare-flags args)
     (declare (ignore flags))
@@ -608,8 +798,17 @@ no-op beyond evaluating the RHS arithmetically."
       (set-var sh name (array-from-list (nreverse lines)))
       0)))
 (setf (gethash "readarray" *builtins*) (gethash "mapfile" *builtins*))
+(copy-builtin-help "mapfile" "readarray" :synopsis "readarray [-t] [ARRAY]")
 
 (define-builtin "shift" (sh args out)
+  :synopsis "shift [N]"
+  :summary "Shift positional parameters."
+  :description "Renames $(N+1) to $1, $(N+2) to $2, and so on, discarding the first N and
+reducing $#. N defaults to 1.
+
+Exit Status:
+Zero unless N is negative or greater than $#, in which case the parameters
+are left untouched."
   (let ((n (if args (parse-integer (first args)) 1))
         (v (shell-positional sh)))
     (if (<= n (length v))
@@ -617,6 +816,16 @@ no-op beyond evaluating the RHS arithmetically."
         1)))
 
 (define-builtin "exit" (sh args out)
+  :synopsis "exit [N]"
+  :summary "Exit the shell."
+  :description "Exits with status N. With no N, the status of the last command executed is
+used. The EXIT trap runs first, whatever the cause of termination.
+
+Inside a trap action, a bare `exit' reports the status that was current when
+the trap began, not the status of the trap's own commands.
+
+Exit Status:
+N, or the last command's status."
   (signal 'shell-exit
           :code (cond (args (parse-integer (first args) :junk-allowed t))
                       ;; inside a trap, a bare `exit' reports the status that
@@ -626,16 +835,66 @@ no-op beyond evaluating the RHS arithmetically."
   0)
 
 (define-builtin "return" (sh args out)
+  :synopsis "return [N]"
+  :summary "Return from a shell function."
+  :description "Ends the current function, or the current dot script, with status N. With no
+N, the status of the last command executed is used.
+
+Exit Status:
+N, or the last command's status. Non-zero if used outside a function or a dot
+script."
   (signal 'func-return :code (if args (parse-integer (first args) :junk-allowed t)
                                  (shell-last-status sh)))
   0)
 
 (define-builtin "break" (sh args out)
+  :synopsis "break [N]"
+  :summary "Exit for, while, until or select loops."
+  :description "Leaves the enclosing loop. With N, leaves the Nth enclosing loop counting
+outwards; N must be 1 or greater.
+
+Exit Status:
+Zero unless N is not 1 or greater."
   (signal 'loop-break :n (if args (parse-integer (first args)) 1)) 0)
 (define-builtin "continue" (sh args out)
+  :synopsis "continue [N]"
+  :summary "Resume the next iteration of a loop."
+  :description "Skips the rest of the loop body and begins the next iteration. With N,
+resumes the Nth enclosing loop counting outwards; N must be 1 or greater.
+
+Exit Status:
+Zero unless N is not 1 or greater."
   (signal 'loop-continue :n (if args (parse-integer (first args)) 1)) 0)
 
 (define-builtin "read" (sh args out)
+  :synopsis "read [-rs] [-p PROMPT] [-a ARRAY] [-d DELIM] [-n N] [-N N] [-t SEC] [-u FD] [NAME ...]"
+  :summary "Read a line from standard input and split it into fields."
+  :description "Reads one line, splits it on $IFS, and assigns the fields to the NAMEs in
+order. The last NAME receives everything that is left. With no NAME, the whole
+line is assigned to REPLY.
+
+Options:
+  -a ARRAY   assign the fields to ARRAY as an indexed array, not to NAMEs
+  -d DELIM   read until the first character of DELIM instead of a newline;
+             an empty DELIM means NUL, for `find -print0'
+  -n N       return after N characters rather than a whole line, but still
+             stop at the delimiter
+  -N N       return after exactly N characters, ignoring the delimiter
+  -p PROMPT  write PROMPT, without a newline, before reading -- only when
+             reading from a terminal
+  -r         do not treat backslash as an escape character
+  -s         do not echo input coming from a terminal
+  -t SEC     fail if a complete line is not read within SEC seconds; a SEC
+             of 0 tests whether input is available and reads nothing
+  -u FD      read from file descriptor FD instead of standard input
+
+Without -r, a backslash escapes the following character and a backslash-newline
+pair is a line continuation. -n counts characters AFTER that processing.
+
+Exit Status:
+Zero unless end of input is reached, the timeout expires, an invalid option
+or argument is given, or FD is invalid. Input ending without a delimiter still
+assigns, but returns non-zero."
   ;; POSIX has only -r. The rest are bash: -p prompt, -s silent, -n/-N a
   ;; character count, -d an alternate delimiter, -u a file descriptor, -t a
   ;; timeout.
@@ -1010,6 +1269,37 @@ be re-read to restore the current settings."
   0)
 
 (define-builtin "set" (sh args out)
+  :synopsis "set [-abCefhmnuvx] [-o OPTION] [--] [ARG ...]"
+  :summary "Set or unset shell options and positional parameters."
+  :description "Changes shell option settings, sets the positional parameters, or displays
+the names and values of shell variables.
+
+With no arguments, lists every shell variable in a form that can be reused as
+input. Options are turned ON with `-' and OFF with `+'.
+
+  -a  allexport   export every variable that is assigned to afterwards
+  -b  notify      report terminated background jobs immediately
+  -C  noclobber   `>' will not truncate an existing file
+  -e  errexit     exit as soon as a command fails
+  -f  noglob      disable pathname expansion
+  -h  hashall     remember command locations (accepted; we do not cache)
+  -m  monitor     enable job control
+  -n  noexec      read commands without executing them
+  -u  nounset     treat an unset variable as an error
+  -v  verbose     echo input lines as they are read
+  -x  xtrace      print commands and their arguments as they are executed
+
+  -o OPTION       set OPTION by its long name; with no OPTION, list them all.
+                  Also accepts the names with no letter form: pipefail, emacs,
+                  ignoreeof, nolog and vi.
+  +o OPTION       unset OPTION
+
+  --   end the options; remaining ARGs become the positional parameters, and
+       `set --' with no ARGs clears them
+  -    end the options WITHOUT clearing the positional parameters
+
+Exit Status:
+Zero unless an invalid option is given."
   (cond
     ((null args)
      (maphash (lambda (k cell) (format out "~A=~A~%" k (car cell))) (shell-vars sh))
@@ -1052,6 +1342,17 @@ be re-read to restore the current settings."
      0)))
 
 (define-builtin "eval" (sh args out)
+  :synopsis "eval [ARG ...]"
+  :summary "Execute arguments as a shell command."
+  :description "Joins the ARGs into a single string, reads it as shell input, and executes
+the result in the CURRENT shell environment.
+
+Because it runs inline, `exit', `return', `break' and `continue' inside it act
+on the enclosing shell, function or loop. A variable assignment error ends the
+eval rather than the whole shell.
+
+Exit Status:
+The status of the executed command, or zero if the arguments are empty."
   (let ((src (format nil "~{~A~^ ~}" args))
         ;; A failed assignment inside eval ends the eval, not the shell.
         (*assignment-error-fatal* nil))
@@ -1059,6 +1360,19 @@ be re-read to restore the current settings."
         (run-string-capturing sh src out))))
 
 (define-builtin "." (sh args out)
+  :synopsis ". [-p PATH] FILENAME [ARGUMENT ...]"
+  :summary "Execute commands from a file in the current shell."
+  :description "Reads and executes FILENAME in the CURRENT shell environment, so its
+variables, functions and `cd' persist afterwards.
+
+If FILENAME contains no slash, the directories in $PATH are searched for it.
+Any ARGUMENTs become the positional parameters while it runs.
+
+`return' ends the sourced file and becomes its status; the caller carries on.
+`source' is a synonym.
+
+Exit Status:
+The status of the last command executed, or 1 if FILENAME cannot be read."
   ;; POSIX: when the operand contains no slash the shell searches $PATH for it,
   ;; exactly as it would for a command. FIND-IN-PATH already does both halves;
   ;; the previous :allow-slash call short-circuited every name to itself, so a
@@ -1076,6 +1390,7 @@ be re-read to restore the current settings."
             (progn (format *error-output* ".: ~A: not found~%" (first args)) 1)))))
 
 (setf (gethash "source" *builtins*) (gethash "." *builtins*))
+(copy-builtin-help "." "source" :synopsis "source [-p PATH] FILENAME [ARGUMENT ...]")
 
 (defun type-kind (sh name)
   "Classify NAME: returns (values kind path) where kind is one of :alias,
@@ -1088,6 +1403,20 @@ be re-read to restore the current settings."
          (if p (values :file p) (values nil nil))))))
 
 (define-builtin "type" (sh args out)
+  :synopsis "type [-afpPt] NAME [NAME ...]"
+  :summary "Display information about command type."
+  :description "Reports how each NAME would be interpreted if used as a command name.
+
+Options:
+  -t  print a single word: alias, keyword, function, builtin or file
+  -p  print the path of the file that would be run, and nothing for a
+      builtin, function, alias or keyword
+  -P  as -p, but search $PATH even when NAME is a builtin or function
+  -a  accepted; we report the first match rather than every one
+  -f  accepted; suppress function lookup
+
+Exit Status:
+Zero if every NAME is found, non-zero otherwise."
   ;; POSIX defines no options for `type', but -p and -t are ubiquitous in real
   ;; scripts -- an autoconf-style `if type -p gcc' is how they probe for a
   ;; compiler. Without them the option was taken for a name and reported as
@@ -1141,6 +1470,20 @@ be re-read to restore the current settings."
 
 ;;; alias / unalias -------------------------------------------------------
 (define-builtin "alias" (sh args out)
+  :synopsis "alias [-a] [NAME[=VALUE] ...]"
+  :summary "Define or display aliases."
+  :description "With no arguments, lists every alias in a form that can be reused as input.
+With NAME alone, lists that alias. With NAME=VALUE, defines it.
+
+Options:
+  -a  remove all alias definitions
+
+An alias is replaced only in command position. If its value ends in a blank,
+the word after it is checked for an alias too, which is what makes
+`alias sudo=\"sudo \"' expand an aliased command after sudo.
+
+Exit Status:
+Zero unless a NAME has no alias defined."
   (if (null args)
       (progn (maphash (lambda (k v) (format out "alias ~A='~A'~%" k v))
                       (shell-aliases sh))
@@ -1157,6 +1500,15 @@ be re-read to restore the current settings."
                              (setf status 1))))))))))
 
 (define-builtin "unalias" (sh args out)
+  :synopsis "unalias [-a] [NAME ...]"
+  :summary "Remove alias definitions."
+  :description "Removes each NAME from the alias list.
+
+Options:
+  -a  remove all alias definitions
+
+Exit Status:
+Zero unless a NAME is not a defined alias."
   (let ((status 0))
     (if (and args (string= (first args) "-a"))
         (clrhash (shell-aliases sh))
@@ -1168,6 +1520,20 @@ be re-read to restore the current settings."
 
 ;;; readonly --------------------------------------------------------------
 (define-builtin "readonly" (sh args out)
+  :synopsis "readonly [-p] [NAME[=VALUE] ...]"
+  :summary "Mark names as unchangeable."
+  :description "Marks each NAME as readonly. A later assignment to it, or an `unset', fails;
+in a non-interactive shell such an assignment is fatal, as POSIX requires.
+
+Options:
+  -p  list the readonly names and their values, in a form that can be reused
+      as input
+
+Like `export', this is a declaration utility, so the value in NAME=VALUE is
+expanded as an assignment rather than as an ordinary word.
+
+Exit Status:
+Zero unless an invalid name is given."
   (if (or (null args) (and (= 1 (length args)) (string= (first args) "-p")))
       (progn (maphash (lambda (k v) (declare (ignore v))
                         (multiple-value-bind (val found) (get-var sh k)
@@ -1187,6 +1553,16 @@ be re-read to restore the current settings."
         0)))
 
 (define-builtin "local" (sh args out)
+  :synopsis "local [-aAirx] [NAME[=VALUE] ...]"
+  :summary "Define local variables."
+  :description "Declares each NAME local to the current function: the value it had outside
+is restored when the function returns. Takes the same options as `declare'.
+
+`local' is not POSIX, but it is present in every shell that has functions.
+
+Exit Status:
+Zero unless used outside a function, an invalid option is given, or a NAME is
+readonly."
   ;; `local' is not in POSIX, but bash, dash, ksh and zsh all have it and real
   ;; scripts assume it -- git's t/test-lib.sh alone uses it 41 times, and 155
   ;; of its test scripts do. Without it those scripts do not merely misbehave,
@@ -1219,11 +1595,56 @@ be re-read to restore the current settings."
                 (declare-local sh name)
                 (when eq (set-var sh name (subseq a (1+ eq)))))))))))))
 
+;;; builtin -- run a shell builtin, bypassing functions ---------------------
+;;; EXEC-BUILTIN-PREFIX in the executor does the work whenever there is an
+;;; operand, because `builtin break' has to act on the CALLER's loop. This
+;;; entry exists so the no-operand form works and so `type builtin' and
+;;; completion can see the name at all -- exactly the split `command' uses.
+(define-builtin "builtin" (sh args out)
+  :synopsis "builtin [SHELL-BUILTIN [ARG ...]]"
+  :summary "Execute shell builtins."
+  :description "Executes SHELL-BUILTIN with the given arguments, bypassing any
+shell function of that name. This is how a function can override a builtin and
+still reach it -- a function named `cd' can call `builtin cd' without recursing.
+
+Unlike running the builtin through a function or an external command, the
+control-flow builtins still act on the caller, so `builtin break' breaks the
+enclosing loop and `builtin exit' exits the shell.
+
+`builtin' and `command' may be combined in any order; the innermost name is
+what runs.
+
+Exit Status:
+The status of SHELL-BUILTIN, or 1 if it is not a shell builtin. Zero when
+given no arguments."
+  (cond
+    ((null args) 0)
+    ((builtin-p (first args))
+     (funcall (find-builtin (first args)) sh (rest args) *standard-output*))
+    (t (format *error-output* "builtin: ~A: not a shell builtin~%" (first args))
+       1)))
+
 ;;; command -- run a command bypassing functions; -v/-V to describe ---------
 ;;; The actual "run external/builtin bypassing function lookup" behavior is
 ;;; handled in the executor; here we implement -v and -V, and for the plain
 ;;; form we signal the executor via a throw.
 (define-builtin "command" (sh args out)
+  :synopsis "command [-pVv] COMMAND [ARG ...]"
+  :summary "Execute a simple command or display information about commands."
+  :description "Runs COMMAND with ARGs, suppressing the lookup of any shell FUNCTION of that
+name -- which is how a function can call the command it overrides.
+
+Options:
+  -p  use a default value for $PATH that is guaranteed to find the standard
+      utilities
+  -v  print a description of COMMAND, similar to `type'
+  -V  print a more verbose description
+
+`command' and `builtin' may be combined in any order.
+
+Exit Status:
+The status of COMMAND, 127 if it is not found, or the status of `command'
+itself if an option error occurs."
   (let ((verbose nil) (args args))
     (loop while (and args (member (first args) '("-v" "-V" "-p") :test #'string=))
           do (let ((o (pop args)))
@@ -1250,6 +1671,22 @@ be re-read to restore the current settings."
 
 ;;; getopts name optstring [args...] --------------------------------------
 (define-builtin "getopts" (sh args out)
+  :synopsis "getopts OPTSTRING NAME [ARG ...]"
+  :summary "Parse option arguments."
+  :description "Takes the next option from ARGs (or from the positional parameters when no
+ARG is given) and stores it in the shell variable NAME.
+
+OPTSTRING lists the recognised option characters; a character followed by `:'
+takes an argument, which is placed in OPTARG. $OPTIND holds the index of the
+next argument to process and is initialised to 1 by the shell -- reset it by
+hand before parsing a second argument list.
+
+A leading `:' in OPTSTRING selects silent error reporting: an invalid option
+sets NAME to `?' and OPTARG to the offending character, and a missing argument
+sets NAME to `:'. Otherwise a diagnostic is written to standard error.
+
+Exit Status:
+Zero while an option is found; non-zero at the end of the options or on error."
   (when (< (length args) 2)
     (format *error-output* "getopts: usage: getopts optstring name [args]~%")
     (return-from builtin 2))
@@ -1389,6 +1826,22 @@ but an unknown name has to be an error, since scripts test the exit status of
   (nth-value 1 (gethash name (shell-shopts sh))))
 
 (define-builtin "history" (sh args out)
+  :synopsis "history [-c] [-r] [-w] [N]"
+  :summary "Display or manipulate the history list."
+  :description "With no options, prints the history list with line numbers. With N, prints
+only the last N entries.
+
+Options:
+  -c  clear the history list
+  -r  read the history file and append its contents to the list
+  -w  write the current list to the history file
+
+The file is $HISTFILE, defaulting to ~/.sxsh_history, and its length is
+capped by $HISTSIZE.
+
+Exit Status:
+Zero unless an invalid option is given or the history file cannot be read or
+written."
   ;; bash: history [N] | -c | -w | -r. Not POSIX -- `fc -l' is the standard
   ;; spelling -- but universally expected at a prompt.
   (cond
@@ -1411,6 +1864,27 @@ but an unknown name has to be an error, since scripts test the exit status of
        0))))
 
 (define-builtin "fc" (sh args out)
+  :synopsis "fc [-e EDITOR] [-lnr] [FIRST] [LAST]  or  fc -s [PAT=REP] [CMD]"
+  :summary "Display or re-execute commands from the history list."
+  :description "FIRST and LAST select a range of history entries, by number or by a string
+that the command begins with; a negative number counts back from the current
+command. Without them, `fc -l' lists the last 16 entries and the editing form
+selects the previous command alone.
+
+Options:
+  -l  list the range on standard output instead of editing it
+  -n  omit the line numbers when listing
+  -r  reverse the order
+  -e EDITOR  use EDITOR to edit the range; the default is $FCEDIT, then
+             $EDITOR, then `ed'
+  -s  re-execute without invoking an editor, after applying the substitution
+      PAT=REP to the command text
+
+The command about to be run is written to standard error first.
+
+Exit Status:
+Zero unless an invalid option is given or the history is empty; otherwise the
+status of the command re-executed."
   ;; POSIX: fc [-r] [-e editor] [first [last]]
   ;;        fc -l [-nr] [first [last]]
   ;;        fc -s [old=new] [first]
@@ -1527,6 +2001,25 @@ but an unknown name has to be an error, since scripts test the exit status of
         string)))
 
 (define-builtin "shopt" (sh args out)
+  :synopsis "shopt [-pqsu] [-o] [OPTNAME ...]"
+  :summary "Set and unset shell options."
+  :description "Sets or unsets the named shell options, or lists their settings.
+
+Options:
+  -s  enable each OPTNAME
+  -u  disable each OPTNAME
+  -q  suppress output; the exit status alone reports the setting
+  -p  list in a reusable form (the default with no -s or -u)
+  -o  address the `set -o' option names instead of the shopt ones
+
+Recognised names include extglob, nullglob, dotglob, globskipdots (on by
+default), nocaseglob, nocasematch, globstar, failglob, expand_aliases,
+huponexit, interactive_comments and xpg_echo. Only some change behaviour, but
+every name is accepted so that scripts can feature-test with `shopt -q'.
+
+Exit Status:
+Zero if every OPTNAME is enabled; non-zero otherwise. An unknown name is an
+error."
   (let ((mode nil) (quiet nil) (names args))
     (loop while (and names (> (length (first names)) 1)
                      (char= (char (first names) 0) #\-))
@@ -1565,6 +2058,35 @@ but an unknown name has to be an error, since scripts test the exit status of
               (unless (shopt-p sh n) (setf status 1))))))))))
 
 (define-builtin "trap" (sh args out)
+  :synopsis "trap [-lp] [[ACTION] SIGNAL_SPEC ...]"
+  :summary "Trap signals and other events."
+  :description "Arranges for ACTION to be read and executed when the shell receives any of
+the SIGNAL_SPECs.
+
+If ACTION is `-' each signal is reset to its original disposition; if it is
+the empty string each signal is ignored. If ACTION is absent and every operand
+is a signal spec, the signals are reset -- so `trap 0 EXIT' clears the EXIT
+trap rather than running the command `0'.
+
+Options:
+  -l  list the signal names and their numbers
+  -p  print the action associated with each signal spec
+
+SIGNAL_SPEC is a signal name with or without the SIG prefix, or a number.
+Besides real signals:
+  EXIT (0)  runs when the shell exits, whatever the cause -- including a
+            syntax error in a later command
+  ERR       runs when a command fails
+  DEBUG     runs before each command
+
+Operands are applied in order and processing stops at the first invalid one,
+so the specs before it have already taken effect.
+
+The status a handler leaves behind is discarded: `$?' after it returns is
+whatever it was when the signal arrived.
+
+Exit Status:
+Zero unless a SIGNAL_SPEC is invalid or an option is unrecognised."
   ;; `--' is accepted and ignored, as for any POSIX utility.
   (when (and args (string= (first args) "--")) (pop args))
   (cond
@@ -1674,6 +2196,14 @@ unknown names are not real signals -- nothing to install."
 
 ;;; wait [pid|%job...] ----------------------------------------------------
 (define-builtin "wait" (sh args out)
+  :synopsis "wait [PID | JOBSPEC ...]"
+  :summary "Wait for job completion."
+  :description "Waits for each process or job and reports its termination status. With no
+operand, waits for every active child process.
+
+Exit Status:
+The status of the last operand waited for; 127 if it does not name a live
+child. Zero when waiting for all children."
   (let ((status 0))
     (if args
         (dolist (a args)
@@ -1748,6 +2278,22 @@ meaning that process group. Returns T on success, NIL after reporting."
                     1)))))))
 
 (define-builtin "kill" (sh args out)
+  :synopsis "kill [-s SIGSPEC | -SIGSPEC] [-l] PID | JOBSPEC ..."
+  :summary "Send a signal to a job."
+  :description "Sends the named signal to each process or job. The default is TERM.
+
+Options:
+  -s SIGSPEC  the signal to send, by name or number
+  -SIGSPEC    the same, written directly (`kill -9', `kill -HUP')
+  -l          list the signal names; with an argument, translate between a
+              name and a number
+
+A JOBSPEC signals the whole process group, so `kill %1' stops a pipeline
+rather than just its last stage.
+
+Exit Status:
+Zero unless an invalid option or signal is given, or the signal cannot be
+sent."
   (let ((sig (signal-number "TERM")) (rest args))
     (when (and rest (string= (first rest) "-l"))
       (return-from builtin (kill-list-signals (cdr rest) out)))
@@ -1783,6 +2329,16 @@ meaning that process group. Returns T on success, NIL after reporting."
 
 ;;; jobs [-l] -------------------------------------------------------------
 (define-builtin "jobs" (sh args out)
+  :synopsis "jobs [-l] [JOBSPEC ...]"
+  :summary "Display status of jobs."
+  :description "Lists the active jobs. The current job is marked `+' and the previous one
+`-'.
+
+Options:
+  -l  also show each job's process group id
+
+Exit Status:
+Zero unless an invalid JOBSPEC is given."
   (poll-jobs sh)
   (let ((show-pgid (and args (string= (first args) "-l"))))
     (dolist (job (reverse (shell-jobs sh)))
@@ -1794,6 +2350,15 @@ meaning that process group. Returns T on success, NIL after reporting."
 
 ;;; fg [%job] -------------------------------------------------------------
 (define-builtin "fg" (sh args out)
+  :synopsis "fg [JOBSPEC]"
+  :summary "Move a job to the foreground."
+  :description "Brings JOBSPEC into the foreground, giving it the terminal, and waits for it
+to finish. With no JOBSPEC the current job is used. Requires job control
+(`set -m', on by default when interactive).
+
+Exit Status:
+The status of the job, or non-zero if job control is disabled or JOBSPEC does
+not name a job."
   (let ((job (find-job sh (first args))))
     (if (null job)
         (progn (format *error-output* "fg: no such job~%") 1)
@@ -1809,6 +2374,13 @@ meaning that process group. Returns T on success, NIL after reporting."
 
 ;;; bg [%job] -------------------------------------------------------------
 (define-builtin "bg" (sh args out)
+  :synopsis "bg [JOBSPEC ...]"
+  :summary "Move jobs to the background."
+  :description "Resumes each stopped JOBSPEC in the background, as though it had been started
+with `&'. With no JOBSPEC the current job is used.
+
+Exit Status:
+Zero unless job control is disabled or a JOBSPEC does not name a job."
   (let ((job (find-job sh (first args))))
     (if (null job)
         (progn (format *error-output* "bg: no such job~%") 1)
@@ -1832,6 +2404,16 @@ bits it clears."
     (format nil "u=~A,g=~A,o=~A" (who 6) (who 3) (who 0))))
 
 (define-builtin "umask" (sh args out)
+  :synopsis "umask [-S] [MODE]"
+  :summary "Display or set the file mode creation mask."
+  :description "With MODE, sets the mask to it; MODE may be octal, or symbolic in the form
+`u=rwx,go=rx'. With no MODE, prints the current mask.
+
+Options:
+  -S  print the mask symbolically rather than in octal
+
+Exit Status:
+Zero unless MODE is invalid."
   (let ((symbolic nil) (rest args))
     (loop while (and rest (string= (first rest) "-S"))
           do (pop rest) (setf symbolic t))
@@ -1916,6 +2498,27 @@ POSIX only requires -f, in 512-byte blocks; the rest follow common usage.")
          (and n (* n unit))))))
 
 (define-builtin "ulimit" (sh args out)
+  :synopsis "ulimit [-HSa] [-cdflnstuv] [LIMIT]"
+  :summary "Modify or display shell resource limits."
+  :description "Reports or sets a limit on a resource available to the shell and to the
+processes it starts. LIMIT may be a number in the resource's own units, or
+`unlimited'; with no LIMIT the current value is printed.
+
+Which limit:
+  -c  core file size (512-byte blocks)     -n  number of open files
+  -d  data segment size (KB)               -s  stack size (KB)
+  -f  size of files written (512-byte blocks, the default and the only
+      resource POSIX requires)             -t  CPU time (seconds)
+  -l  maximum locked memory (KB)           -u  number of user processes
+  -v  size of virtual memory (KB)
+  -a  report every limit
+
+Which value:
+  -H  the hard limit -- once lowered it cannot be raised again
+  -S  the soft limit (reported by default)
+
+Exit Status:
+Zero unless an invalid option is given or the limit cannot be set."
   (let ((hard nil) (soft nil) (flag #\f) (operand nil) (all nil) (rest args))
     (loop while (and rest (> (length (first rest)) 1)
                      (char= (char (first rest) 0) #\-))
@@ -1975,6 +2578,16 @@ POSIX only requires -f, in 512-byte blocks; the rest follow common usage.")
                             1)))))))))))
 
 (define-builtin "hash" (sh args out)
+  :synopsis "hash [-r] [NAME ...]"
+  :summary "Remember or display program locations."
+  :description "Accepted for compatibility. sxsh looks commands up in $PATH each time rather
+than caching locations, so there is nothing to remember or forget.
+
+Options:
+  -r  forget all remembered locations -- a no-op here
+
+Exit Status:
+Zero unless NAME is not found in $PATH."
   (cond
     ((null args)
      ;; print nothing meaningful (empty cache is acceptable)
@@ -1988,6 +2601,14 @@ POSIX only requires -f, in 512-byte blocks; the rest follow common usage.")
 
 ;;; times -----------------------------------------------------------------
 (define-builtin "times" (sh args out)
+  :synopsis "times"
+  :summary "Display process times."
+  :description "Prints the accumulated user and system CPU time for the shell and for all of
+its terminated children: the shell's own pair on the first line, the children's
+on the second, each as MINUTESmSECONDSs.
+
+Exit Status:
+Always zero."
   ;; POSIX: two lines. Line 1 = shell (RUSAGE_SELF) user & system time,
   ;; line 2 = children (RUSAGE_CHILDREN). The kernel accumulates children's
   ;; CPU time as they are reaped, so this reflects all waited-for children.
@@ -2018,16 +2639,71 @@ as its 1st value and system microseconds as its 3rd."
 ;;; builtin form here is only reached with no command, so it applies its
 ;;; redirections permanently by throwing to the executor.
 (define-builtin "exec" (sh args out)
+  :synopsis "exec [COMMAND [ARGUMENT ...]] [REDIRECTION ...]"
+  :summary "Replace the shell with the given command."
+  :description "With COMMAND, runs it in place of the shell: nothing after it is executed,
+and the shell's exit status is the command's.
+
+With NO command, any redirections take effect in the current shell and are
+permanent -- this is how `exec 3>file' and `exec 3>&-' open and close
+descriptors for the rest of the script.
+
+Exit Status:
+Zero if the redirections succeed. If COMMAND cannot be found the shell exits
+with 127; otherwise the shell is replaced and does not return."
   (throw 'exec-builtin args))
 
 ;;; test / [ --------------------------------------------------------------
 
 (define-builtin "test" (sh args out)
+  :synopsis "test EXPRESSION"
+  :summary "Evaluate conditional expression."
+  :description "Exits with status 0 (true) or 1 (false) depending on EXPRESSION.
+
+File tests:
+  -e FILE  exists            -f FILE  is a regular file
+  -d FILE  is a directory    -h, -L FILE  is a symbolic link
+  -r/-w/-x FILE  is readable / writable / executable
+  -s FILE  exists and is not empty
+  -p FILE  is a named pipe   -S FILE  is a socket
+  -b/-c FILE  is a block / character special file
+  -t FD    FD is open on a terminal
+  -g/-u/-k FILE  has the setgid / setuid / sticky bit
+  -N FILE  has been modified since it was last read
+  -O/-G FILE  is owned by the effective user / group
+  F1 -nt/-ot F2  F1 is newer / older than F2
+  F1 -ef F2      F1 and F2 are the same file
+
+String tests:
+  -z STRING  is empty        -n STRING, STRING  is not empty
+  S1 = S2, S1 != S2          S1 < S2, S1 > S2  (code-point order)
+
+Arithmetic tests:
+  N1 -eq/-ne/-lt/-le/-gt/-ge N2
+
+Other:
+  -v NAME  the shell variable NAME is set
+  -o OPT   the shell option OPT is set
+  ! EXPR, EXPR1 -a EXPR2, EXPR1 -o EXPR2, ( EXPR )
+
+Unlike `[[ ]]', operands here are ordinary words, so they are subject to word
+splitting and pathname expansion and must be quoted.
+
+Exit Status:
+Zero if EXPRESSION is true, 1 if false, 2 if it is malformed."
   (handler-case (if (eval-test args) 0 1)
     (test-usage-error (e)
       (format *error-output* "test: ~A~%" e)
       2)))
 (define-builtin "[" (sh args out)
+  :synopsis "[ EXPRESSION ]"
+  :summary "Evaluate conditional expression."
+  :description "Identical to `test' except that a final `]' argument is
+required. See `help test' for the full list of expressions.
+
+Exit Status:
+Zero if EXPRESSION is true, 1 if false, 2 if it is malformed or the closing
+`]' is missing."
   (let ((a args))
     (unless (and a (string= (car (last a)) "]"))
       (format *error-output* "[: missing ]~%") (return-from builtin 2))
@@ -2112,3 +2788,321 @@ as its 1st value and system microseconds as its 3rd."
 (defun directoryp (path)
   (let ((tn (ignore-errors (truename path))))
     (and tn (null (pathname-name tn)) (null (pathname-type tn)))))
+
+;;; ---------------------------------------------------------------------------
+;;; help
+;;; ---------------------------------------------------------------------------
+
+(defparameter +syntax-help+
+  ;; (topic synopsis summary description)
+  ;;
+  ;; Shell GRAMMAR, not builtins, so these deliberately do NOT go into
+  ;; *BUILTINS*: that table drives dispatch, and COMMAND-NAMES maphashes it for
+  ;; completion. `help' searches both.
+  '(("if" "if LIST; then LIST; [ elif LIST; then LIST; ]... [ else LIST; ] fi"
+     "Execute commands conditionally."
+     "The `if LIST' is executed. If its exit status is zero, the `then LIST' is
+executed. Otherwise each `elif LIST' is executed in turn, and if any exits
+zero the corresponding `then LIST' runs. Failing that, the `else LIST' runs if
+one is present.
+
+Exit Status:
+The status of the last command executed, or zero if none was.")
+
+    ("for" "for NAME [in WORDS ...]; do LIST; done"
+     "Execute commands for each member of a list."
+     "NAME is set to each member of WORDS in turn and LIST is executed. With no
+`in WORDS', the positional parameters are used instead.
+
+WORDS are expanded first: brace expansion, then the usual word expansions, so
+`for i in {1..3}' and `for f in *.c' both work.
+
+See also `for ((' for the arithmetic form.
+
+Exit Status:
+The status of the last command executed, or zero if WORDS was empty.")
+
+    ("for ((" "for (( INIT; TEST; STEP )); do LIST; done"
+     "Arithmetic for loop."
+     "INIT is evaluated once, then LIST is executed while TEST evaluates
+non-zero, with STEP evaluated after each iteration. All three are arithmetic
+expressions; an omitted TEST is treated as 1, giving an infinite loop.
+
+Exit Status:
+The status of the last command executed, or zero if the body never ran.")
+
+    ("while" "while LIST; do LIST; done"
+     "Execute commands as long as a test succeeds."
+     "The `while LIST' is executed; while its exit status is zero, the body LIST
+is executed.
+
+Exit Status:
+The status of the last body command executed, or zero if the body never ran.")
+
+    ("until" "until LIST; do LIST; done"
+     "Execute commands as long as a test does not succeed."
+     "As `while', but the body runs while the test's exit status is NON-zero.
+
+Exit Status:
+The status of the last body command executed, or zero if the body never ran.")
+
+    ("case" "case WORD in [PATTERN [| PATTERN]...) LIST ;;]... esac"
+     "Execute commands based on pattern matching."
+     "WORD is expanded and matched against each PATTERN in turn; the LIST of the
+first match is executed. Patterns are shell patterns, not regular expressions.
+Alternatives are separated by `|'.
+
+A clause ends with `;;' to stop, `;&' to fall through into the next clause's
+LIST unconditionally, or `;;&' to continue testing the remaining patterns.
+
+Exit Status:
+The status of the last command executed, or zero if no pattern matched.")
+
+    ("select" "select NAME [in WORDS ...]; do LIST; done"
+     "Select a word from a list and execute commands."
+     "WORDS are printed as a numbered menu on standard error, $PS3 is written as
+a prompt, and a line is read. A number selects the corresponding word, which is
+assigned to NAME; any other input assigns the empty string. The input line is
+kept in REPLY. The menu is reprinted whenever the reply is empty, and the loop
+continues until end of input or a `break'.
+
+With no `in WORDS', the positional parameters are used.
+
+Exit Status:
+The status of the last command executed.")
+
+    ("function" "function NAME { LIST; }  or  NAME () { LIST; }"
+     "Define a shell function."
+     "Creates a function called NAME whose body is LIST. Calling NAME runs the
+body with the arguments as the positional parameters; $0 is unchanged.
+
+The `function' keyword is a bash extension; the POSIX form is `NAME ()'. Both
+accept any compound command as the body, not only a brace group.
+
+Exit Status:
+Zero, unless NAME is not a valid function name.")
+
+    ("{" "{ LIST; }"
+     "Group commands in the current shell."
+     "LIST is executed in the CURRENT shell environment, so assignments and
+`cd' persist afterwards. Unlike `( LIST )' no subshell is created. The braces
+are reserved words, so they need surrounding blanks, and LIST needs a
+terminating `;' or newline.
+
+Redirections apply to the whole group.
+
+Exit Status:
+The status of the last command executed.")
+
+    ("(" "( LIST )"
+     "Execute commands in a subshell."
+     "LIST is executed in a SUBSHELL: variable assignments, `cd', function
+definitions and trap changes do not survive it. Redirections apply to the whole
+group.
+
+Exit Status:
+The status of the last command executed.")
+
+    ("((" "(( EXPRESSION ))"
+     "Evaluate an arithmetic expression."
+     "EXPRESSION is evaluated according to the arithmetic rules (see `let').
+This is a command, not a substitution: it produces no output.
+
+Exit Status:
+Zero if EXPRESSION evaluates to a non-zero value, 1 otherwise -- the reverse of
+the value's truthiness, so `(( i > 0 ))' reads naturally in an `if'.")
+
+    ("[[" "[[ EXPRESSION ]]"
+     "Evaluate a conditional expression."
+     "Like `test', but a shell KEYWORD rather than a builtin, so its operands
+are not subject to word splitting or pathname expansion and `<' and `>' are
+comparison operators rather than redirections.
+
+In addition to everything `test' accepts:
+  STRING == PATTERN  unquoted PATTERN is a shell pattern, not a literal
+  STRING != PATTERN  as above, negated
+  STRING =~ REGEX    POSIX extended regular expression; the match and its
+                     capture groups are left in the BASH_REMATCH array
+  &&, ||             with the usual short-circuit evaluation
+  ( )                grouping
+
+Numeric operators (-eq and friends) evaluate their operands as ARITHMETIC
+here, so `[[ e -eq 3 ]]' is true when e is `1+2'.
+
+Exit Status:
+Zero if EXPRESSION is true.")
+
+    ("!" "! PIPELINE"
+     "Negate the exit status of a pipeline."
+     "PIPELINE is executed and its exit status inverted: zero becomes 1, any
+non-zero becomes 0. `!' is a reserved word and needs a following blank.
+
+Note that a negated pipeline is exempt from `set -e'.
+
+Exit Status:
+The logical negation of PIPELINE's status.")
+
+    ("time" "time [-p] PIPELINE"
+     "Report the time consumed by a pipeline."
+     "PIPELINE is executed and the elapsed real time, user CPU time and system
+CPU time are written to standard error when it finishes. -p selects the POSIX
+output format.
+
+`time' is a reserved word, so it can time any pipeline, including builtins and
+functions that an external time(1) could not see.
+
+Exit Status:
+PIPELINE's status.")
+
+    ("job_spec" "JOB_SPEC [&]"
+     "Refer to a job."
+     "Wherever a command expects a job, it may be named as:
+  %N          job number N
+  %STRING     the job whose command begins with STRING
+  %?STRING    the job whose command contains STRING
+  %%, %+      the current job
+  %-          the previous job
+
+A bare job spec as a command resumes that job in the foreground; with a
+trailing `&' it resumes in the background. See `fg', `bg' and `jobs'.
+
+Exit Status:
+The status of the resumed job.")
+
+    ("coproc" "coproc [NAME] COMMAND"
+     "Run a command in the background with pipes to it."
+     "COMMAND runs asynchronously with its standard input and output connected
+to the shell through two pipes. The descriptors are placed in the array NAME
+(default COPROC) as NAME[0] for reading from the coprocess and NAME[1] for
+writing to it, and its process id in NAME_PID.
+
+Exit Status:
+Zero once the coprocess has been started.")))
+
+(defun help-topic (name)
+  "The (synopsis summary description) for NAME, from either table."
+  (or (gethash name *builtin-help*)
+      (let ((e (assoc name +syntax-help+ :test #'string=)))
+        (and e (rest e)))))
+
+(defun help-topic-names ()
+  (let ((names '()))
+    (maphash (lambda (k v) (declare (ignore v)) (push k names)) *builtin-help*)
+    (dolist (e +syntax-help+) (push (first e) names))
+    (sort (remove-duplicates names :test #'string=) #'string<)))
+
+(defun help-matching-names (pattern)
+  "Topics matching PATTERN. An exact name wins outright, so `help [' finds the
+builtin rather than being read as an unterminated bracket expression."
+  (if (help-topic pattern)
+      (list pattern)
+      (remove-if-not (lambda (n) (shell-pattern-match pattern n))
+                     (help-topic-names))))
+
+(defun help-print-columns (out names)
+  "Two columns of synopses, as bash lists them. Cells are truncated rather than
+wrapped: a wrapped cell would break the column alignment that makes the list
+scannable."
+  (let* ((cols (max 40 (terminal-columns)))
+         (width (max 20 (floor (1- cols) 2)))
+         (syns (mapcar (lambda (n)
+                         (let ((s (or (first (help-topic n)) n)))
+                           (if (> (length s) (1- width))
+                               (subseq s 0 (1- width))
+                               s)))
+                       names))
+         (rows (ceiling (length syns) 2))
+         (v (coerce syns 'vector)))
+    ;; Down the first column, then the second -- the order bash uses, so a
+    ;; sorted list still reads alphabetically down the page.
+    (dotimes (r rows)
+      (let ((a (aref v r))
+            (b (when (< (+ r rows) (length v)) (aref v (+ r rows)))))
+        (if b
+            (format out "~VA~A~%" width a b)
+            (format out "~A~%" a))))))
+
+(define-builtin "help" (sh args out)
+  :synopsis "help [-dms] [PATTERN ...]"
+  :summary "Display information about builtin commands."
+  :description "Displays brief summaries of builtin commands and shell syntax.
+With PATTERN, gives detailed help on all topics matching PATTERN, which is a
+shell pattern -- `help re*' describes read, readarray, readonly and return.
+
+Options:
+  -d  output only a short description of each topic
+  -m  display usage in pseudo-manpage format
+  -s  output only a short usage synopsis for each topic
+
+Arguments:
+  PATTERN   a pattern naming a builtin or a shell syntax topic
+
+Exit Status:
+Zero unless no topic matches PATTERN."
+  (let ((mode nil) (rest args))
+    (loop while (and rest (> (length (first rest)) 1)
+                     (char= (char (first rest) 0) #\-))
+          do (let ((o (pop rest)))
+               ;; `--' ends the options; `help -- help' must describe `help'.
+               (when (string= o "--") (return))
+               (loop for c across (subseq o 1) do
+                 (case c
+                   (#\d (setf mode :desc))
+                   (#\s (setf mode :synopsis))
+                   (#\m (setf mode :man))
+                   (t (format *error-output* "help: -~C: invalid option~%" c)
+                      (format *error-output*
+                              "help: usage: help [-dms] [pattern ...]~%")
+                      (return-from builtin 2))))))
+    (cond
+      ((null rest)
+       (format out "sxsh, a POSIX shell with bash extensions.~%")
+       (format out "These commands and syntax forms are defined internally.~%")
+       (format out "Type `help name' to find out more about the function `name'.~%~%")
+       (help-print-columns out (help-topic-names))
+       0)
+      (t
+       (let ((status 0))
+         (dolist (pattern rest)
+           (let ((names (help-matching-names pattern)))
+             (cond
+               ((null names)
+                (format *error-output*
+                        "help: no help topics match `~A'.  Try `help help'.~%"
+                        pattern)
+                (setf status 1))
+               (t
+                (dolist (n names)
+                  (destructuring-bind (synopsis summary description)
+                      (help-topic n)
+                    (case mode
+                      (:synopsis (format out "~A: ~A~%" n synopsis))
+                      (:desc (format out "~A - ~A~%" n summary))
+                      (:man
+                       (format out "NAME~%    ~A - ~A~%~%" n summary)
+                       (format out "SYNOPSIS~%    ~A~%~%" synopsis)
+                       (format out "DESCRIPTION~%    ~A~%~%" summary)
+                       (help-print-indented out description)
+                       (format out "~%SEE ALSO~%    sxsh(1)~%~%")
+                       (format out "IMPLEMENTATION~%    sxsh~%"))
+                      (t
+                       (format out "~A: ~A~%" n synopsis)
+                       (format out "    ~A~%" summary)
+                       (when (plusp (length description))
+                         (format out "~%")
+                         (help-print-indented out description))))))))))
+         status)))))
+
+(defun help-print-indented (out text)
+  "Write TEXT with each line indented four spaces, blank lines left blank.
+The stored descriptions are written flush-left so they stay readable in the
+source; the indentation is the printer's job."
+  (let ((start 0) (n (length text)))
+    (loop
+      (let ((nl (position #\Newline text :start start)))
+        (let ((line (subseq text start (or nl n))))
+          (if (zerop (length line))
+              (format out "~%")
+              (format out "    ~A~%" line)))
+        (unless nl (return))
+        (setf start (1+ nl))))))

@@ -128,10 +128,15 @@ positional parameter (none when there are none); `"$*"` joins into one.
 any pipeline stage but the last, and for a pipeline led by `!`.
 
 Builtins: `: true false echo printf pwd cd export unset shift exit return break
-continue read set eval . source type test [ command getopts trap wait kill jobs
-fg bg umask hash readonly times exec alias unalias`. `set` supports
+continue read set eval . source type test [ command builtin getopts trap wait
+kill jobs fg bg umask ulimit hash readonly local declare typeset mapfile
+readarray shopt history fc times exec alias unalias help`. `set` supports
 `-e -x -u -f -m`. `trap` installs real signal handlers plus `EXIT`, whose
 status follows POSIX (the trap's own commands do not overwrite it).
+
+`help` documents every builtin and the shell's syntax forms. The text lives at
+each builtin's definition site, and the executor test suite fails if a builtin
+gains or loses one, so it cannot drift away from the code it describes.
 
 ## Job control
 
