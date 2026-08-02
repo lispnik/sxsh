@@ -386,7 +386,8 @@ so builtins in non-final pipeline stages run in-process writing to the pipe."
                (unless (aref stages i)
                  (multiple-value-bind (pid st)
                      (spawn-stage sh cmd (stdin-of i) (stdout-of i) all-fds
-                                  :classified (aref classes i))
+                                  :classified (aref classes i)
+                                  :lastp (= i (1- n)))
                    (setf (aref stages i) (if pid (cons :pid pid) (cons :status st))))
                  ;; Same reasoning for an in-process stage, once it is done:
                  ;; release its output pipe so the next reader sees EOF, and
@@ -425,7 +426,93 @@ so builtins in non-final pipeline stages run in-process writing to the pipe."
 shell with a very large variable table could otherwise overflow it; past this
 we run synchronously instead of failing to spawn.")
 
-(defun spawn-stage (sh cmd stdin stdout close-in-child &key classified)
+(defparameter +parent-only-builtins+
+  '("jobs" "wait" "fg" "bg" "disown")
+  "Builtins that must run in the shell that owns the child processes.
+
+Forking them breaks their whole purpose: a forked `jobs' calls waitpid on
+processes that are its SIBLINGS, gets ECHILD, and reports every running job as
+Done. `jobs | awk ...' did exactly that. They are safe to run inline in a
+pipeline anyway -- their output is a job table, never enough to fill a pipe.")
+
+(defun parent-only-stage-p (cmd words)
+  "True if CMD is a simple command invoking a builtin that must not be forked."
+  (and (eq (ast-type cmd) :simple)
+       (let ((name (or (first words)
+                       ;; No expansion available: fall back to the raw first
+                       ;; word, which covers the literal `jobs | ...' case.
+                       (let ((w (first (simple-command-words cmd))))
+                         (and w (word-text w))))))
+         (and name (member name +parent-only-builtins+ :test #'string=)))))
+
+(defun fork-safe-p ()
+  "True only if forking this image is safe: it must be single-threaded.
+
+fork(2) clones ONLY the calling thread. Any mutex held by another thread stays
+locked forever in the child, so the first allocation needing the GC lock would
+deadlock -- and the child here runs arbitrary Lisp, not an immediate exec.
+SBCL is single-threaded in this image today, but it starts a finalizer thread
+lazily and does so more readily on Linux than on macOS, and CI runs both.
+Hence a runtime check rather than an assumption about the platform.
+
+Declining to fork is not a failure: the caller then runs the stage inline,
+which is the older behaviour -- correct except for the both-stages-in-process
+deadlock -- rather than a child wedged on a lock it can never acquire.
+
+vfork is NOT an alternative. Its child shares the parent's address space and
+may only call exec or _exit; running a pipeline stage in one would corrupt the
+parent directly. That is exactly why posix_spawn can use vfork internally and
+we cannot: it execs immediately, and this never execs."
+  (= 1 (length (sb-thread:list-all-threads))))
+
+(defun fork-stage (sh cmd stdin stdout close-in-child)
+  "Run an in-process pipeline stage in a forked child. Returns a pid, or NIL if
+the fork failed and the caller should fall back to running it inline.
+
+WHY FORK, given this shell otherwise has none. A pipeline stage that runs
+inline runs to completion before the next stage starts, so two adjacent
+in-process stages deadlock as soon as the first writes more than the pipe
+holds: `( ... ) | :' -- a subshell into a builtin -- never gets to the reader.
+Starting children first fixes it only when the READER is a child.
+
+The alternative, re-executing this binary with the deparsed stage, was tried
+and rejected: the child loses too much context and git's t1006-cat-file fell
+from 255/256 to 179/256. fork preserves the environment exactly, which is the
+whole point, and the image is single-threaded so it is safe. No exec follows,
+so this does not reintroduce the fork+exec that posix_spawn exists to avoid --
+external commands are still spawned, never forked.
+
+The flush before forking is not optional: buffered output present in the
+parent would otherwise be written twice, once by each process."
+  (unless (fork-safe-p) (return-from fork-stage nil))
+  (finish-output *standard-output*)
+  (finish-output *error-output*)
+  (let ((pid (ignore-errors (sb-posix:fork))))
+    (cond
+      ((null pid) nil)
+      ((zerop pid)
+       ;; Child. Wire up the pipe, run the stage, leave without unwinding --
+       ;; the parent's cleanups and EXIT traps are not ours to run.
+       (let ((status 1))
+         (ignore-errors
+          (unless (= stdin 0) (sb-posix:dup2 stdin 0))
+          (unless (= stdout 1) (sb-posix:dup2 stdout 1))
+          (dolist (fd close-in-child)
+            (unless (or (= fd stdin) (= fd stdout))
+              (ignore-errors (sb-posix:close fd))))
+          (setf status
+                (handler-case (exec-node sh cmd)
+                  (shell-exit (e) (or (shell-exit-code e) 0))
+                  (func-return (e) (or (cf-code e) 0))
+                  (loop-break () 0)
+                  (loop-continue () 0)
+                  (stream-error () 141)
+                  (error () 1)))
+          (finish-output *standard-output*))
+         (sb-posix:exit (if (integerp status) status 0))))
+      (t pid))))
+
+(defun spawn-stage (sh cmd stdin stdout close-in-child &key classified lastp)
   "Run one pipeline stage. Returns (values pid nil) for an external command, or
 (values nil status) for a builtin/compound run in-process.
 STDIN/STDOUT are fds to attach. CLOSE-IN-CHILD lists pipe fds to close.
@@ -461,6 +548,12 @@ substitution among them runs again. Classifying a stage twice made
           ((and (consp pid) (eq (first pid) :command-error))
            (values nil (second pid)))     ; lookup failed: no child to wait for
           (t (values pid nil))))
+      ;; A non-final builtin/compound must run concurrently with the stage
+      ;; reading from it, or the two deadlock once the pipe fills.
+      (let ((pid (unless (or lastp (parent-only-stage-p cmd words))
+                   (fork-stage sh cmd stdin stdout close-in-child))))
+       (if pid
+        (values pid nil)
       ;; builtin / compound: run in-process with fds redirected temporarily
       (let ((saved-in (sb-posix:dup 0)) (saved-out (sb-posix:dup 1)))
         (unwind-protect
@@ -479,7 +572,7 @@ substitution among them runs again. Classifying a stage twice made
                              (loop-break () 0)
                              (loop-continue () 0))))
           (sb-posix:dup2 saved-in 0) (sb-posix:close saved-in)
-          (sb-posix:dup2 saved-out 1) (sb-posix:close saved-out))))))
+          (sb-posix:dup2 saved-out 1) (sb-posix:close saved-out))))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Simple commands

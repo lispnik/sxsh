@@ -597,14 +597,32 @@ Two things to know before touching it:
   its input pipe; closing that read end made the producer die of EPIPE and the pipeline report
   141 instead of the 127 the failed lookup owes it (`echo hi | nosuchcmd`).
 
-**Known limitation.** The fix only helps when the *reader* is a child process. A pipeline whose
-stages are BOTH in-process -- `( ... ) | :`, a subshell into a builtin -- still deadlocks the
-same way, because neither side is started before the other runs. git's t3600-rm test 36 hits
-exactly that. Fixing it properly means giving every non-final stage its own process, as bash
-does. Re-executing the binary was tried and is NOT the answer: the child loses too much context
-and t1006-cat-file fell from 255/256 to 179/256. The remaining option is `fork(2)` for
-in-process stages, which would preserve context exactly -- but it contradicts this project's
-stated no-fork design, so it is a decision to take deliberately rather than drift into.
+**Non-final in-process stages are forked.** Starting children first is not enough on its own: a
+pipeline whose stages are BOTH in-process -- `( ... ) | :`, a subshell into a builtin -- has
+nobody to start, so the producer still fills the pipe with no reader. `fork-stage` gives each
+non-final builtin/compound its own process.
+
+This is the one place the shell forks, and it is deliberate. The no-fork rule elsewhere is
+about launching *external* commands, where `posix_spawn` avoids fork+exec; here no exec follows,
+which is exactly the point -- the child must keep the shell's state. Re-executing the binary
+instead was tried and rejected: the child loses too much context and t1006-cat-file fell from
+255/256 to 179/256.
+
+Three constraints on that fork, each learned the hard way:
+
+- **`fork-safe-p` checks the image is single-threaded, at runtime.** fork clones only the
+  calling thread, so a mutex held by any other thread stays locked forever and the child
+  deadlocks on its first allocation. SBCL starts a finalizer thread lazily and does so more
+  readily on Linux than macOS, and CI runs both. Declining to fork just falls back to inline,
+  which is the older behaviour rather than a wedged child.
+- **`vfork` is not an alternative.** Its child shares the parent's address space and may only
+  call exec or `_exit`; running a stage in one would corrupt the parent. That is why
+  `posix_spawn` may use vfork internally and we cannot.
+- **Flush before forking**, or buffered output already in the parent is written twice, once by
+  each process.
+- **`+parent-only-builtins+` (`jobs`, `wait`, `fg`, `bg`, `disown`) are never forked.** A forked
+  `jobs` calls waitpid on its own siblings, gets ECHILD, and reports every running job as Done.
+  Their output is a job table, so running them inline risks no deadlock.
 
 ### git's test suite is the most demanding real script we have
 
