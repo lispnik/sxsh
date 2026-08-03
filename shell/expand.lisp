@@ -692,6 +692,12 @@ variable names."
                        (not (member (char rest 1) '(#\- #\= #\? #\+)))))
           (return-from expand-braced-param
             (values (substring-expand sh name (subseq rest 1)) nil)))
+        ;; bash: ${name@OP} parameter transformation. Before the operator
+        ;; table, which has no `@' in it and would fall through to the plain
+        ;; value -- which is how `${v@Q}' used to expand to v unquoted.
+        (when (and (= (length rest) 2) (char= (char rest 0) #\@))
+          (return-from expand-braced-param
+            (values (transform-expand sh name (char rest 1)) nil)))
         ;; bash: ${name/pat/rep}. Handled before the operator table because
         ;; the pattern may itself contain any of those operator characters.
         (when (and (plusp (length rest)) (char= (char rest 0) #\/))
@@ -758,6 +764,103 @@ variable names."
               ((string= op "+")  (if val (values (expand-nested sh word) nil)
                                      (values "" nil)))
               (t (values (or val "") nil)))))))))
+
+(defun quote-for-reuse (s)
+  "S written so the shell reads it back unchanged, as bash's ${v@Q} writes it.
+
+Not the same rendering as printf's %q, which backslash-escapes each special
+character: @Q always quotes, so `plain' becomes 'plain'. A value holding a
+control character needs the $'...' form, which is the only one that can
+express a newline on one line."
+  (if (some (lambda (c) (< (char-code c) 32)) s)
+      (with-output-to-string (o)
+        (write-string "$'" o)
+        (loop for c across s
+              do (case c
+                   (#\Newline (write-string "\\n" o))
+                   (#\Tab (write-string "\\t" o))
+                   (#\Return (write-string "\\r" o))
+                   (t (if (< (char-code c) 32)
+                          (format o "\\x~2,'0x" (char-code c))
+                          (progn (when (find c "'\\") (write-char #\\ o))
+                                 (write-char c o))))))
+        (write-char #\' o))
+      (shell-quote s)))
+
+(defun variable-attributes (sh name)
+  "The attribute letters `declare -p' would print for NAME, as ${name@a} gives
+them: most-significant first, empty when the variable has none."
+  (let ((base (nth-value 0 (split-subscript name))))
+    (with-output-to-string (o)
+      (let ((arr (var-array sh base)))
+        (when arr
+          (write-char (if (eq (sh-array-kind arr) :assoc) #\A #\a) o)))
+      (when (nth-value 1 (gethash base (shell-int-vars sh))) (write-char #\i o))
+      (when (readonly-p sh base) (write-char #\r o))
+      (when (nth-value 2 (get-var sh base)) (write-char #\x o)))))
+
+(defun transform-value (value op)
+  "Apply one ${...@OP} transformation to a single VALUE."
+  (case op
+    ;; @K and @k differ from @Q only for arrays, which they render as key/value
+    ;; pairs; for one value all three quote it.
+    ((#\Q #\K #\k) (quote-for-reuse value))
+    (#\U (string-upcase value))
+    (#\L (string-downcase value))
+    (#\u (if (plusp (length value))
+              (concatenate 'string (string (char-upcase (char value 0)))
+                           (subseq value 1))
+              value))
+    ;; @E reads the value as a $'...' body; @P expands prompt escapes, which
+    ;; without any PS1 machinery leaves the value alone.
+    (#\E (expand-dollar-quote-string value))
+    (t value)))
+
+(defun transform-expand (sh name op)
+  "${name@OP}: a parameter transformation.
+
+$@, $* and an array's [@]/[*] transform ELEMENT BY ELEMENT and are then joined,
+so `${arr[@]@Q}' gives 'a' 'b c' rather than one quoted string holding both.
+Every other name transforms its single value.
+
+@a and @A are about the VARIABLE rather than its value -- its attribute
+letters, and the assignment that would recreate it -- so they are answered
+here and never reach TRANSFORM-VALUE."
+  (unless (find op "QEPAKakuLU")
+    (error "~A: bad substitution" name))
+  (let ((base (nth-value 0 (split-subscript name))))
+    (case op
+      (#\a (return-from transform-expand (variable-attributes sh name)))
+      (#\A (return-from transform-expand
+              (if (nth-value 1 (get-var sh base))
+                  (format nil "~A=~A" base
+                          (quote-for-reuse (or (param-value sh name) "")))
+                  "")))))
+  (let ((elements (transform-elements sh name)))
+    (if elements
+        (format nil "~{~A~^ ~}"
+                (mapcar (lambda (v) (transform-value v op)) elements))
+        ;; An unset variable transforms to nothing at all: ${u@Q} is empty,
+        ;; not the two characters '' that an empty-but-set variable gives.
+        (if (and (not (special-param-p name))
+                 (not (nth-value 1 (get-var sh (nth-value 0 (split-subscript name))))))
+            ""
+            (transform-value (or (param-value sh name) "") op)))))
+
+(defun transform-elements (sh name)
+  "The list of values a transformation should map over, or NIL for a scalar."
+  (cond ((or (string= name "@") (string= name "*"))
+         (coerce (shell-positional sh) 'list))
+        (t (multiple-value-bind (base sub) (split-subscript name)
+             (let ((arr (var-array sh base)))
+               (and arr sub (member sub '("@" "*") :test #'string=)
+                    (array-values arr)))))))
+
+(defun expand-dollar-quote-string (s)
+  "The $'...' reading of S: backslash escapes interpreted, everything else
+literal. A closing quote is appended because EXPAND-DOLLAR-QUOTE scans for
+one; a `'\'' already inside S is escaped and so cannot end the scan early."
+  (values (expand-dollar-quote (concatenate 'string s "'") 0 (1+ (length s)))))
 
 (defun substring-expand (sh name spec)
   "Implement ${name:offset:length}. SPEC is the text after the first colon,

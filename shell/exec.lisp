@@ -660,6 +660,11 @@ keeps whole."
                 (every (lambda (c) (or (alphanumericp c) (char= c #\_)))
                        name))))))
 
+(defun array-literal-operand-p (raw)
+  "True if RAW is a declaration-utility operand of the form `name=(...)'."
+  (let ((eq (position #\= raw)))
+    (and eq (array-literal-p (subseq raw (1+ eq))))))
+
 (defun process-substitution-p (raw)
   "True if RAW is a `<(cmd)' or `>(cmd)' word."
   (and (>= (length raw) 3)
@@ -717,15 +722,24 @@ Applies alias substitution to the command name (first word)."
               (push path argv)
               (setf first nil)))
       (let* ((as-assignment (and declaration (assignment-operand-p raw)))
-             (fields (expand-word-to-fields
-                      sh raw
-                      ;; Operands of export/readonly are expanded exactly like
-                      ;; a real assignment: tilde after = and :, and NO field
-                      ;; splitting or pathname expansion -- `export x=$v' with
-                      ;; v="a b" must export the whole value, not just "a".
-                      :assignment as-assignment
-                      :split (not as-assignment)
-                      :glob (not as-assignment))))
+             (fields
+               (cond
+                 ;; `declare a=(x "y z")' has to reach ASSIGN-ONE with its
+                 ;; quoting intact: the array literal is expanded word by word
+                 ;; there, and quote removal here would have already turned
+                 ;; "y z" into two elements. A real assignment keeps the raw
+                 ;; text for the same reason; this is the declaration-utility
+                 ;; spelling of it.
+                 ((and as-assignment (array-literal-operand-p raw)) (list raw))
+                 (t (expand-word-to-fields
+                     sh raw
+                     ;; Operands of export/readonly are expanded exactly like
+                     ;; a real assignment: tilde after = and :, and NO field
+                     ;; splitting or pathname expansion -- `export x=$v' with
+                     ;; v="a b" must export the whole value, not just "a".
+                     :assignment as-assignment
+                     :split (not as-assignment)
+                     :glob (not as-assignment))))))
         (when first
           (setf declaration (and (member (alias-resolved-name sh (first fields))
                                          +declaration-utilities+

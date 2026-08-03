@@ -2150,12 +2150,20 @@ Zero unless an invalid name is given."
              0)
       (progn
         (dolist (a args)
-          (let ((eq (position #\= a)))
-            (if eq
-                (let ((name (subseq a 0 eq)))
-                  (set-var sh name (subseq a (1+ eq)))
-                  (mark-readonly sh name))
-                (mark-readonly sh a))))
+          (cond
+            ;; -a/-A/-f/-p only say what KIND of name follows; the value that
+            ;; arrives is already an array literal or not.
+            ((and (> (length a) 1) (char= (char a 0) #\-)))
+            (t
+             (let ((eq (position #\= a)))
+               (if eq
+                   (let ((name (subseq a 0 eq)))
+                     ;; ASSIGN-ONE, not SET-VAR: `readonly -a r=(a "b c")'
+                     ;; arrives with the literal intact and has to be split
+                     ;; into elements the way a plain assignment would be.
+                     (assign-one sh name (subseq a (1+ eq)) nil)
+                     (mark-readonly sh name))
+                   (mark-readonly sh a))))))
         0)))
 
 (define-builtin "local" (sh args out)

@@ -1220,6 +1220,40 @@ check bx-upper-first    'Ab'            0 'v=ab; echo "${v^}"'
 check bx-lower-first    'aB'            0 'v=AB; echo "${v,}"'
 check bx-upper-pattern  'hEllO'         0 'v=hello; echo "${v^^[eo]}"'
 check bx-case-empty     '[]'            0 'v=; echo "[${v^^}]"'
+# ${name@OP} parameter transformations. Every expectation diffed against bash.
+check bx-at-Q           "'a b'"        0 'v="a b"; echo "${v@Q}"'
+check bx-at-Q-plain     "'plain'"      0 'v=plain; echo "${v@Q}"'   # @Q always quotes
+check bx-at-Q-empty     "''"           0 'v=""; echo "${v@Q}"'
+check bx-at-Q-quote     "'it'\''s'"    0 'v="it'"'"'s"; echo "${v@Q}"'
+check bx-at-Q-ctrl      "\$'a\\tb'"    0 'v=$(printf "a\tb"); printf "%s\n" "${v@Q}"'
+check bx-at-Q-unset     '[]'           0 'unset u; echo "[${u@Q}]"'  # unset differs from empty
+check bx-at-U           'ABC'          0 'v=abc; echo "${v@U}"'
+check bx-at-L           'abc'          0 'v=aBc; echo "${v@L}"'
+check bx-at-u           'Abc'          0 'v=abc; echo "${v@u}"'
+check bx-at-E           'a	b'         0 'v="a\tb"; printf "%s\n" "${v@E}"'
+check bx-at-a-none      '[]'           0 'v=x; echo "[${v@a}]"'
+check bx-at-a-int       'i'            0 'declare -i n=1; echo "${n@a}"'
+check bx-at-a-array     'a'            0 'declare -a a=(1); echo "${a@a}"'
+check bx-at-a-assoc     'A'            0 'declare -A m; echo "${m@a}"'
+check bx-at-a-readonly  'r'            0 'declare -r r=1; echo "${r@a}"'
+check bx-at-a-export    'x'            0 'declare -x e=1; echo "${e@a}"'
+check bx-at-A           "v='x y'"      0 'v="x y"; echo "${v@A}"'
+# $@ and an array's [@] transform element by element, then join
+check bx-at-Q-params    "'a' 'b c'"    0 'set -- a "b c"; echo "${@@Q}"'
+check bx-at-Q-array     "'a' 'b c'"    0 'declare -a arr=(a "b c"); echo "${arr[@]@Q}"'
+check_err bx-at-bad     'bad substitution' 1 'v=1; echo "${v@Z}"'
+# the property @Q exists for: the result re-parses to the original value
+check bx-at-Q-roundtrip 'same'         0 'val="a b\"c*"; eval "x=${val@Q}"; [ "$x" = "$val" ] && echo same'
+check bx-at-Q-roundtrip2 'same'        0 'val=$(printf "a\tb\nc"); eval "x=${val@Q}"; [ "$x" = "$val" ] && echo same'
+
+# A declaration utility keeps an array literal's quoting: `declare a=(x "y z")'
+# is two elements, as a plain assignment would be.
+check bx-decl-array-quote '[a][b c]'   0 'declare -a arr=(a "b c"); printf "[%s]" "${arr[@]}"; echo'
+check bx-decl-array-count '2'          0 'declare -a arr=(a "b c"); echo ${#arr[@]}'
+check bx-local-array-quote '[x][y z]'  0 'f() { local -a a=(x "y z"); printf "[%s]" "${a[@]}"; echo; }; f'
+check bx-ro-array-quote  '[a][b c]'    0 'readonly -a r=(a "b c"); printf "[%s]" "${r[@]}"; echo'
+check bx-decl-assoc-quote '[v w]'      0 'declare -A m=([k]="v w"); printf "[%s]" "${m[k]}"; echo'
+check bx-decl-array-split '2'          0 'v="x y"; declare -a a=($v); echo ${#a[@]}'
 # ${!x} indirection and ${!prefix*}
 check bx-indirect       'z'             0 'x=y; y=z; echo ${!x}'
 check bx-indirect-unset '[]'            0 'x=nosuch_zz; echo "[${!x}]"'
