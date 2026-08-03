@@ -273,6 +273,28 @@ check alias-after-redir  'ok'  0 'alias e_=echo
 check alias-dashdash    'st=0' 0 'alias -- foo=echo; echo st=$?'
 check unalias-dashdash  'st=0' 0 'alias a=echo; unalias -- a; echo st=$?'
 check_err unalias-usage 'usage' 2 'unalias'
+# A value ending in a blank makes the NEXT word a candidate, and the chain
+# continues while each value ends in one. There is no self-reference guard
+# across words: the second `echo-x' is a new word, not part of the first's
+# replacement, so it expands too.
+check alias-blank-chain 'x echo x' 0 'x=x
+alias echo-x="echo \$x "
+echo-x echo-x'
+check alias-chain-deep  '1
+2
+3'                             0 'alias FOR1="for "
+alias FOR2="FOR1 "
+alias eye1="i "
+alias eye2="eye1 "
+alias IN="in "
+one=1
+FOR2 eye2 IN $one "2" 3; do echo $i; done'
+# ...and the chain survives a line continuation between the words.
+check alias-chain-continued 'ONE TWO' 0 'alias e_="echo "
+alias one="ONE "
+alias two="TWO"
+e_ one \
+  two'
 
 # --- $( ) is a subshell ENVIRONMENT, not just a control-flow scope ----------
 # It ran in-process sharing all state, so everything it touched escaped.

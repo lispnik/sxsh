@@ -225,6 +225,30 @@ It is NOT the keyword when followed by a pipe/operator/terminator (e.g.
 ;;; command dispatch
 ;;; ---------------------------------------------------------------------------
 
+(defun blank-terminated-p (text)
+  (and (plusp (length text))
+       (member (char text (1- (length text))) '(#\Space #\Tab))))
+
+(defun alias-replacement (p)
+  "The text to splice for the alias named by the lookahead, or NIL.
+
+If a value ends in a blank the NEXT word is a candidate too, and the chain
+continues for as long as each value ends in one -- that is the rule behind
+`alias sudo=\"sudo \"'. It has no self-reference guard, deliberately:
+`alias echo-x='echo $x '; echo-x echo-x' expands BOTH words, because the
+second is a new word rather than part of the first's replacement. Those words
+have to be recognised textually, before the tokens after them are scanned."
+  (let ((body (funcall *alias-lookup* (cur-text p))))
+    (when body
+      (let ((text body))
+        (loop while (blank-terminated-p text) do
+          (multiple-value-bind (next end) (lx-next-plain-word (parser-lexer p))
+            (let ((nbody (and next (funcall *alias-lookup* next))))
+              (unless nbody (return))
+              (setf (lexer-pos (parser-lexer p)) end)
+              (setf text (concatenate 'string text nbody)))))
+        text))))
+
 (defun expand-aliases-at-point (p)
   "Substitute an alias when its name is the next COMMAND word (POSIX 2.3.1).
 
@@ -234,36 +258,18 @@ argv instead -- as the executor used to -- could only work for aliases whose
 value was a plain word list: `alias ll=\"ls -l | less\"' handed `-l | less' to
 ls as ordinary arguments.
 
-Two rules from the standard:
-
-  * A name is not substituted while its own replacement is being scanned, so
-    `alias ls=\"ls -x\"' terminates instead of recurring.
-  * If a value ends in a blank, the NEXT word is a candidate too -- the rule
-    that makes `alias sudo=\"sudo \"' expand an aliased command after sudo.
-    That word has to be recognised textually, before the tokens after it are
-    scanned, which is what LX-NEXT-PLAIN-WORD is for."
+A name is not substituted again while its own replacement is being scanned, so
+`alias ls=\"ls -x\"' terminates instead of recurring."
   (let ((seen '()))
     (loop
       (unless (and *alias-lookup* (eq (cur-type p) :word)) (return))
       (let ((name (cur-text p)))
         (when (member name seen :test #'string=) (return))
-        (let ((body (funcall *alias-lookup* name)))
-          (unless body (return))
+        (let ((text (alias-replacement p)))
+          (unless text (return))
           (push name seen)
-          (let ((text body))
-            ;; Trailing blank: pull the following word in and expand it too.
-            (when (and (plusp (length body))
-                       (member (char body (1- (length body))) '(#\Space #\Tab)))
-              (multiple-value-bind (next end) (lx-next-plain-word (parser-lexer p))
-                (when next
-                  (let ((nbody (and (not (member next seen :test #'string=))
-                                    (funcall *alias-lookup* next))))
-                    (when nbody
-                      (push next seen)
-                      (setf (lexer-pos (parser-lexer p)) end)
-                      (setf text (concatenate 'string body nbody)))))))
-            (lx-splice (parser-lexer p) text)
-            (setf (parser-cur p) (next-token (parser-lexer p)))))))))
+          (lx-splice (parser-lexer p) text)
+          (setf (parser-cur p) (next-token (parser-lexer p))))))))
 
 (defun parse-command (p)
   (expand-aliases-at-point p)

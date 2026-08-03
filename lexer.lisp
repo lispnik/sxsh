@@ -75,7 +75,15 @@ Returns (values word end-index), or NIL if the next thing is not a plain word.
 Used only for the trailing-blank rule, where a candidate for alias expansion
 has to be identified before the tokens ahead of it are scanned."
   (let* ((s (lexer-string lx)) (n (lexer-len lx)) (i (lexer-pos lx)))
-    (loop while (and (< i n) (member (char s i) '(#\Space #\Tab))) do (incf i))
+    ;; Blanks, and line continuations -- an alias chain may be split across
+    ;; lines with `\' and the words are still adjacent.
+    (loop
+      (cond
+        ((and (< i n) (member (char s i) '(#\Space #\Tab))) (incf i))
+        ((and (< (1+ i) n) (char= (char s i) #\\)
+              (char= (char s (1+ i)) #\Newline))
+         (incf i 2))
+        (t (return))))
     (let ((start i))
       (loop while (and (< i n)
                        (not (member (char s i)
