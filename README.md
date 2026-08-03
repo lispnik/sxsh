@@ -4,7 +4,7 @@ Two ASDF systems: a parser for the POSIX shell command language, and an
 executor built on it that runs as a working shell. SBCL only; Linux and macOS.
 
 ```
-make check     # build and run every suite (540 checks)
+make check     # build and run every suite (1518 checks)
 make build     # save a standalone bin/sxsh
 bin/sxsh -c 'for i in 1 2 3; do echo $i; done'
 bin/sxsh script.sh args...
@@ -138,6 +138,12 @@ it).
 `dirs`/`pushd`/`popd` keep the directory stack's top entry equal to `$PWD`
 rather than storing it, so `cd` replaces it for free and the stack cannot come
 to name a directory the shell is not in.
+
+`PS1`, `PS2` and `PS4` are expanded before use: bash's backslash escapes
+(`\u \h \w \W \$ \n \t \d \D{fmt} \j \! \[ \]` and the rest) first, then
+parameter, command and arithmetic expansion. `\[ \]` mark a non-printing run,
+which the line editor skips when it measures the prompt's width, so a coloured
+prompt does not throw off the cursor. `${var@P}` applies the same two passes.
 
 `help` documents every builtin and the shell's syntax forms. The text lives at
 each builtin's definition site, and the executor test suite fails if a builtin

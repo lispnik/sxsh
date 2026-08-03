@@ -811,8 +811,8 @@ them: most-significant first, empty when the variable has none."
               (concatenate 'string (string (char-upcase (char value 0)))
                            (subseq value 1))
               value))
-    ;; @E reads the value as a $'...' body; @P expands prompt escapes, which
-    ;; without any PS1 machinery leaves the value alone.
+    ;; @E reads the value as a $'...' body. @P is handled in TRANSFORM-EXPAND,
+    ;; which has the shell it needs to expand a prompt.
     (#\E (expand-dollar-quote-string value))
     (t value)))
 
@@ -831,6 +831,11 @@ here and never reach TRANSFORM-VALUE."
   (let ((base (nth-value 0 (split-subscript name))))
     (case op
       (#\a (return-from transform-expand (variable-attributes sh name)))
+      ;; @P is prompt expansion: the same two passes $PS1 gets. It was the
+      ;; identity while there was no prompt machinery to call.
+      (#\P (return-from transform-expand
+              (prompt-strip-markers
+               (expand-prompt sh (or (param-value sh name) "")))))
       (#\A (return-from transform-expand
               (if (nth-value 1 (get-var sh base))
                   (format nil "~A=~A" base

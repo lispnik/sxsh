@@ -1318,6 +1318,40 @@ check bx-at-a-array     'a'            0 'declare -a a=(1); echo "${a@a}"'
 check bx-at-a-assoc     'A'            0 'declare -A m; echo "${m@a}"'
 check bx-at-a-readonly  'r'            0 'declare -r r=1; echo "${r@a}"'
 check bx-at-a-export    'x'            0 'declare -x e=1; echo "${e@a}"'
+# ${v@P} is prompt expansion -- the same two passes $PS1 gets -- so it is also
+# how the prompt escapes are testable without a terminal. Diffed against bash.
+check ps-esc-user       "<$(id -un)>"  0 'PS1="<\u>"; echo "${PS1@P}"'
+check ps-esc-dollar     '<$>'          0 'PS1="<\$>"; echo "${PS1@P}"'
+check ps-esc-newline    '<
+>'                                     0 'PS1="<\n>"; echo "${PS1@P}"'
+check ps-esc-octal      '<A>'          0 'PS1="<\101>"; echo "${PS1@P}"'
+check ps-esc-backslash  '<\>'          0 'PS1="<\\\\>"; echo "${PS1@P}"'
+check ps-esc-unknown    '<\z>'         0 'PS1="<\z>"; echo "${PS1@P}"'
+check ps-esc-shell      '<sxsh>'       0 'PS1="<\s>"; echo "${PS1@P}"'
+check ps-esc-jobs       '<0>'          0 'PS1="<\j>"; echo "${PS1@P}"'
+check ps-esc-strftime   "<$(date +%Y)>" 0 'PS1="<\D{%Y}>"; echo "${PS1@P}"'
+check ps-esc-w-home     '<~>'          0 'cd "$HOME"; PS1="<\w>"; echo "${PS1@P}"'
+check ps-esc-W-home     '<~>'          0 'cd "$HOME"; PS1="<\W>"; echo "${PS1@P}"'
+check ps-esc-w-tmp      '</tmp>'       0 'cd /tmp; PS1="<\w>"; echo "${PS1@P}"'
+check ps-esc-W-root     '</>'          0 'cd /; PS1="<\W>"; echo "${PS1@P}"'
+# \[ \] mark a non-printing run: stripped from the output, skipped when the
+# line editor measures the prompt's width
+check ps-esc-hide       'Xy'           0 'PS1="\[X\]y"; echo "${PS1@P}"'
+# the second pass: parameter, command and arithmetic expansion
+check ps-expand-var     '[hi]'         0 'X=hi; PS1="[\$X]"; echo "${PS1@P}"'
+check ps-expand-arith   '3'            0 'PS1="\$((1+2))"; echo "${PS1@P}"'
+check ps-expand-cmdsub  'atb'          0 'PS1="a\`echo t\`b"; echo "${PS1@P}"'
+check ps-expand-unset   ''             0 'PS1="\$notset"; echo "${PS1@P}"'
+# escapes run BEFORE expansion, so \u resolves first and $X second
+check ps-order          "$(id -un)-hi" 0 'X=hi; PS1="\u-\$X"; echo "${PS1@P}"'
+# a prompt is not a word: quotes stay literal and globs are not expanded
+check ps-not-a-word     "a'b"          0 "PS1=\"a'b\"; echo \"\${PS1@P}\""
+check ps-no-glob        'a*b'          0 'PS1="a*b"; echo "${PS1@P}"'
+# PS4 gets the same treatment: this used to trace as the literal [$LINENO]
+check_err ps4-expands   'x= true'      0 'X=x; PS4="\$X= "; set -x; true'
+# PS1 and PS2 are unset in a non-interactive shell, as in bash
+check ps1-unset-script  'UNSET'        0 'echo "${PS1-UNSET}"'
+check ps2-unset-script  'UNSET'        0 'echo "${PS2-UNSET}"'
 check bx-at-A           "v='x y'"      0 'v="x y"; echo "${v@A}"'
 # $@ and an array's [@] transform element by element, then join
 check bx-at-Q-params    "'a' 'b c'"    0 'set -- a "b c"; echo "${@@Q}"'

@@ -2,6 +2,28 @@
 
 (in-package #:sxsh-shell)
 
+(defun apply-interactive-defaults (sh interactive)
+  "The settings an interactive shell starts with.
+
+Split out because `-i' is seen AFTER the shell is built: the option handler
+used to set the interactive flag alone, leaving PS1 empty and the line editor
+off, so `sxsh -i' ran with no prompt at all.
+
+An inherited PS1 is the user's and is left alone, as bash leaves it. The
+default matches bash's shape -- shell name, version, and $ or # for root --
+which is also the smallest thing that demonstrates the prompt escapes work."
+  (when interactive
+    (setf (gethash :emacs (shell-options sh)) t)
+    ;; Only an interactive shell gets a default. A non-interactive one leaves
+    ;; PS1 UNSET, as bash does -- writing an empty string there meant `-i'
+    ;; later found it already set and kept the empty prompt.
+    (unless (nth-value 1 (get-var sh "PS1"))
+      (set-var sh "PS1" "\\s-\\v\\$ "))))
+
+(defparameter +sxsh-version+ "0.1"
+  "Reported by the prompt escapes \\v and \\V. bash distinguishes them
+(release vs release.patch); we have only the one number.")
+
 (defparameter +shopts-default-on+ '("globskipdots")
   "shopt names bash enables by default. SHOPT-P reads presence in the table,
 so a default-on option has to be seeded there rather than inferred.")
@@ -152,10 +174,9 @@ configure run reported success.")
     ;; sensible defaults
     (unless (nth-value 1 (get-var sh "IFS"))
       (set-var sh "IFS" (format nil " ~C~C" #\Tab #\Newline)))
-    ;; Line editing is on by default for an interactive shell, as in bash.
-    (when interactive (setf (gethash :emacs (shell-options sh)) t))
-    (set-var sh "PS1" (if interactive "$ " ""))
-    (set-var sh "PS2" "> ")
+    (apply-interactive-defaults sh interactive)
+    (when (and interactive (not (nth-value 1 (get-var sh "PS2"))))
+      (set-var sh "PS2" "> "))
     ;; POSIX-mandated variables the shell itself must provide.
     (set-var sh "PPID" (princ-to-string (sb-posix:getppid)))
     ;; getopts starts at the first operand; scripts test and reset OPTIND, so

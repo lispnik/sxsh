@@ -144,6 +144,15 @@ appear -- ESC [ ... final, and ESC ] ... BEL/ST."
     (loop while (< i len) do
       (let ((c (char string i)))
         (cond
+          ;; A `\[ ... \]' run from the prompt occupies no columns at all --
+          ;; that is what the markers are for. Counting it made every column
+          ;; calculation after a coloured prompt wrong.
+          ((char= c +prompt-hide-start+)
+           (incf i)
+           (loop while (and (< i len) (char/= (char string i) +prompt-hide-end+))
+                 do (incf i))
+           (incf i))
+          ((char= c +prompt-hide-end+) (incf i))
           ((and (char= c #\Escape) (< (1+ i) len) (char= (char string (1+ i)) #\[))
            (incf i 2)
            (loop while (and (< i len)
@@ -204,8 +213,9 @@ gives us no way to ask."
     (term-write (string #\Return))
     (when (plusp (led-cursor-row led))
       (term-write (format nil "~A~DA" +csi+ (led-cursor-row led))))
-    ;; 2. prompt + text, clearing to end of each line as we go
-    (term-write (led-prompt led))
+    ;; 2. prompt + text, clearing to end of each line as we go. The \[ \]
+    ;; markers are ours, not the terminal's, so they come out here.
+    (term-write (prompt-strip-markers (led-prompt led)))
     (loop for ch across display
           do (if (char= ch #\Newline)
                  (progn (term-write (format nil "~A0K" +csi+))
@@ -668,8 +678,10 @@ switches to $PS2 for continuations. PS2 was defined and never used until now."
   (let ((acc ""))
     (loop
       (let* ((prompt (if (string= acc "")
-                         (or (nth-value 0 (get-var sh "PS1")) "$ ")
-                         (or (nth-value 0 (get-var sh "PS2")) "> ")))
+                         (expand-prompt sh (or (nth-value 0 (get-var sh "PS1"))
+                                               "\\s-\\v\\$ "))
+                         (expand-prompt sh (or (nth-value 0 (get-var sh "PS2"))
+                                               "> "))))
              (line (edit-one-line sh prompt)))
         (case line
           (:no-tty (return :no-tty))

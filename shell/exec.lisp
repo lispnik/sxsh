@@ -1041,7 +1041,8 @@ first element."
 
 (defun xtrace (sh node words)
   "Print the expanded simple command to stderr, prefixed by $PS4 (default '+ ')."
-  (let ((ps4 (or (nth-value 0 (get-var sh "PS4")) "+ "))
+  (let ((ps4 (prompt-strip-markers
+              (expand-prompt sh (or (nth-value 0 (get-var sh "PS4")) "+ "))))
         (assigns (loop for a in (simple-command-assignments node)
                        collect (format nil "~A=~A"
                                        (assignment-name a)
@@ -2023,6 +2024,167 @@ Encoding:
 ;;; ---------------------------------------------------------------------------
 ;;; Command substitution & eval helpers (referenced by expand.lisp / builtins)
 ;;; ---------------------------------------------------------------------------
+
+
+;;; ---------------------------------------------------------------------------
+;;; Prompt expansion ($PS1, $PS2, $PS4)
+;;;
+;;; A prompt goes through two passes, in this order: bash's backslash escapes,
+;;; and then ordinary parameter/command/arithmetic expansion. Neither was
+;;; happening -- the string was written out verbatim -- so the conventional
+;;; `\u@\h:\w\$ ' carried over from a .bashrc appeared literally, backslashes
+;;; and all, which is the first thing anyone sees.
+
+(defconstant +prompt-hide-start+ (code-char 1)
+  "Marks the start of a non-printing run, from `\\['. Kept in the string so
+DISPLAY-WIDTH can skip the run, and stripped at output.")
+(defconstant +prompt-hide-end+ (code-char 2))
+
+(defun prompt-strip-markers (s)
+  (remove-if (lambda (c) (or (char= c +prompt-hide-start+)
+                             (char= c +prompt-hide-end+)))
+             s))
+
+(defun prompt-time (sh format)
+  (or (printf-strftime-arg format nil sh (lambda ())) ""))
+
+(defun prompt-escapes (sh s)
+  "Decode the backslash escapes of a prompt string.
+
+An unrecognised escape is left alone, backslash and all, exactly as bash
+leaves `\\z'. This runs BEFORE parameter expansion, so `\\u-$X' resolves the
+user name first and the variable second."
+  (with-output-to-string (o)
+    (let ((i 0) (n (length s)))
+      (loop while (< i n) do
+        (let ((c (char s i)))
+          (cond
+            ((or (char/= c #\\) (>= (1+ i) n)) (write-char c o) (incf i))
+            (t
+             (let ((e (char s (1+ i))))
+               (incf i 2)
+               (case e
+                 (#\a (write-char (code-char 7) o))
+                 (#\e (write-char #\Escape o))
+                 (#\n (write-char #\Newline o))
+                 (#\r (write-char #\Return o))
+                 (#\\ (write-char #\\ o))
+                 (#\[ (write-char +prompt-hide-start+ o))
+                 (#\] (write-char +prompt-hide-end+ o))
+                 (#\d (write-string (prompt-time sh "%a %b %d") o))
+                 (#\t (write-string (prompt-time sh "%H:%M:%S") o))
+                 (#\T (write-string (prompt-time sh "%I:%M:%S") o))
+                 (#\@ (write-string (prompt-time sh "%I:%M %p") o))
+                 (#\A (write-string (prompt-time sh "%H:%M") o))
+                 ;; \D{FORMAT}: an strftime format in braces. An unterminated
+                 ;; brace is not an escape at all.
+                 (#\D (let ((close (and (< i n) (char= (char s i) #\{)
+                                        (position #\} s :start i))))
+                        (cond (close
+                               (write-string
+                                (prompt-time sh (subseq s (1+ i) close)) o)
+                               (setf i (1+ close)))
+                              (t (write-string "\\D" o)))))
+                 (#\h (write-string (prompt-hostname nil) o))
+                 (#\H (write-string (prompt-hostname t) o))
+                 (#\u (write-string (prompt-username) o))
+                 (#\s (write-string (prompt-basename (shell-name sh)) o))
+                 (#\v (write-string +sxsh-version+ o))
+                 (#\V (write-string +sxsh-version+ o))
+                 (#\l (write-string (prompt-basename (prompt-tty-name)) o))
+                 (#\j (princ (length (shell-jobs sh)) o))
+                 (#\w (write-string (prompt-cwd sh nil) o))
+                 (#\W (write-string (prompt-cwd sh t) o))
+                 ((#\! #\#) (princ (+ (shell-history-base sh)
+                                      (length (shell-history sh)))
+                                   o))
+                 (#\$ (write-char (if (zerop (sb-posix:geteuid)) #\# #\$) o))
+                 (t
+                  (cond
+                    ;; \nnn -- up to three octal digits
+                    ((digit-char-p e 8)
+                     (let ((j (1- i)))
+                       (loop while (and (< j n) (< (- j (- i 1)) 3)
+                                        (digit-char-p (char s j) 8))
+                             do (incf j))
+                       (write-char (code-char (parse-integer s :start (1- i)
+                                                               :end j :radix 8))
+                                   o)
+                       (setf i j)))
+                    (t (write-char #\\ o) (write-char e o)))))))))))))
+
+(defun prompt-username ()
+  (or (ignore-errors (sb-posix:passwd-name (sb-posix:getpwuid (sb-posix:getuid))))
+      (sb-posix:getenv "USER")
+      "?"))
+
+(defun prompt-hostname (fullp)
+  (let ((h (or (ignore-errors (machine-instance)) "?")))
+    (if fullp h (subseq h 0 (or (position #\. h) (length h))))))
+
+(sb-alien:define-alien-routine ("ttyname" %ttyname) sb-alien:c-string
+  (fd sb-alien:int))
+
+(defun prompt-tty-name ()
+  "The controlling terminal's device path, for `\\l'. sb-posix has no
+ttyname, so it comes from libc."
+  (or (ignore-errors (%ttyname 0)) "tty"))
+
+(defun prompt-basename (path)
+  (let ((slash (position #\/ path :from-end t)))
+    (if slash (subseq path (1+ slash)) path)))
+
+(defun prompt-cwd (sh basename-only)
+  "$PWD for a prompt: `\\w' abbreviates $HOME to ~, `\\W' is the last component."
+  (let* ((pwd (logical-pwd sh))
+         (home (nth-value 0 (get-var sh "HOME")))
+         (short (cond ((or (null home) (zerop (length home))) pwd)
+                      ((string= pwd home) "~")
+                      ((and (> (length pwd) (length home))
+                            (string= home pwd :end2 (length home))
+                            (char= (char pwd (length home)) #\/))
+                       (concatenate 'string "~" (subseq pwd (length home))))
+                      (t pwd))))
+    (cond ((not basename-only) short)
+          ;; \W is the last component -- except at $HOME itself, where bash
+          ;; keeps the ~ rather than printing the account name.
+          ((string= short "~") "~")
+          ((string= pwd "/") "/")
+          (t (prompt-basename pwd)))))
+
+(defun prompt-expansions (sh s)
+  "The second pass: $ and ` constructs, everything else literal.
+
+Deliberately NOT EXPAND-PASS, which would also do quote removal. A prompt is
+not a word: bash leaves `a'b' alone rather than treating the quote as an
+opening one, and a prompt full of unbalanced quotes must not become a parse
+error at every keystroke."
+  (with-output-to-string (o)
+    (let ((i 0) (n (length s)))
+      (loop while (< i n) do
+        (let ((c (char s i)))
+          (cond
+            ((char= c #\$)
+             (multiple-value-bind (str next) (expand-dollar sh s i n)
+               (write-string (expansion-value->string str) o)
+               (setf i (if (> next i) next (1+ i)))))
+            ((char= c #\`)
+             (multiple-value-bind (str next) (expand-backquote sh s i n)
+               (write-string str o)
+               (setf i (if (> next i) next (1+ i)))))
+            (t (write-char c o) (incf i))))))))
+
+(defun expand-prompt (sh s)
+  "PS1/PS2/PS4 with escapes decoded and expansions performed.
+
+Returns the string still carrying its \\[ \\] markers, which DISPLAY-WIDTH
+skips; WRITE-PROMPT removes them on the way out. A failure anywhere leaves the
+prompt as it was rather than dropping the user at a blank line."
+  (handler-case (prompt-expansions sh (prompt-escapes sh s))
+    (error () s)))
+
+(defun write-prompt (sh s stream)
+  (write-string (prompt-strip-markers (expand-prompt sh s)) stream))
 
 (defun redirect-only-substitution (sh ast)
   "For `$(< FILE)' return (values EXPANDED-PATH T); otherwise (values NIL NIL).

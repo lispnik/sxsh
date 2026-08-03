@@ -69,7 +69,8 @@ the editing machinery."
             (progn (setf *lineedit-disabled* t) (read-command sh))
             r))
       (progn
-        (write-string (or (nth-value 0 (get-var sh "PS1")) "$ "))
+        (write-prompt sh (or (nth-value 0 (get-var sh "PS1")) "\\s-\\v\\$ ")
+                      *standard-output*)
         (finish-output)
         (read-complete-command *standard-input*))))
 
@@ -180,7 +181,9 @@ accepted none of the set options on its command line."
                  (case c
                    (#\c (setf mode :command))
                    (#\s (setf mode :stdin))
-                   (#\i (setf (shell-interactive sh) t))
+                   (#\i (setf (shell-interactive sh) t)
+                        ;; ...and everything else being interactive implies.
+                        (apply-interactive-defaults sh t))
                    (#\o (let ((name (pop argv)))
                           (cond
                             ((null name) (print-options sh *standard-output*
