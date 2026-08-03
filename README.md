@@ -130,9 +130,14 @@ any pipeline stage but the last, and for a pipeline led by `!`.
 Builtins: `: true false echo printf pwd cd export unset shift exit return break
 continue read set eval . source type test [ command builtin getopts trap wait
 kill jobs fg bg umask ulimit hash readonly local declare typeset mapfile
-readarray shopt history fc times exec alias unalias help`. `set` supports
-`-e -x -u -f -m`. `trap` installs real signal handlers plus `EXIT`, whose
-status follows POSIX (the trap's own commands do not overwrite it).
+readarray shopt history fc times exec alias unalias help dirs pushd popd`.
+`set` supports `-e -x -u -f -m`. `trap` installs real signal handlers plus
+`EXIT`, whose status follows POSIX (the trap's own commands do not overwrite
+it).
+
+`dirs`/`pushd`/`popd` keep the directory stack's top entry equal to `$PWD`
+rather than storing it, so `cd` replaces it for free and the stack cannot come
+to name a directory the shell is not in.
 
 `help` documents every builtin and the shell's syntax forms. The text lives at
 each builtin's definition site, and the executor test suite fails if a builtin

@@ -1496,15 +1496,19 @@ and run it in-process. State changes (cd, var sets) are rolled back."
         ;; out and fired when the whole shell exited
         (alexandria-copy-hash (shell-traps sh))
         ;; ...and so are aliases, now that substitution happens in the parser
-        (alexandria-copy-hash (shell-aliases sh))))
+        (alexandria-copy-hash (shell-aliases sh))
+        ;; A subshell inherits the directory stack and its pushd/popd stay
+        ;; inside it, exactly as its cd does.
+        (copy-list (shell-dir-stack sh))))
 
 (defun restore-shell (sh snap)
-  (destructuring-bind (vars funcs pos cwd traps aliases) snap
+  (destructuring-bind (vars funcs pos cwd traps aliases dirs) snap
     (setf (shell-vars sh) vars
           (shell-functions sh) funcs
           (shell-positional sh) pos
           (shell-traps sh) traps
-          (shell-aliases sh) aliases)
+          (shell-aliases sh) aliases
+          (shell-dir-stack sh) dirs)
     (when cwd (ignore-errors (change-directory cwd)))))
 
 (defun alexandria-copy-hash (ht)

@@ -681,6 +681,10 @@ Zero unless an invalid option is given or the directory cannot be read."
     (write-line (if physical (current-directory) (logical-pwd sh)) out))
   0)
 
+(defvar *cd-name* "cd"
+  "The name `cd' puts on its diagnostics. `pushd' and `popd' move with the
+same code, so they bind this rather than reimplementing the walk.")
+
 (define-builtin "cd" (sh args out)
   :synopsis "cd [-L|-P] [DIR]"
   :summary "Change the shell working directory."
@@ -708,12 +712,12 @@ error rather than a synonym for $HOME."
     ;; like one. Without this `cd -- /tmp' counted two arguments and failed.
     (when (and rest (string= (first rest) "--")) (pop rest))
     (when (cdr rest)
-      (format *error-output* "cd: too many arguments~%")
+      (format *error-output* "~A: too many arguments~%" *cd-name*)
       (return-from builtin 2))
     ;; An explicitly empty operand is an error, not a no-op and not $HOME.
     ;; It also cannot reach the CDPATH test below, which indexes character 0.
     (when (equal (first rest) "")
-      (format *error-output* "cd: null directory~%")
+      (format *error-output* "~A: null directory~%" *cd-name*)
       (return-from builtin 1))
     (let* ((arg (first rest))
            (from-cdpath nil)
@@ -721,7 +725,7 @@ error rather than a synonym for $HOME."
            (target (cond ((null arg) (or (nth-value 0 (get-var sh "HOME")) "/"))
                          (to-oldpwd
                           (or (nth-value 0 (get-var sh "OLDPWD"))
-                              (progn (format *error-output* "cd: OLDPWD not set~%")
+                              (progn (format *error-output* "~A: OLDPWD not set~%" *cd-name*)
                                      (return-from builtin 1))))
                          (t arg)))
            (old (logical-pwd sh)))
@@ -768,7 +772,304 @@ error rather than a synonym for $HOME."
             (set-var sh "PWD" new :export t)
             (when (or to-oldpwd from-cdpath) (write-line new out))
             0)
-        (error (e) (format *error-output* "cd: ~A~%" e) 1)))))
+        (error (e) (format *error-output* "~A: ~A~%" *cd-name* e) 1)))))
+
+;;; The directory stack ------------------------------------------------------
+;;
+;; SHELL-DIR-STACK holds only the entries below the current directory. bash
+;; keeps the current directory as element 0 of a real array and has `cd'
+;; overwrite it -- which is what spec/builtin-dirs.test.sh calls "cd replaces
+;; the lowest entry on the directory stack". Deriving that element from $PWD
+;; instead makes the invariant unbreakable, keeps `cd' unaware of the stack,
+;; and means the stack is never empty.
+
+(defun dir-stack-list (sh)
+  "The whole directory stack, current directory first."
+  (cons (logical-pwd sh) (shell-dir-stack sh)))
+
+(defun run-cd (sh dir out)
+  "Move to DIR the way `cd' does, reporting errors under *CD-NAME*.
+
+pushd and popd have to traverse symlinks, update $PWD and $OLDPWD and reject
+the same targets that `cd' rejects, so they call it rather than chdir."
+  (funcall (gethash "cd" *builtins*) sh (list "--" dir) out))
+
+(defun tilde-shorten (sh path)
+  "PATH with a leading $HOME written as `~', the form `dirs' prints."
+  (let ((home (nth-value 0 (get-var sh "HOME"))))
+    (cond ((or (null home) (zerop (length home))) path)
+          ((string= path home) "~")
+          ;; The match has to end on a component boundary: with HOME=/tmp/oil_test
+          ;; the directory /tmp/oil_tests is not under $HOME and prints in full.
+          ((and (> (length path) (length home))
+                (string= home path :end2 (length home))
+                (char= (char path (length home)) #\/))
+           (concatenate 'string "~" (subseq path (length home))))
+          (t path))))
+
+(defun stack-spec-p (s)
+  "Whether S is in the position of a +N / -N stack specifier."
+  (and (> (length s) 1) (member (char s 0) '(#\+ #\-))))
+
+(defun dir-stack-index (spec len)
+  "Resolve the +N / -N specifier SPEC against a stack of LEN entries.
+
++N counts from the top and -N from the bottom, both from zero. Returns the
+index, :BAD when SPEC is not a number at all, or NIL when it is out of range."
+  (let ((digits (subseq spec 1)))
+    (if (or (zerop (length digits)) (notevery #'digit-char-p digits))
+        :bad
+        (let* ((n (parse-integer digits))
+               (i (if (char= (char spec 0) #\+) n (- len 1 n))))
+          (and (<= 0 i) (< i len) i)))))
+
+(defun write-dir-entries (sh out pairs &key long per-line numbered)
+  "Print PAIRS, a list of (INDEX . PATH), as `dirs' does."
+  (let ((texts (mapcar (lambda (pair)
+                         (let ((text (if long
+                                         (cdr pair)
+                                         (tilde-shorten sh (cdr pair)))))
+                           (if numbered
+                               (format nil "~2D  ~A" (car pair) text)
+                               text)))
+                       pairs)))
+    (if (or per-line numbered)
+        (dolist (line texts) (write-line line out))
+        (format out "~{~A~^ ~}~%" texts))))
+
+(defun dir-stack-pairs (sh)
+  (loop for path in (dir-stack-list sh) for i from 0 collect (cons i path)))
+
+(defun stack-usage-error (name control &rest args)
+  "Report a pushd/popd/dirs argument error: the complaint, then the synopsis.
+
+The synopsis is read back out of the help table rather than repeated here, so
+the usage line and `help pushd' cannot drift apart. Returns 2, the status
+these three use for a malformed argument."
+  (apply #'format *error-output* control args)
+  (let ((help (gethash name *builtin-help*)))
+    (when help
+      (format *error-output* "~A: usage: ~A~%" name (first help))))
+  2)
+
+(defun stack-range-error (name spec)
+  "Report a +N / -N that names no entry.
+
+SPEC is shown as bash shows it, which is not uniform: `dirs' echoes the number
+it parsed and so loses the sign, while pushd and popd echo the argument."
+  (format *error-output* "~A: ~A: directory stack index out of range~%"
+          name spec)
+  1)
+
+(define-builtin "dirs" (sh args out)
+  :synopsis "dirs [-clpv] [+N] [-N]"
+  :summary "Display the directory stack."
+  :description "Prints the directory stack, most recently pushed first. The top entry is
+always the current directory, so `cd' replaces it and the stack is never
+empty. Entries under $HOME print with a leading `~' unless -l is given.
+
+Options:
+  -c  clear the stack, leaving only the current directory
+  -l  print full pathnames, without the `~' abbreviation
+  -p  print one entry per line
+  -v  print one entry per line, each preceded by its position
+
+Arguments:
+  +N  print only the Nth entry counting from the left of the list `dirs'
+      shows with no options, starting at zero
+  -N  print only the Nth entry counting from the right, starting at zero
+
+Options do not cluster: `dirs -lv' is read as the specifier -lv and rejected,
+as in bash, because -N occupies the same syntax.
+
+Exit Status:
+Zero unless an invalid option is given or N is out of range."
+  (let ((long nil) (per-line nil) (numbered nil) (clear nil) (spec nil)
+        (rest args))
+    (loop while rest
+          do (let ((a (pop rest)))
+               (cond ((string= a "--") (setf rest nil))
+                     ((string= a "-c") (setf clear t))
+                     ((string= a "-l") (setf long t))
+                     ((string= a "-p") (setf per-line t))
+                     ((string= a "-v") (setf numbered t))
+                     ((stack-spec-p a) (setf spec a))
+                     ((and (plusp (length a)) (char= (char a 0) #\-))
+                      (return-from builtin
+                        (stack-usage-error "dirs" "dirs: ~A: invalid number~%" a)))
+                     (t (return-from builtin
+                          (stack-usage-error "dirs" "dirs: ~A: invalid option~%" a))))))
+    (when clear
+      (setf (shell-dir-stack sh) '())
+      (return-from builtin 0))
+    (let* ((full (dir-stack-list sh))
+           (pairs (dir-stack-pairs sh)))
+      (when spec
+        (let ((i (dir-stack-index spec (length full))))
+          (cond ((eq i :bad)
+                 (return-from builtin
+                   (stack-usage-error "dirs" "dirs: ~A: invalid number~%" spec)))
+                ((null i)
+                 (when (= (length full) 1)
+                   (format *error-output* "dirs: directory stack empty~%")
+                   (return-from builtin 1))
+                 (return-from builtin (stack-range-error "dirs" (subseq spec 1))))
+                (t (setf pairs (list (nth i pairs)))))))
+      (write-dir-entries sh out pairs
+                         :long long :per-line per-line :numbered numbered))
+    0))
+
+(define-builtin "pushd" (sh args out)
+  :synopsis "pushd [-n] [+N | -N | DIR]"
+  :summary "Add a directory to the stack and change to it."
+  :description "With DIR, changes to DIR and makes it the top of the directory stack. With
++N or -N, rotates the stack so that the named entry is on top and changes to
+it. With neither, exchanges the top two entries.
+
+Options:
+  -n  manipulate the stack without changing directory
+
+Arguments:
+  +N  rotate so that the Nth entry from the left of the list shown by `dirs'
+      becomes the top, counting from zero
+  -N  the same, counting from the right
+
+The stack is printed on success, as `dirs' would print it.
+
+sxsh keeps the top of the stack equal to $PWD, so `-n' with +N or -N rotates
+only the entries below the current directory rather than letting the top
+name a directory the shell is not in. `pushd' also rejects being given both
+a rotation and a directory instead of ignoring one of them.
+
+Exit Status:
+Zero unless an invalid argument is given, N is out of range, or the directory
+change fails."
+  (let ((no-cd nil) (spec nil) (dir nil) (extra nil) (rest args) (opts t))
+    (loop while rest
+          do (let ((a (pop rest)))
+               (cond ((and opts (string= a "--")) (setf opts nil))
+                     ((and opts (string= a "-n")) (setf no-cd t))
+                     ((and opts (stack-spec-p a))
+                      (if (or spec dir) (setf extra t) (setf spec a)))
+                     ((and opts (plusp (length a)) (char= (char a 0) #\-))
+                      (return-from builtin
+                        (stack-usage-error "pushd" "pushd: ~A: invalid number~%" a)))
+                     (t (if (or spec dir) (setf extra t) (setf dir a))))))
+    (when extra
+      (format *error-output* "pushd: too many arguments~%")
+      (return-from builtin 1))
+    (let* ((full (dir-stack-list sh))
+           (len (length full)))
+      (cond
+        (dir
+         (if no-cd
+             ;; -n slots DIR in below the current directory, unresolved, and
+             ;; stays put.
+             (push dir (shell-dir-stack sh))
+             ;; The old top has to be read before the cd: the new one is
+             ;; derived from $PWD.
+             (let* ((old (logical-pwd sh))
+                    (status (let ((*cd-name* "pushd")) (run-cd sh dir out))))
+               (unless (zerop status) (return-from builtin 1))
+               (push old (shell-dir-stack sh)))))
+        (spec
+         (let ((i (dir-stack-index spec len)))
+           (when (eq i :bad)
+             (return-from builtin
+               (stack-usage-error "pushd" "pushd: ~A: invalid number~%" spec)))
+           (when (null i)
+             (when (= len 1)
+               (format *error-output* "pushd: directory stack empty~%")
+               (return-from builtin 1))
+             (return-from builtin (stack-range-error "pushd" spec)))
+           (if no-cd
+               (let ((below (shell-dir-stack sh)))
+                 (when (plusp i)
+                   (setf (shell-dir-stack sh)
+                         (append (nthcdr (1- i) below) (subseq below 0 (1- i))))))
+               (let* ((rotated (append (nthcdr i full) (subseq full 0 i)))
+                      (status (let ((*cd-name* "pushd"))
+                                (run-cd sh (first rotated) out))))
+                 (unless (zerop status) (return-from builtin 1))
+                 (setf (shell-dir-stack sh) (rest rotated))))))
+        ;; No operand: exchange the top two. With -n there is no exchange to
+        ;; make without moving, so it is a no-op.
+        ((not no-cd)
+         (when (< len 2)
+           (format *error-output* "pushd: no other directory~%")
+           (return-from builtin 1))
+         (let* ((swapped (list* (second full) (first full) (cddr full)))
+                (status (let ((*cd-name* "pushd")) (run-cd sh (first swapped) out))))
+           (unless (zerop status) (return-from builtin 1))
+           (setf (shell-dir-stack sh) (rest swapped))))))
+    (write-dir-entries sh out (dir-stack-pairs sh))
+    0))
+
+(define-builtin "popd" (sh args out)
+  :synopsis "popd [-n] [+N | -N]"
+  :summary "Remove a directory from the stack and change to the new top."
+  :description "With no argument, removes the top of the directory stack and changes to the
+entry that becomes the top. With +N or -N, removes that entry and leaves the
+current directory alone.
+
+Options:
+  -n  manipulate the stack without changing directory
+
+Arguments:
+  +N  remove the Nth entry from the left of the list shown by `dirs',
+      counting from zero
+  -N  the same, counting from the right
+
+The stack is printed on success, as `dirs' would print it. `popd' takes no
+directory operand.
+
+Because the top of the stack is always $PWD, `-n' cannot remove it -- there
+would be nothing to become the new top -- so it removes the entry below
+instead.
+
+Exit Status:
+Zero unless an invalid argument is given, the stack holds nothing but the
+current directory, N is out of range, or the directory change fails."
+  (let ((no-cd nil) (spec nil) (rest args) (opts t))
+    (loop while rest
+          do (let ((a (pop rest)))
+               (cond ((and opts (string= a "--")) (setf opts nil))
+                     ((and opts (string= a "-n")) (setf no-cd t))
+                     ((and opts (stack-spec-p a))
+                      (when spec
+                        (format *error-output* "popd: too many arguments~%")
+                        (return-from builtin 1))
+                      (setf spec a))
+                     ((and opts (plusp (length a)) (char= (char a 0) #\-))
+                      (return-from builtin
+                        (stack-usage-error "popd" "popd: ~A: invalid number~%" a)))
+                     ;; popd has no directory operand, so anything left over is
+                     ;; a usage error rather than somewhere to pop to.
+                     (t (return-from builtin
+                          (stack-usage-error "popd" "popd: ~A: invalid argument~%" a))))))
+    (let* ((full (dir-stack-list sh))
+           (len (length full))
+           (i (if spec (dir-stack-index spec len) 0)))
+      (when (eq i :bad)
+        (return-from builtin
+          (stack-usage-error "popd" "popd: ~A: invalid number~%" spec)))
+      (when (and no-cd (eql i 0)) (setf i 1))
+      ;; Checked before the range test: with nothing pushed, every index is out
+      ;; of range and bash reports the stack, not the number.
+      (when (< len 2)
+        (format *error-output* "popd: directory stack empty~%")
+        (return-from builtin 1))
+      (when (or (null i) (>= i len))
+        (return-from builtin (stack-range-error "popd" spec)))
+      (if (zerop i)
+          (let ((status (let ((*cd-name* "popd")) (run-cd sh (second full) out))))
+            (unless (zerop status) (return-from builtin 1))
+            (pop (shell-dir-stack sh)))
+          (let ((below (shell-dir-stack sh)))
+            (setf (shell-dir-stack sh)
+                  (append (subseq below 0 (1- i)) (nthcdr i below))))))
+    (write-dir-entries sh out (dir-stack-pairs sh))
+    0))
 
 (define-builtin "export" (sh args out)
   :synopsis "export [-p] [NAME[=VALUE] ...]"

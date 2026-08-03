@@ -940,6 +940,56 @@ check cd-dash           '/usr'      0 'cd /usr; cd /etc; cd - >/dev/null; pwd'
 check cd-subshell-scope '/usr'      0 'cd /usr; (cd /etc); pwd'
 check cd-external-agrees 'same'     0 'cd /usr; [ "$(pwd)" = "$(/bin/pwd)" ] && echo same'
 
+# --- the directory stack (dirs/pushd/popd) --------------------------------
+# The top of the stack is $PWD, so `cd' replaces it and the stack is never
+# empty. Every expectation here was diffed against bash 5.3 first.
+check dirs-initial      '/'         0 'cd /; dirs'
+check pushd-prints      '/tmp /'    0 'cd /; pushd /tmp'
+check pushd-moves       '/tmp'      0 'cd /; pushd /tmp >/dev/null; pwd'
+check popd-returns      '/'         0 'cd /; pushd /tmp >/dev/null; popd >/dev/null; pwd'
+check popd-prints       '/'         0 'cd /; pushd /tmp >/dev/null; popd'
+check cd-replaces-top   '/usr /tmp' 0 'cd /tmp; pushd /etc >/dev/null; cd /usr; dirs'
+check dirs-clear        '/tmp'      0 'cd /; pushd /tmp >/dev/null; dirs -c; dirs'
+check dirs-per-line     '/tmp
+/'                                  0 'cd /; pushd /tmp >/dev/null; dirs -p'
+check dirs-numbered     ' 0  /tmp
+ 1  /'                              0 'cd /; pushd /tmp >/dev/null; dirs -v'
+check dirs-tilde        '~ /'       0 'cd /; HOME=/tmp; pushd /tmp >/dev/null; dirs'
+check dirs-long         '/tmp /'    0 'cd /; HOME=/tmp; pushd /tmp >/dev/null; dirs -l'
+# $HOME as a mere string prefix is not a parent: /tmp/ds-x is not under /tmp/ds
+check dirs-tilde-bound  '/tmp/ds-x' 0 'mkdir -p /tmp/ds /tmp/ds-x; cd /; HOME=/tmp/ds; pushd /tmp/ds-x >/dev/null; dirs +0'
+check dirs-index-plus   '/'         0 'cd /; pushd /tmp >/dev/null; dirs +1'
+check dirs-index-minus  '/tmp'      0 'cd /; pushd /tmp >/dev/null; dirs -1'
+check pushd-swaps       '/'         0 'cd /; pushd /tmp >/dev/null; pushd >/dev/null; pwd'
+check pushd-rotates     '/tmp'      0 'cd /; pushd /tmp >/dev/null; pushd /etc >/dev/null; pushd +1 >/dev/null; pwd'
+check popd-index        '/etc /'    0 'cd /; pushd /tmp >/dev/null; pushd /etc >/dev/null; popd +1'
+# -n manipulates the stack without moving
+check pushd-n-stays     '/'         0 'cd /; pushd -n /tmp >/dev/null; pwd'
+check pushd-n-stack     '/ /tmp'    0 'cd /; pushd -n /tmp'
+check popd-n-stays      '/tmp'      0 'cd /; pushd /tmp >/dev/null; popd -n >/dev/null; pwd'
+# a subshell inherits the stack and its pushes stay inside, as its cd does
+check dirs-subshell     '/'         0 'cd /; (pushd /tmp >/dev/null); dirs'
+check dirs-cmdsub       '/tmp /|/'  0 'cd /; printf "%s|" "$(pushd /tmp >/dev/null; dirs)"; dirs'
+check dirs-function     '/tmp /'    0 'cd /; f() { pushd /tmp >/dev/null; }; f; dirs'
+# usage and error paths
+check_err popd-empty    'directory stack empty'   1 'cd /; popd'
+check_err pushd-alone   'no other directory'      1 'cd /; pushd'
+check_err pushd-badnum  'invalid number'          2 'cd /; pushd -z'
+check_err popd-badnum   'invalid number'          2 'cd /; popd -z'
+check_err popd-badarg   'invalid argument'        2 'cd /; pushd / >/dev/null; popd zzz'
+check_err dirs-badopt   'invalid option'          2 'cd /; dirs a'
+check_err dirs-nocluster 'invalid number'         2 'cd /; dirs -lv'
+check_err pushd-toomany 'too many arguments'      1 'cd /; pushd . .'
+check_err pushd-nodir   'No such file or directory' 1 'cd /; pushd /no-such-dir-here'
+check_err dirs-range    'out of range'            1 'cd /; pushd /tmp >/dev/null; dirs +5'
+# `--' ends the options for all three
+check pushd-ddash       '/tmp /'    0 'cd /; pushd -- /tmp'
+check popd-ddash        '/'         0 'cd /; pushd /tmp >/dev/null; popd --'
+check dirs-ddash        '/'         0 'cd /; dirs --'
+# and they are ordinary builtins
+check dirs-is-builtin   'dirs is a shell builtin' 0 'type dirs'
+check pushd-help        'pushd:'    0 'help -s pushd | head -1 | cut -d" " -f1'
+
 # --- script mode (not -c) -------------------------------------------------
 printf '#!/usr/bin/env sxsh\necho script-mode\necho "$1"\n' > "$tmp/s.sh"
 got=$("$SXSH" "$tmp/s.sh" firstarg 2>&1); got_st=$?
