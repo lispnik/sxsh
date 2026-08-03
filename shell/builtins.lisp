@@ -2350,22 +2350,33 @@ Zero while an option is found; non-zero at the end of the options or on error."
                                      (or (nth-value 0 (get-var sh "OPTIND")) "1")))
                      1))
          (silent (and (plusp (length optstring)) (char= (char optstring 0) #\:))))
-    ;; OPTIND is 1-based index into params of the NEXT arg to process
-    (labels ((cur-arg () (nth (1- optind) params)))
-      (let ((arg (cur-arg)))
+    ;; OPTIND is 1-based index into params of the NEXT arg to process.
+    ;; POSIX leaves any value but 1 unspecified; a value below 1 used to index
+    ;; the list negatively and crash the shell with a Lisp type error.
+    (flet ((finish (new-optind)
+             ;; Every terminal path agrees: NAME becomes `?', OPTARG is
+             ;; cleared, and the bundled-option sub-position is forgotten.
+             ;; Leaving OPTARG alone let a previous option's argument survive
+             ;; into the loop that reads it after the loop ended.
+             (set-var sh name "?")
+             (set-var sh "OPTARG" "")
+             (set-var sh "_OPTITER" "1")
+             (set-var sh "OPTIND" (princ-to-string new-optind))
+             1))
+      (when (< optind 1) (return-from builtin (finish optind)))
+      (let ((arg (nth (1- optind) params)))
         (when (or (null arg)
                   (zerop (length arg))
                   (char/= (char arg 0) #\-)
                   (string= arg "-"))
-          ;; POSIX: when option parsing ends, getopts returns > 0 AND sets the
-          ;; name to `?'. Leaving it unchanged made `while getopts ...' loops
-          ;; that inspect the variable afterwards see a stale option letter.
-          (set-var sh name "?")
-          (set-var sh "OPTIND" (princ-to-string optind))
-          (return-from builtin 1))
+          (return-from builtin
+            ;; Running off the END of the arguments rewinds OPTIND, so the next
+            ;; `while getopts' over a fresh argument list starts at 1 without
+            ;; the script having to reset it. Stopping at a non-option operand
+            ;; does not: OPTIND is then the index the caller needs to shift by.
+            (finish (if (> (1- optind) (length params)) 1 optind))))
         (when (string= arg "--")
-          (set-var sh "OPTIND" (princ-to-string (1+ optind)))
-          (return-from builtin 1))
+          (return-from builtin (finish (1+ optind))))
         ;; process the first option char after '-'. We track sub-position in
         ;; OPTITER (sxsh-internal) for bundled options like -abc.
         (let* ((subpos (or (ignore-errors
@@ -2381,9 +2392,13 @@ Zero while an option is found; non-zero at the end of the options or on error."
                 (cond
                   ((null spec)
                    (set-var sh name "?")
-                   (unless silent
-                     (format *error-output* "getopts: illegal option -- ~A~%" optchar))
-                   (when silent (set-var sh "OPTARG" (string optchar)))
+                   ;; Silent mode puts the offending letter in OPTARG; noisy
+                   ;; mode diagnoses it and leaves OPTARG EMPTY -- not holding
+                   ;; whatever the previous option's argument was.
+                   (cond (silent (set-var sh "OPTARG" (string optchar)))
+                         (t (set-var sh "OPTARG" "")
+                            (format *error-output*
+                                    "getopts: illegal option -- ~A~%" optchar)))
                    (advance-getopts sh arg subpos optind)
                    0)
                   ;; option takes an argument?
@@ -2406,10 +2421,11 @@ Zero while an option is found; non-zero at the end of the options or on error."
                                       0)
                                (progn
                                  (set-var sh name (if silent ":" "?"))
-                                 (if silent (set-var sh "OPTARG" (string optchar))
-                                     (format *error-output*
-                                             "getopts: option requires an argument -- ~A~%"
-                                             optchar))
+                                 (cond (silent (set-var sh "OPTARG" (string optchar)))
+                                       (t (set-var sh "OPTARG" "")
+                                          (format *error-output*
+                                                  "getopts: option requires an argument -- ~A~%"
+                                                  optchar)))
                                  (set-var sh "OPTIND" (princ-to-string (1+ optind)))
                                  (set-var sh "_OPTITER" "1")
                                  0))))))
@@ -3054,35 +3070,128 @@ bits it clears."
                (when (logtest bits 1) (write-char #\x s))))))
     (format nil "u=~A,g=~A,o=~A" (who 6) (who 3) (who 0))))
 
+(defun umask-apply-symbolic (mask spec)
+  "Apply the chmod-style SPEC to MASK, returning the new mask.
+
+Signals an error whose report is bash's diagnostic for a malformed clause.
+
+The arithmetic is done on the permissions the mask ALLOWS -- (lognot mask) --
+because that is what the symbolic form describes. `umask u-rw' with a mask of
+022 leaves rwx,r-x,r-x, takes r and w off the user, and so ends at 622: the
+letters name what stays permitted, not what is masked off."
+  (let ((allow (logandc1 mask #o777))
+        (i 0) (n (length spec)))
+    (flet ((oops (text)
+             (error "`~A': invalid symbolic mode operator" text)))
+      (loop
+        (let ((who 0))
+          ;; who: any of u g o a, empty meaning all
+          (loop while (< i n)
+                do (case (char spec i)
+                     (#\u (setf who (logior who #o700)) (incf i))
+                     (#\g (setf who (logior who #o070)) (incf i))
+                     (#\o (setf who (logior who #o007)) (incf i))
+                     (#\a (setf who #o777) (incf i))
+                     (t (return))))
+          (when (zerop who) (setf who #o777))
+          (when (>= i n) (oops ""))
+          ;; one or more op/perm groups: `u+r-w' is two of them
+          (let ((sawop nil))
+            (loop while (and (< i n) (find (char spec i) "+-="))
+                  do (setf sawop t)
+                     (let ((op (char spec i)) (perm 0))
+                       (incf i)
+                       (loop while (< i n)
+                             do (case (char spec i)
+                                  (#\r (setf perm (logior perm #o444)) (incf i))
+                                  (#\w (setf perm (logior perm #o222)) (incf i))
+                                  (#\x (setf perm (logior perm #o111)) (incf i))
+                                  ;; X, s and t say nothing about a creation
+                                  ;; mask; bash accepts and ignores them.
+                                  ((#\X #\s #\t) (incf i))
+                                  (t (return))))
+                       (let ((bits (logand perm who)))
+                         (ecase op
+                           (#\+ (setf allow (logior allow bits)))
+                           (#\- (setf allow (logandc2 allow bits)))
+                           (#\= (setf allow (logior (logandc2 allow who) bits)))))))
+            (unless sawop (oops (string (char spec i)))))
+          (cond ((>= i n) (return))
+                ((char= (char spec i) #\,) (incf i)
+                 ;; `u-r,,u-r': the empty clause is an error, not a no-op.
+                 (when (or (>= i n) (char= (char spec i) #\,))
+                   (oops ",")))
+                (t (oops (string (char spec i))))))))
+    (logandc1 allow #o777)))
+
 (define-builtin "umask" (sh args out)
-  :synopsis "umask [-S] [MODE]"
+  :synopsis "umask [-p] [-S] [MODE]"
   :summary "Display or set the file mode creation mask."
-  :description "With MODE, sets the mask to it; MODE may be octal, or symbolic in the form
-`u=rwx,go=rx'. With no MODE, prints the current mask.
+  :description "With MODE, sets the mask to it; with no MODE, prints the current mask.
+
+MODE is either an octal number -- the bits to CLEAR from a new file's
+permissions -- or a chmod-style symbolic list naming the permissions to
+LEAVE, as in `u=rwx,go=rx' or `u-w'. An omitted who means all of them, so
+`umask =rx' allows exactly r-x everywhere. X, s and t are accepted and
+ignored: they say nothing about a creation mask.
 
 Options:
-  -S  print the mask symbolically rather than in octal
+  -p  print in a form that can be reused as input
+  -S  print symbolically rather than in octal
 
 Exit Status:
 Zero unless MODE is invalid."
-  (let ((symbolic nil) (rest args))
-    (loop while (and rest (string= (first rest) "-S"))
-          do (pop rest) (setf symbolic t))
+  (let ((symbolic nil) (reusable nil) (rest args))
+    ;; A bare `-' is neither an option nor a mode: bash treats `umask -' as
+    ;; `umask'. Only a longer word starting with `-' is an option.
+    (loop while (and rest (> (length (first rest)) 1)
+                     (char= (char (first rest) 0) #\-)
+                     (find (char (first rest) 1) "pS"))
+          do (let ((o (pop rest)))
+               (loop for c across (subseq o 1)
+                     do (case c
+                          (#\S (setf symbolic t))
+                          (#\p (setf reusable t))
+                          (t (format *error-output*
+                                     "umask: -~C: invalid option~%umask: usage: umask [-p] [-S] [mode]~%" c)
+                             (return-from builtin 2))))))
+    (when (and rest (> (length (first rest)) 1)
+               (char= (char (first rest) 0) #\-))
+      ;; bash names the offending LETTER, not the whole word: `umask -rwx'
+      ;; reports -r.
+      (format *error-output*
+              "umask: -~C: invalid option~%umask: usage: umask [-p] [-S] [mode]~%"
+              (char (first rest) 1))
+      (return-from builtin 2))
+    (when (and rest (string= (first rest) "-")) (pop rest))
     (cond
       ((null rest)
        (let ((m (sb-posix:umask 0)))
          (sb-posix:umask m)            ; restore
-         (write-line (if symbolic (umask-symbolic m) (format nil "~4,'0O" m)) out))
+         (let ((text (if symbolic (umask-symbolic m) (format nil "~4,'0O" m))))
+           (write-line (if reusable
+                           (format nil "umask ~:[~;-S ~]~A" symbolic text)
+                           text)
+                       out)))
        0)
       (t
        (let ((spec (first rest)))
-         (handler-case
-             (let ((val (parse-integer spec :radix 8)))
-               (unless (<= 0 val #o777) (error "out of range"))
-               (sb-posix:umask val) 0)
-           (error ()
-             (format *error-output* "umask: ~A: invalid mask~%" spec)
-             1)))))))
+         (if (every #'digit-char-p spec)
+             (handler-case
+                 (let ((val (parse-integer spec :radix 8)))
+                   (unless (<= 0 val #o777) (error "out of range"))
+                   (sb-posix:umask val) 0)
+               (error ()
+                 (format *error-output* "umask: ~A: octal number out of range~%" spec)
+                 1))
+             (handler-case
+                 (let ((m (sb-posix:umask 0)))
+                   (sb-posix:umask m)
+                   (sb-posix:umask (umask-apply-symbolic m spec))
+                   0)
+               (error (e)
+                 (format *error-output* "umask: ~A~%" e)
+                 1))))))))
 
 ;;; hash -- command location cache; we keep a minimal real cache -----------
 ;;; ulimit ----------------------------------------------------------------

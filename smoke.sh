@@ -890,6 +890,51 @@ check cmd-builtin-nest  'hi'    0 'command builtin echo hi'
 check cmd-v-missing     'st=1'  0 'command -v nosuchzz; echo st=$?'
 check cmd-v-empty       'st=1'  0 'command -v ""; echo st=$?'
 
+# --- umask symbolic modes -------------------------------------------------
+# The symbolic form names the permissions LEFT, so the arithmetic runs on
+# (~mask): `umask u-rw' from 022 leaves rwx,r-x,r-x, takes r and w off the
+# user, and lands on 622. Every expectation diffed against bash 5.3.
+check umask-sym-minus   '0622'  0 'umask 022; umask u-rw; umask'
+check umask-sym-mixed   '0722'  0 'umask 022; umask u=,g+,o-; umask'
+check umask-sym-all     '0000'  0 'umask 022; umask a=rwx; umask'
+check umask-sym-nowho   '0000'  0 'umask 022; umask =rwx; umask'
+check umask-sym-repeat  '0422'  0 'umask 022; umask u-r,u-r; umask'
+check umask-sym-chain   '0222'  0 'umask 022; umask u+r-w; umask'
+check umask-sym-twowho  '0112'  0 'umask 022; umask ug=rw; umask'
+check umask-sym-noop    '0022'  0 'umask 022; umask g-w,o-w; umask'
+# X, s and t say nothing about a creation mask; bash accepts and ignores them
+check umask-sym-Xst     '0022'  0 'umask 022; umask u+X; umask u+s; umask u+t; umask'
+check umask-eq-empty    '0777'  0 'umask 0124; umask =; umask'
+check umask-plus-empty  '0124'  0 'umask 0124; umask +; umask'
+check umask-dash-alone  '0124'  0 'umask 0124; umask - >/dev/null; umask'
+check umask-p           'umask 0022' 0 'umask 022; umask -p'
+check umask-p-S         'umask -S u=rwx,g=rx,o=rx' 0 'umask 022; umask -p -S'
+check_err umask-empty-clause 'invalid symbolic mode operator' 1 'umask 022; umask u-r,,u-r'
+check_err umask-bad-who 'invalid symbolic mode operator' 1 'umask 022; umask b=rwx'
+check_err umask-octal-range 'octal number out of range' 1 'umask 999'
+check_err umask-badopt  'invalid option' 2 'umask -q'
+# a failed mode must leave the mask alone
+check umask-unchanged   '0124'  0 'umask 0124; umask b=rwx 2>/dev/null; umask'
+
+# --- getopts terminal and error paths -------------------------------------
+# Running off the END of the arguments rewinds OPTIND, so a second `while
+# getopts' over a fresh list starts at 1; stopping at an operand does not.
+check getopts-rewind    'OPTIND=4
+OPTIND=1'                       0 'set -- -h -c foo x y z; while getopts "hc:" o; do :; done; echo OPTIND=$OPTIND; set --; while getopts "hc:" o2; do :; done; echo OPTIND=$OPTIND'
+check getopts-operand   '1'     0 'set -- x; while getopts h o; do :; done; echo $OPTIND'
+check getopts-end       '2'     0 'set -- -h; while getopts h o; do :; done; echo $OPTIND'
+# `--' ends the options, sets NAME to ? and steps past itself
+check getopts-ddash     'name=?
+3'                              0 'set -- -a --; while getopts a name; do :; done; echo "name=$name"; echo $OPTIND'
+# OPTARG is cleared on every failing return, so a stale argument cannot survive
+check getopts-optarg-clear 'o=? OPTARG=[]' 0 'set -- -x; OPTARG=zz; getopts h o 2>/dev/null; echo "o=$o OPTARG=[$OPTARG]"'
+check getopts-optarg-missing 'o=? OPTARG=[]' 0 'set -- -c; OPTARG=zz; getopts "c:" o 2>/dev/null; echo "o=$o OPTARG=[$OPTARG]"'
+check getopts-silent    'o=: OPTARG=[c]' 0 'set -- -c; getopts ":c:" o; echo "o=$o OPTARG=[$OPTARG]"'
+check getopts-reuse     'OPTIND=2 opt=? OPTARG=' 0 'getopts "c:" opt -c10 >/dev/null; getopts "c:" opt -c10; echo OPTIND=$OPTIND opt=$opt OPTARG=$OPTARG'
+# OPTIND below 1 is unspecified in POSIX; it used to crash the shell outright
+check getopts-optind-neg 'status=1
+status=1'                       0 'OPTIND=-1; getopts a: foo; echo status=$?; OPTIND=0; getopts a: foo; echo status=$?'
+
 # $(< FILE) and `< FILE` read the file directly -- no command runs at all
 check dollar-lt-file    '[2
 3]'                             0 'printf "2\n3\n" >/tmp/sx-lt.txt; foo=$(< /tmp/sx-lt.txt); echo "[$foo]"'
