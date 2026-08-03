@@ -272,6 +272,37 @@ tcheck t-dangling-e '1' 0 '[ -e dangle ]; echo $?'
 tcheck t-link-e     '0' 0 '[ -e link ]; echo $?'
 # An unimplemented unary operator must be an error, not silently true.
 check_err t-bad-unary 'unary operator expected' 2 '[ -Q x ]'
+# `test' is specified by argument COUNT, so how many words there are decides
+# which of them are operators. Each expectation below was diffed against bash.
+check t-1arg-dashz      '0'   0 '[ -z ]; echo $?'          # one arg: -z is a word
+check t-2arg-dashz      '1'   0 '[ -z ">" ]; echo $?'      # two: -z is an operator
+check t-3arg-gt         '0'   0 '[ -z ">" -- ]; echo $?'   # three: > is an operator
+check t-3arg-and        '1'   0 "[ foo -a '' ]; echo \$?"  # three: -a compares strings
+check t-3arg-or         '0'   0 "[ foo -o '' ]; echo \$?"
+check t-3arg-bang       '0'   0 '[ ! -z foo ]; echo $?'
+check t-3arg-paren      '0'   0 '[ "(" foo ")" ]; echo $?'
+check t-4arg-bang       '1'   0 '[ ! foo = foo ]; echo $?'
+check t-4arg-paren      '1'   0 '[ "(" -z foo ")" ]; echo $?'
+check t-ambig-bracket   '0'   0 '[ -z -a ] ]; echo $?'     # -z AND ], both non-empty
+check t-ambig-dasha     '0'   0 '[ -z -a -a ]; echo $?'
+# past four arguments, a grammar: -o loosest, then -a, then ! and ( )
+check t-group-not       '0'   0 "[ -z '' -a '(' ! -z x ')' ]; echo \$?"
+check t-group-two       '0'   0 '[ "(" a ")" -a "(" b ")" ]; echo $?'
+check t-binary-first    '1'   0 '[ -n = b -a x ]; echo $?' # -n is an operand here
+check t-not-binds-tight '0'   0 "[ ! -z a -a -z '' ]; echo \$?"
+# nothing short-circuits: bash reports the bad integer even though -n x decided it
+check_err t-no-shortcut 'integer expected'        2 '[ -n x -o abc -eq 1 ]'
+# malformed expressions are status 2, not false
+check_err t-2arg-noop   'unary operator expected' 2 "[ = '' ]"
+check_err t-2arg-paren  'unary operator expected' 2 '[ "(" foo ]'
+check_err t-3arg-nobin  'binary operator expected' 2 'test -n x y'
+check_err t-3arg-extra  'binary operator expected' 2 'test -n x ]'
+check_err t-4arg-many   'too many arguments'      2 '[ a b c d ]'
+check_err t-parse-many  'too many arguments'      2 '[ a = b = c ]'
+check_err t-unclosed    "\`)' expected"           2 '[ "(" a -a b ]'
+check_err t-missing-arg 'argument expected'       2 "[ -z '' -a '(' ]"
+# an unquoted empty variable changes the argument count, and so the meaning
+check_err t-empty-var   'unary operator expected' 2 'empty=""; [ $empty = "" ]'
 
 # --- alias substitution happens in the PARSER (POSIX 2.3.1) ----------------
 # bash cannot be the reference for WHETHER aliases expand -- it disables them

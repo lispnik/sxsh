@@ -3165,6 +3165,14 @@ Other:
 Unlike `[[ ]]', operands here are ordinary words, so they are subject to word
 splitting and pathname expansion and must be quoted.
 
+POSIX specifies `test' by the NUMBER of arguments, and that is what decides
+which words are operators. `[ -z ]' is one argument, so -z is a string and
+the result is true; `[ -z x ]' is two, so -z is an operator. `[ foo -a "" ]'
+is three, so -a compares two strings rather than joining two expressions --
+an unquoted empty variable can therefore change what an expression means.
+Past four arguments the words are parsed as a grammar, with -o loosest, then
+-a, then `!' and `( )'.
+
 Exit Status:
 Zero if EXPRESSION is true, 1 if false, 2 if it is malformed."
   (handler-case (if (eval-test args sh) 0 1)
@@ -3228,109 +3236,207 @@ permission-bit tests do."
          (= (sb-posix:stat-dev sa) (sb-posix:stat-dev sb*))
          (= (sb-posix:stat-ino sa) (sb-posix:stat-ino sb*)))))
 
+(defparameter +test-unary-ops+
+  '("-a" "-b" "-c" "-d" "-e" "-f" "-g" "-h" "-k" "-n" "-o" "-p" "-r" "-s" "-t"
+    "-u" "-v" "-w" "-x" "-z" "-G" "-L" "-N" "-O" "-S")
+  "Operators taking one operand.
+
+`test' is specified by argument COUNT rather than by a grammar, so this set is
+what decides whether `[ -z x ]' is an operator applied to x or two strings. It
+has to list exactly what TEST-UNARY implements: a name in here that TEST-UNARY
+does not handle would silently become false, and one missing from here becomes
+a plain word.")
+
+(defparameter +test-binary-ops+
+  '("=" "==" "!=" "<" ">" "-eq" "-ne" "-lt" "-le" "-gt" "-ge" "-nt" "-ot" "-ef")
+  "Operators taking two operands.
+
+-a and -o are deliberately absent: between two expressions they are the AND
+and OR connectives, and only the three-argument rule reads them as binary
+operators over two strings.")
+
+(defun test-unary-op-p (s) (and (member s +test-unary-ops+ :test #'string=) t))
+(defun test-binary-op-p (s) (and (member s +test-binary-ops+ :test #'string=) t))
+
+(defun test-nonempty (s) (and s (plusp (length s))))
+
+(defun test-integer (s)
+  "S as an integer. POSIX makes a non-integer operand to -eq and friends a
+usage error, not the integer 0: coercing silently made `[ $x -eq 1 ]' compare
+0 whenever x was unset or textual."
+  (let* ((trimmed (string-trim " " s))
+         (v (ignore-errors
+             (multiple-value-bind (v end) (parse-integer trimmed :junk-allowed t)
+               (and v (= end (length trimmed)) v)))))
+    (or v (error 'test-usage-error
+                 :detail (format nil "~A: integer expected" s)))))
+
+(defun test-unary (op a sh)
+  "Apply the one-operand operator OP to A.
+
+An operator listed in +TEST-UNARY-OPS+ but missing here would return false
+rather than complaining, so the two must be kept in step. Before these were
+implemented every unrecognised unary fell through to `is the operand a
+non-empty string', which made them all silently TRUE -- `[ -b /etc/passwd ]'
+succeeded, and so did -k, -u and -G."
+  (cond ((string= op "-n") (test-nonempty a))
+        ((string= op "-z") (not (test-nonempty a)))
+        ;; stat, not PROBE-FILE: a dangling symlink made PROBE-FILE report
+        ;; something for -f, and TRUENAME signals on one.
+        ((string= op "-e") (and (test-stat a :follow t) t))
+        ;; -a is an alias for -e in the unary position; it is the AND
+        ;; connective only between two expressions.
+        ((string= op "-a") (and (test-stat a :follow t) t))
+        ((string= op "-f") (test-file-kind a #'sb-posix:s-isreg))
+        ((string= op "-d") (test-file-kind a #'sb-posix:s-isdir))
+        ((string= op "-b") (test-file-kind a #'sb-posix:s-isblk))
+        ((string= op "-c") (test-file-kind a #'sb-posix:s-ischr))
+        ((string= op "-p") (test-file-kind a #'sb-posix:s-isfifo))
+        ((string= op "-S") (test-file-kind a #'sb-posix:s-issock))
+        ((string= op "-r") (test-access a sb-posix:r-ok))
+        ((string= op "-w") (test-access a sb-posix:w-ok))
+        ((string= op "-x") (test-access a sb-posix:x-ok))
+        ((or (string= op "-L") (string= op "-h")) (test-symlink-p a))
+        ((string= op "-s") (let ((st (test-stat a :follow t)))
+                             (and st (plusp (sb-posix:stat-size st)))))
+        ((string= op "-t")
+         (let ((fd (ignore-errors (parse-integer a))))
+           (and fd (plusp (sb-unix:unix-isatty fd)))))
+        ((string= op "-k") (test-mode-bit a #o1000))   ; sticky
+        ((string= op "-u") (test-mode-bit a #o4000))   ; setuid
+        ((string= op "-g") (test-mode-bit a #o2000))   ; setgid
+        ((string= op "-O") (let ((st (test-stat a :follow t)))
+                             (and st (= (sb-posix:stat-uid st) (sb-posix:geteuid)))))
+        ((string= op "-G") (let ((st (test-stat a :follow t)))
+                             (and st (= (sb-posix:stat-gid st) (sb-posix:getegid)))))
+        ;; -N: modified since it was last read.
+        ((string= op "-N") (let ((st (test-stat a :follow t)))
+                             (and st (> (sb-posix:stat-mtime st)
+                                        (sb-posix:stat-atime st)))))
+        ((string= op "-v") (and sh (nth-value 1 (get-var sh a)) t))
+        ((string= op "-o") (and sh (let ((e (option-by-name a)))
+                                     (and e (opt sh (third e)) t))))
+        (t (error 'test-usage-error
+                  :detail (format nil "~A: unary operator expected" op)))))
+
+(defun test-binary (a op b sh)
+  (declare (ignore sh))
+  (cond ((or (string= op "=") (string= op "==")) (string= a b))
+        ((string= op "!=") (not (string= a b)))
+        ;; < and > order by code point, as bash's `test' does; they are not
+        ;; redirections here because the shell never saw them unquoted.
+        ((string= op "<") (and (string< a b) t))
+        ((string= op ">") (and (string> a b) t))
+        ((string= op "-eq") (= (test-integer a) (test-integer b)))
+        ((string= op "-ne") (/= (test-integer a) (test-integer b)))
+        ((string= op "-lt") (< (test-integer a) (test-integer b)))
+        ((string= op "-le") (<= (test-integer a) (test-integer b)))
+        ((string= op "-gt") (> (test-integer a) (test-integer b)))
+        ((string= op "-ge") (>= (test-integer a) (test-integer b)))
+        ((string= op "-nt") (test-newer-p a b))
+        ((string= op "-ot") (test-newer-p b a))
+        ((string= op "-ef") (test-same-file-p a b))
+        (t (error 'test-usage-error
+                  :detail (format nil "~A: binary operator expected" op)))))
+
+(defun test-parse (args sh)
+  "Evaluate a test expression of more than four arguments, by bash's grammar:
+
+    expr := and { -o and }
+    and  := term { -a term }
+    term := ! term | ( expr ) | UNARY operand | operand BINARY operand | operand
+
+A binary operator is looked for before a unary one, so `[ -n = b -a x ]'
+compares the strings -n and b rather than reading -n as an operator.
+
+Nothing short-circuits. bash reports `[ -n x -o abc -eq 1 ]' as a bad integer
+even though the left side already decided the answer, so the operands are all
+evaluated.
+
+We let ( ) nest, where bash rejects `[ ( ( a ) ) ]' as a syntax error. POSIX
+leaves everything past four arguments unspecified and there is no reading on
+which the nested form should fail."
+  (let ((v (coerce args 'vector))
+        (i 0))
+    (labels ((peek (&optional (k 0))
+               (let ((j (+ i k))) (when (< j (length v)) (aref v j))))
+             (eat () (prog1 (aref v i) (incf i)))
+             (fail (control &rest fargs)
+               (error 'test-usage-error
+                      :detail (apply #'format nil control fargs)))
+             (term ()
+               (let ((tok (peek)))
+                 (cond
+                   ((null tok) (fail "argument expected"))
+                   ((string= tok "!") (eat) (not (term)))
+                   ((string= tok "(")
+                    (eat)
+                    (let ((value (or-expr)))
+                      (cond ((null (peek)) (fail "`)' expected"))
+                            ((string= (peek) ")") (eat))
+                            (t (fail "`)' expected, found ~A" (peek))))
+                      value))
+                   ((and (peek 1) (test-binary-op-p (peek 1)))
+                    (let ((left (eat)) (op (eat)))
+                      (unless (peek) (fail "argument expected"))
+                      (test-binary left op (eat) sh)))
+                   ((and (test-unary-op-p tok) (peek 1))
+                    (let ((op (eat))) (test-unary op (eat) sh)))
+                   (t (test-nonempty (eat))))))
+             (and-expr ()
+               (let ((value (term)))
+                 (loop while (and (peek) (string= (peek) "-a"))
+                       do (eat) (setf value (and (term) value)))
+                 value))
+             (or-expr ()
+               (let ((value (and-expr)))
+                 (loop while (and (peek) (string= (peek) "-o"))
+                       do (eat) (setf value (or (and-expr) value)))
+                 value)))
+      (let ((value (or-expr)))
+        (when (peek) (fail "too many arguments"))
+        value))))
+
 (defun eval-test (args &optional sh)
-  "Evaluate a test expression.
+  "Evaluate a `test' expression.
+
+POSIX specifies `test' by the NUMBER of arguments, not by a grammar: there are
+separate rules at zero, one, two, three and four arguments, and more than four
+is unspecified. Approximating that by splitting on the first -a or -o got the
+common shapes right and the corners wrong, because which words are operators
+depends on how many there are. `[ foo -a \"\" ]' is three arguments, so -a is
+a binary operator over two strings and not a connective at all; `[ -z ]' is
+one argument, so -z is a word; `[ -z '>' -- ]' is three, so `>' is the
+operator and -z is its left operand.
 
 SH is needed only by -v and -o, which ask about shell state rather than the
-filesystem; every other operator works without it.
-
-An unrecognised unary operator is an ERROR. Falling through to `is the operand
-a non-empty string', as this used to, made every unimplemented test silently
-TRUE -- `[ -b /etc/passwd ]' succeeded, and so did `-k', `-u', `-G' and the
-rest."
-  (labels ((str-nonempty (s) (and s (plusp (length s))))
-           (num (s)
-             ;; POSIX: a non-integer operand to -eq and friends is a usage
-             ;; error (status 2), not the integer 0. Silently coercing meant
-             ;; `[ $x -eq 1 ]' with x unset or textual quietly compared 0.
-             (let ((v (ignore-errors
-                       (multiple-value-bind (v end)
-                           (parse-integer (string-trim " " s) :junk-allowed t)
-                         (and v (= end (length (string-trim " " s))) v)))))
-               (or v (error 'test-usage-error
-                            :detail (format nil "~A: integer expression expected"
-                                            s))))))
-    (case (length args)
+filesystem."
+  (let ((n (length args)))
+    (case n
       (0 nil)
-      (1 (str-nonempty (first args)))
-      (2 (let ((op (first args)) (a (second args)))
-           (cond ((string= op "!") (not (str-nonempty a)))
-                 ((string= op "-n") (str-nonempty a))
-                 ((string= op "-z") (not (str-nonempty a)))
-                 ;; stat, not PROBE-FILE: a dangling symlink made PROBE-FILE
-                 ;; report something for `-f', and TRUENAME signals on one.
-                 ((string= op "-e") (and (test-stat a :follow t) t))
-                 ((string= op "-f") (test-file-kind a #'sb-posix:s-isreg))
-                 ((string= op "-d") (test-file-kind a #'sb-posix:s-isdir))
-                 ((string= op "-r") (test-access a sb-posix:r-ok))
-                 ((string= op "-w") (test-access a sb-posix:w-ok))
-                 ((string= op "-x") (test-access a sb-posix:x-ok))
-                 ((or (string= op "-L") (string= op "-h")) (test-symlink-p a))
-                 ((string= op "-t")
-                  (let ((fd (ignore-errors (parse-integer a))))
-                    (and fd (plusp (sb-unix:unix-isatty fd)))))
-                 ((string= op "-s") (let ((st (test-stat a :follow t)))
-                                      (and st (plusp (sb-posix:stat-size st)))))
-                 ;; -a is an alias for -e in the unary position; it is only
-                 ;; the AND operator between two expressions.
-                 ((string= op "-a") (and (test-stat a :follow t) t))
-                 ((string= op "-b") (test-file-kind a #'sb-posix:s-isblk))
-                 ((string= op "-c") (test-file-kind a #'sb-posix:s-ischr))
-                 ((string= op "-p") (test-file-kind a #'sb-posix:s-isfifo))
-                 ((string= op "-S") (test-file-kind a #'sb-posix:s-issock))
-                 ((string= op "-k") (test-mode-bit a #o1000))   ; sticky
-                 ((string= op "-u") (test-mode-bit a #o4000))   ; setuid
-                 ((string= op "-g") (test-mode-bit a #o2000))   ; setgid
-                 ((string= op "-O") (let ((st (test-stat a :follow t)))
-                                      (and st (= (sb-posix:stat-uid st)
-                                                 (sb-posix:geteuid)))))
-                 ((string= op "-G") (let ((st (test-stat a :follow t)))
-                                      (and st (= (sb-posix:stat-gid st)
-                                                 (sb-posix:getegid)))))
-                 ;; -N: modified since it was last read.
-                 ((string= op "-N") (let ((st (test-stat a :follow t)))
-                                      (and st (> (sb-posix:stat-mtime st)
-                                                 (sb-posix:stat-atime st)))))
-                 ((string= op "-v")
-                  (and sh (nth-value 1 (get-var sh a))))
-                 ((string= op "-o")
-                  (and sh (let ((e (option-by-name a)))
-                            (and e (opt sh (third e))))))
-                 ((and (> (length op) 1) (char= (char op 0) #\-))
-                  (error 'test-usage-error
-                         :detail (format nil "~A: unary operator expected" op)))
-                 (t (str-nonempty (second args))))))
-      (3 (let ((a (first args)) (op (second args)) (b (third args)))
-           (cond
-             ((string= op "=")  (string= a b))
-             ((string= op "==") (string= a b))
-             ((string= op "!=") (not (string= a b)))
-             ((string= op "-eq") (= (num a) (num b)))
-             ((string= op "-ne") (/= (num a) (num b)))
-             ((string= op "-lt") (< (num a) (num b)))
-             ((string= op "-le") (<= (num a) (num b)))
-             ((string= op "-gt") (> (num a) (num b)))
-             ((string= op "-ge") (>= (num a) (num b)))
-             ;; File comparisons.
-             ((string= op "-nt") (test-newer-p a b))
-             ((string= op "-ot") (test-newer-p b a))
-             ((string= op "-ef") (test-same-file-p a b))
-             ((string= a "!") (not (eval-test (rest args) sh)))
-             ;; `( expr )' -- a grouping of one expression.
-             ((and (string= a "(") (string= b ")")) (eval-test (list op) sh))
-             (t nil))))
-      (t (cond
-           ((string= (first args) "!") (not (eval-test (rest args) sh)))
-           ;; a -a b / a -o b (deprecated but common)
-           ((member "-a" args :test #'string=)
-            (let ((pos (position "-a" args :test #'string=)))
-              (and (eval-test (subseq args 0 pos) sh)
-                   (eval-test (subseq args (1+ pos)) sh))))
-           ((member "-o" args :test #'string=)
-            (let ((pos (position "-o" args :test #'string=)))
-              (or (eval-test (subseq args 0 pos) sh)
-                  (eval-test (subseq args (1+ pos)) sh))))
-           (t nil))))))
+      (1 (test-nonempty (first args)))
+      (2 (destructuring-bind (op a) args
+           (if (string= op "!")
+               (not (test-nonempty a))
+               (test-unary op a sh))))
+      (3 (destructuring-bind (a op b) args
+           (cond ((test-binary-op-p op) (test-binary a op b sh))
+                 ;; Only here are -a and -o binary operators over two strings.
+                 ((string= op "-a") (and (test-nonempty a) (test-nonempty b)))
+                 ((string= op "-o") (or (test-nonempty a) (test-nonempty b)))
+                 ((string= a "!") (not (eval-test (list op b) sh)))
+                 ((and (string= a "(") (string= b ")")) (test-nonempty op))
+                 (t (error 'test-usage-error
+                           :detail (format nil "~A: binary operator expected" op))))))
+      (4 (destructuring-bind (a b c d) args
+           (cond ((string= a "!") (not (eval-test (list b c d) sh)))
+                 ((and (string= a "(") (string= d ")")) (eval-test (list b c) sh))
+                 ;; POSIX calls anything else at four arguments unspecified.
+                 ;; bash hands it to the same parser it uses beyond four, and
+                 ;; the diagnostic that produces is the better one: `[ -z ""
+                 ;; -a ( ]' is a missing operand, not too many of them.
+                 (t (test-parse args sh)))))
+      (t (test-parse args sh)))))
 
 (defun directoryp (path)
   (let ((tn (ignore-errors (truename path))))
