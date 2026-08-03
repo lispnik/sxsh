@@ -947,6 +947,16 @@ function. Redirections and assignments on NODE still apply."
   ;; it in THIS context so the control-flow builtins still take effect.
   (when (and (string= (first cmd-words) "builtin") (rest cmd-words))
     (return-from command-bypass-1 (exec-builtin-prefix sh node (rest cmd-words))))
+  ;; `command command seq 3': the prefix nests. Running the `command' BUILTIN
+  ;; here instead would have it throw RUN-COMMAND-BYPASS to a tag only the
+  ;; outer dispatch establishes -- which is exactly what crashed the shell with
+  ;; "attempt to THROW to a tag that does not exist". -v and -V do not run
+  ;; anything, so they stay in the builtin.
+  (when (string= (first cmd-words) "command")
+    (return-from command-bypass-1
+      (if (member (second cmd-words) '("-v" "-V") :test #'string=)
+          (run-builtin sh "command" (rest cmd-words) node)
+          (exec-command-bypass sh node (rest cmd-words)))))
   (let ((name (first cmd-words)))
     (cond
       ((builtin-p name)
@@ -966,37 +976,55 @@ process image via posix_spawn semantics is not possible (spawn creates a
 child); instead we spawn the command, wait, and exit with its status -- the
 observable effect (the shell is replaced) is preserved for scripts. With no
 words, apply NODE's redirections permanently to the shell."
-  (if (null exec-words)
-      ;; permanent redirections: apply and do NOT restore
-      (progn
-        (multiple-value-bind (saved temps)
-            (apply-redirects-in-process sh (simple-command-redirects node))
-          (declare (ignore saved))     ; intentionally not restored
-          (dolist (p temps) (ignore-errors (delete-file p))))
-        0)
-      ;; exec a command: spawn it, and on success replace the shell (exit with
-      ;; its status). A failure to find the command is fatal to the shell.
-      ;;
-      ;; The redirections are part of the exec and take effect before it, so
-      ;; `exec nosuchcmd 2>/dev/null' must swallow the diagnostic. Applying
-      ;; them only inside the spawn meant the message escaped to the shell's
-      ;; own stderr when the lookup failed.
-      (let ((prog (find-in-path sh (first exec-words))))
-        (if (null prog)
-            (progn
-              (ignore-errors
-               (apply-redirects-in-process sh (simple-command-redirects node)))
-              (format *error-output* "exec: ~A: not found~%" (first exec-words))
-              (finish-output *error-output*)
-              (signal 'shell-exit :code 127) 127)
-            (let ((pid (spawn-external-words sh node exec-words)))
-              (let ((status (wait-for pid)))
-                (signal 'shell-exit :code status)
-                status))))))
+  ;; `--' ends the options and `-a NAME' renames argv[0]. Both used to be taken
+  ;; for the command, so `exec -- echo hi' reported `--: not found' and left the
+  ;; shell 127.
+  (let ((argv0 nil))
+    (loop while (and exec-words (> (length (first exec-words)) 1)
+                     (char= (char (first exec-words) 0) #\-))
+          do (let ((o (pop exec-words)))
+               (cond ((string= o "--") (return))
+                     ((string= o "-a") (setf argv0 (pop exec-words)))
+                     ((string= o "-c"))   ; empty environment: accepted
+                     ((string= o "-l"))   ; login dash on argv[0]: accepted
+                     (t (format *error-output* "exec: ~A: invalid option~%" o)
+                        (return-from exec-exec-builtin 2)))))
+    (if (null exec-words)
+        ;; permanent redirections: apply and do NOT restore
+        (progn
+          (multiple-value-bind (saved temps)
+              (apply-redirects-in-process sh (simple-command-redirects node))
+            (declare (ignore saved))     ; intentionally not restored
+            (dolist (p temps) (ignore-errors (delete-file p))))
+          0)
+        ;; exec a command: spawn it, and on success replace the shell (exit
+        ;; with its status). A failure to find the command is fatal to the
+        ;; shell.
+        ;;
+        ;; The redirections are part of the exec and take effect before it, so
+        ;; `exec nosuchcmd 2>/dev/null' must swallow the diagnostic. Applying
+        ;; them only inside the spawn meant the message escaped to the shell's
+        ;; own stderr when the lookup failed.
+        (let ((prog (find-in-path sh (first exec-words))))
+          (if (null prog)
+              (progn
+                (ignore-errors
+                 (apply-redirects-in-process sh (simple-command-redirects node)))
+                (format *error-output* "exec: ~A: not found~%" (first exec-words))
+                (finish-output *error-output*)
+                (signal 'shell-exit :code 127) 127)
+              (let ((pid (spawn-external-words sh node exec-words :argv0 argv0)))
+                (let ((status (wait-for pid)))
+                  (signal 'shell-exit :code status)
+                  status)))))))
 
-(defun spawn-external-words (sh node argv-words)
+(defun spawn-external-words (sh node argv-words &key argv0)
   "Like spawn-external but with an explicit ARGV-WORDS list (already expanded),
-reusing NODE's assignments and redirections."
+reusing NODE's assignments and redirections.
+
+ARGV0 replaces what the command sees as its own name, which is what
+`exec -a NAME cmd' asks for; the program looked up is still ARGV-WORDS's
+first element."
   (let* ((prog (or (find-in-path sh (first argv-words))
                    (progn (throw 'not-found
                             (list :command-error
@@ -1006,8 +1034,9 @@ reusing NODE's assignments and redirections."
     (multiple-value-bind (redir-actions temps)
         (build-spawn-file-actions sh (simple-command-redirects node))
       (unwind-protect
-           (spawn prog argv-words :env env :file-actions redir-actions
-                                  :sigdefault (child-sigdefaults sh))
+           (spawn prog (if argv0 (cons argv0 (rest argv-words)) argv-words)
+                  :env env :file-actions redir-actions
+                  :sigdefault (child-sigdefaults sh))
         (dolist (p temps) (ignore-errors (delete-file p)))))))
 
 (defun xtrace (sh node words)
@@ -1995,11 +2024,54 @@ Encoding:
 ;;; Command substitution & eval helpers (referenced by expand.lisp / builtins)
 ;;; ---------------------------------------------------------------------------
 
+(defun redirect-only-substitution (sh ast)
+  "For `$(< FILE)' return (values EXPANDED-PATH T); otherwise (values NIL NIL).
+
+The shape has to be exactly one simple command with no words, no assignments
+and one `<' redirect. Matching on the source text instead would misread
+`$(< a; echo b)' and `$(cat < a)', both of which are ordinary commands."
+  (let ((entries (and (= 1 (length ast))
+                      (eq (ast-type (first ast)) :list)
+                      (complete-command-entries (first ast)))))
+    (unless (and entries (= 1 (length entries))) (return-from redirect-only-substitution nil))
+    (let ((cmd (car (first entries))))
+      (unless (and (eq (ast-type cmd) :simple)
+                   (null (simple-command-words cmd))
+                   (null (simple-command-assignments cmd))
+                   (= 1 (length (simple-command-redirects cmd))))
+        (return-from redirect-only-substitution nil))
+      (let ((r (first (simple-command-redirects cmd))))
+        (unless (and (eq (redirect-op r) :<) (null (redirect-fd r)))
+          (return-from redirect-only-substitution nil))
+        (values (first (expand-word-to-fields sh (word-text (redirect-target r))
+                                              :split nil))
+                t)))))
+
 (defun command-substitute (sh src)
   "Run SRC, capture its stdout, strip trailing newlines. Captures through a
 temp file so large output can't deadlock on a bounded pipe buffer."
   (let ((ast (handler-case (parse-string src)
                (error () (return-from command-substitute "")))))
+    ;; `$(< file)' and `` `< file` '' are not a command at all: ksh and bash
+    ;; read the file directly, without forking anything. Falling through to
+    ;; the general path applied the redirection to a command that produced no
+    ;; output, so the substitution was empty -- silently, which is the worst
+    ;; way for a widely used idiom to fail.
+    (multiple-value-bind (path found) (redirect-only-substitution sh ast)
+      (when found
+        (return-from command-substitute
+          (let ((text (and path (ignore-errors (slurp-file path)))))
+            (cond (text (string-right-trim '(#\Newline) text))
+                  (t
+                   ;; The redirection still has to be REPORTED when it fails,
+                   ;; or a typo'd filename yields an empty string with nothing
+                   ;; said. Status is the substitution's, which a surrounding
+                   ;; command overrides as usual.
+                   (format *error-output* "sxsh: ~A: No such file or directory~%"
+                           (or path ""))
+                   (setf (shell-last-status sh) 1
+                         (shell-last-cmdsub-status sh) 1)
+                   ""))))))
     (let* ((path (format nil "/tmp/sxsh-cmdsub-~A-~A"
                          (sb-posix:getpid) (random 1000000)))
            (fd (sb-posix:open path (logior +o-wronly+ +o-creat+ +o-trunc+) #o600))

@@ -1950,6 +1950,14 @@ eval rather than the whole shell.
 
 Exit Status:
 The status of the executed command, or zero if the arguments are empty."
+  ;; `--' ends the options, and an unknown one is a usage error rather than a
+  ;; word to run: `eval -- echo hi' must print hi, not report `--' as a command.
+  (loop while (and args (> (length (first args)) 1)
+                   (char= (char (first args) 0) #\-))
+        do (let ((o (pop args)))
+             (when (string= o "--") (return))
+             (format *error-output* "eval: ~A: invalid option~%eval: usage: eval [arg ...]~%" o)
+             (return-from builtin 2)))
   (let ((src (format nil "~{~A~^ ~}" args))
         ;; A failed assignment inside eval ends the eval, not the shell.
         (*assignment-error-fatal* nil))
@@ -1974,6 +1982,7 @@ The status of the last command executed, or 1 if FILENAME cannot be read."
   ;; exactly as it would for a command. FIND-IN-PATH already does both halves;
   ;; the previous :allow-slash call short-circuited every name to itself, so a
   ;; bare `. helpers.sh' only ever worked from the right directory.
+  (when (and args (string= (first args) "--")) (pop args))
   (if (null args) (progn (format *error-output* ".: filename argument required~%") 2)
       (let ((path (find-source-file sh (first args))))
         (if (and path (probe-file path))
@@ -1989,10 +1998,23 @@ The status of the last command executed, or 1 if FILENAME cannot be read."
 (setf (gethash "source" *builtins*) (gethash "." *builtins*))
 (copy-builtin-help "." "source" :synopsis "source [-p PATH] FILENAME [ARGUMENT ...]")
 
+(defparameter +shell-keywords+
+  '("!" "{" "}" "[[" "]]" "case" "coproc" "do" "done" "elif" "else" "esac"
+    "fi" "for" "function" "if" "in" "select" "then" "time" "until" "while")
+  "Words the PARSER treats as syntax rather than as command names.
+
+Kept here rather than reusing the parser's +RESERVED+ because the two answer
+different questions: +RESERVED+ is what may not begin a command, while this is
+what `type' calls a keyword, and it includes forms the parser recognises
+without listing -- select, [[ ]] and coproc.")
+
 (defun type-kind (sh name)
-  "Classify NAME: returns (values kind path) where kind is one of :alias,
-:function, :builtin or :file."
+  "Classify NAME: returns (values kind path) where kind is one of :keyword,
+:alias, :function, :builtin or :file."
   (cond
+    ;; Syntax outranks everything: `alias if=x' does not stop `if' being a
+    ;; keyword, and bash reports it as one.
+    ((member name +shell-keywords+ :test #'string=) (values :keyword nil))
     ((gethash name (shell-aliases sh)) (values :alias nil))
     ((gethash name (shell-functions sh)) (values :function nil))
     ((builtin-p name) (values :builtin nil))
@@ -2047,6 +2069,7 @@ Zero if every NAME is found, non-zero otherwise."
              (setf status 1))
             (type-only
              (write-line (ecase kind
+                           (:keyword "keyword")
                            (:alias "alias") (:function "function")
                            (:builtin "builtin") (:file "file"))
                          out))
@@ -2055,6 +2078,7 @@ Zero if every NAME is found, non-zero otherwise."
              (if (eq kind :file) (write-line path out) (setf status 0)))
             (t
              (ecase kind
+               (:keyword (format out "~A is a shell keyword~%" a))
                (:alias (format out "~A is an alias for ~A~%"
                                a (gethash a (shell-aliases sh))))
                (:function (format out "~A is a function~%" a))
@@ -2267,19 +2291,32 @@ itself if an option error occurs."
     (cond
       ((null args) 0)
       (verbose
+       ;; TYPE-KIND, not a private lookup: `command -v' has to see keywords and
+       ;; functions too. Checking only builtins and $PATH meant `command -v for'
+       ;; found nothing and `command -v seq' reported the file even where a
+       ;; function of that name shadowed it.
        (let ((name (first args)))
-         (cond
-           ((builtin-p name)
-            (if (eq verbose :v) (format out "~A~%" name)
-                (format out "~A is a shell builtin~%" name))
-            0)
-           (t (let ((p (find-in-path sh name)))
-                (cond (p (if (eq verbose :v) (format out "~A~%" p)
-                             (format out "~A is ~A~%" name p))
-                         0)
-                      (t (when (eq verbose :big-v)
-                           (format *error-output* "command: ~A: not found~%" name))
-                         1)))))))
+         (multiple-value-bind (kind path) (type-kind sh name)
+           (case kind
+             ((nil)
+              (when (eq verbose :big-v)
+                (format *error-output* "command: ~A: not found~%" name))
+              1)
+             (:file
+              (if (eq verbose :v) (format out "~A~%" path)
+                  (format out "~A is ~A~%" name path))
+              0)
+             (t
+              (if (eq verbose :v)
+                  (format out "~A~%" name)
+                  (format out "~A is ~A~%" name
+                          (ecase kind
+                            (:keyword "a shell keyword")
+                            (:alias (format nil "an alias for ~A"
+                                            (gethash name (shell-aliases sh))))
+                            (:function "a function")
+                            (:builtin "a shell builtin"))))
+              0)))))
       ;; plain `command cmd args`: ask the executor to run bypassing functions
       (t (throw 'run-command-bypass args)))))
 

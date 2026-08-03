@@ -438,7 +438,9 @@ readonly
 return'                       0 'help -d "re*" | sed "s/ - .*//"'
 # Syntax topics are covered too, and are NOT in the builtin table.
 check help-syntax       'ok'  0 'help for >/dev/null && echo ok'
-check help-syntax-not-builtin 'ok' 0 'type for >/dev/null 2>&1 || echo ok'
+# `for' is syntax, not a builtin -- `type' now says so rather than not finding
+# it at all, which is what this used to assert.
+check help-syntax-not-builtin 'keyword' 0 'type -t for'
 # help describes itself and is an ordinary builtin.
 check help-is-builtin   'help is a shell builtin' 0 'type help'
 check help-plain-text   '0'   0 'help | grep -c "$(printf "\033")" || true'
@@ -866,6 +868,40 @@ check command-p-runs    'hi'    0 'command -p echo hi'
 check command-p-stdpath '0'     0 'PATH=/nonexistent command -p true; echo $?'
 check command-plain     'hi'    0 'command echo hi'
 check command-v         'echo'  0 'command -v echo'
+# `--' ends the options of the builtins that take a command or a file, and a
+# keyword is a thing `type' and `command -v' can name. Diffed against bash 5.3.
+check eval-ddash        'hi'    0 'eval -- echo hi'
+check_err eval-badopt   'invalid option' 2 'eval -z'
+check eval-dash         ''      127 'eval - 2>/dev/null'
+check source-ddash      'ok'    0 'source -- /dev/null; echo ok'
+check exec-ddash        'hi'    0 'exec -- echo hi'
+check exec-argv0        'hi'    0 'exec -a zzz /bin/echo hi'
+check type-keyword      'if is a shell keyword' 0 'type if'
+check type-t-keyword    'keyword' 0 'type -t if'
+check type-t-keyword2   'keyword' 0 'type -t "[["'
+check cmd-v-keyword     'for'   0 'command -v for'
+check cmd-V-keyword     'if is a shell keyword' 0 'command -V if'
+check cmd-v-function    'f'     0 'f(){ :; }; command -v f'
+# a function shadowing an external must not make `command -v' report the file
+check cmd-v-func-shadow 'seq'   0 'seq(){ echo 3; }; command command -v seq'
+# the prefixes nest: this used to throw to a tag only the outer dispatch had
+check cmd-cmd-nested    '1 2 3' 0 'command command seq 3 | tr "\n" " " | sed "s/ $//"'
+check cmd-builtin-nest  'hi'    0 'command builtin echo hi'
+check cmd-v-missing     'st=1'  0 'command -v nosuchzz; echo st=$?'
+check cmd-v-empty       'st=1'  0 'command -v ""; echo st=$?'
+
+# $(< FILE) and `< FILE` read the file directly -- no command runs at all
+check dollar-lt-file    '[2
+3]'                             0 'printf "2\n3\n" >/tmp/sx-lt.txt; foo=$(< /tmp/sx-lt.txt); echo "[$foo]"'
+check backtick-lt-file  '[7
+8]'                             0 'printf "7\n8\n" >/tmp/sx-lt2.txt; x=`< /tmp/sx-lt2.txt`; echo "[$x]"'
+check dollar-lt-expand  '[a]'   0 'printf "a\n" >/tmp/sx-lt3.txt; f=/tmp/sx-lt3.txt; echo "[$(< $f)]"'
+# only that exact shape: a command, or a second command, makes it ordinary
+check dollar-lt-cmd     '[a]'   0 'printf "a\n" >/tmp/sx-lt4.txt; echo "[$(cat < /tmp/sx-lt4.txt)]"'
+check dollar-lt-two     '[b]'   0 'printf "a\n" >/tmp/sx-lt5.txt; echo "[$(< /tmp/sx-lt5.txt; echo b)]"'
+# a plain `< file' outside a substitution still prints nothing
+check plain-lt-file     'done'  0 'printf "a\n" >/tmp/sx-lt6.txt; < /tmp/sx-lt6.txt; echo done'
+check_err dollar-lt-miss 'No such file or directory' 0 'echo "[$(< /nonexistent-zz)]"'
 check command-bypass-fn '127'   0 'f(){ echo func; }; command f 2>/dev/null; echo $?'
 check dot-path-search   'sourced-ok' 0 'd=$(mktemp -d); echo "echo sourced-ok" > "$d/lib.sh"; PATH=$d:$PATH; . lib.sh'
 check dot-sets-vars     '[v]'   0 'd=$(mktemp -d); echo "V=v" > "$d/lib.sh"; PATH=$d:$PATH; . lib.sh; echo "[$V]"'
