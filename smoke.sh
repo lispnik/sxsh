@@ -245,6 +245,34 @@ check set-allexport     '1'          0 'set -a; V=x; env | grep -c "^V=x"'
 check set-noexec        ''           0 'set -n; echo NOTRUN'
 check set-invalid-opt   ''           2 'set -Z 2>/dev/null'
 
+# --- test/[ file operators -------------------------------------------------
+# These were UNIMPLEMENTED and fell through to `is the operand a non-empty
+# string', so every one of them was silently TRUE: `[ -b /etc/passwd ]'
+# succeeded. Expectations diffed against bash in a scratch directory.
+tdir="$tmp/testops"; mkdir -p "$tdir"; : > "$tdir/reg"; ln -s reg "$tdir/link"
+ln -s nowhere "$tdir/dangle"; mkfifo "$tdir/fifo" 2>/dev/null
+tcheck() { local back=$PWD; cd "$tdir" || return; check "$@"; cd "$back" || return; }
+tcheck t-block      '1' 0 '[ -b reg ]; echo $?'
+tcheck t-char       '1' 0 '[ -c reg ]; echo $?'
+tcheck t-fifo       '0' 0 '[ -p fifo ]; echo $?'
+tcheck t-fifo-no    '1' 0 '[ -p reg ]; echo $?'
+tcheck t-socket     '1' 0 '[ -S reg ]; echo $?'
+tcheck t-owner      '0' 0 '[ -O reg ]; echo $?'
+tcheck t-exists-a   '0' 0 '[ -a reg ]; echo $?'
+tcheck t-exists-a-no '1' 0 '[ -a nope ]; echo $?'
+tcheck t-symlink    '0' 0 '[ -h link ]; echo $?'
+tcheck t-same-file  '0' 0 '[ reg -ef link ]; echo $?'
+tcheck t-diff-file  '1' 0 '[ reg -ef fifo ]; echo $?'
+tcheck t-isvar      '0' 0 '[ -v HOME ]; echo $?'
+tcheck t-isvar-no   '1' 0 '[ -v NOSUCHVAR_XYZ ]; echo $?'
+# A dangling symlink is not a regular file and does not exist: PROBE-FILE
+# reported one for -f, and TRUENAME signals on it.
+tcheck t-dangling-f '1' 0 '[ -f dangle ]; echo $?'
+tcheck t-dangling-e '1' 0 '[ -e dangle ]; echo $?'
+tcheck t-link-e     '0' 0 '[ -e link ]; echo $?'
+# An unimplemented unary operator must be an error, not silently true.
+check_err t-bad-unary 'unary operator expected' 2 '[ -Q x ]'
+
 # --- alias substitution happens in the PARSER (POSIX 2.3.1) ----------------
 # bash cannot be the reference for WHETHER aliases expand -- it disables them
 # in non-interactive shells and sxsh deliberately does not -- but it is the

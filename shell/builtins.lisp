@@ -2866,7 +2866,7 @@ splitting and pathname expansion and must be quoted.
 
 Exit Status:
 Zero if EXPRESSION is true, 1 if false, 2 if it is malformed."
-  (handler-case (if (eval-test args) 0 1)
+  (handler-case (if (eval-test args sh) 0 1)
     (test-usage-error (e)
       (format *error-output* "test: ~A~%" e)
       2)))
@@ -2882,7 +2882,7 @@ Zero if EXPRESSION is true, 1 if false, 2 if it is malformed or the closing
   (let ((a args))
     (unless (and a (string= (car (last a)) "]"))
       (format *error-output* "[: missing ]~%") (return-from builtin 2))
-    (handler-case (if (eval-test (butlast a)) 0 1)
+    (handler-case (if (eval-test (butlast a) sh) 0 1)
       (test-usage-error (e)
         (format *error-output* "[: ~A~%" e)
         2))))
@@ -2899,8 +2899,44 @@ Zero if EXPRESSION is true, 1 if false, 2 if it is malformed or the closing
   (handler-case (sb-posix:s-islnk (sb-posix:stat-mode (sb-posix:lstat path)))
     (error () nil)))
 
-(defun eval-test (args)
-  "Evaluate a test expression (subset of POSIX test)."
+(defun test-stat (path &key follow)
+  "stat PATH, or NIL if it cannot be stat'd. FOLLOW selects stat over lstat."
+  (ignore-errors (if follow (sb-posix:stat path) (sb-posix:lstat path))))
+
+(defun test-mode-bit (path bit)
+  "True if PATH exists and its mode has BIT set. Follows symlinks, as the
+permission-bit tests do."
+  (let ((st (test-stat path :follow t)))
+    (and st (logtest (sb-posix:stat-mode st) bit))))
+
+(defun test-file-kind (path pred)
+  (let ((st (test-stat path :follow t)))
+    (and st (funcall pred (sb-posix:stat-mode st)))))
+
+(defun test-newer-p (a b)
+  "True if A exists and is strictly newer than B, or B does not exist."
+  (let ((sa (test-stat a :follow t)) (sb* (test-stat b :follow t)))
+    (cond ((null sa) nil)
+          ((null sb*) t)
+          (t (> (sb-posix:stat-mtime sa) (sb-posix:stat-mtime sb*))))))
+
+(defun test-same-file-p (a b)
+  "True if A and B are the same file -- same device and inode."
+  (let ((sa (test-stat a :follow t)) (sb* (test-stat b :follow t)))
+    (and sa sb*
+         (= (sb-posix:stat-dev sa) (sb-posix:stat-dev sb*))
+         (= (sb-posix:stat-ino sa) (sb-posix:stat-ino sb*)))))
+
+(defun eval-test (args &optional sh)
+  "Evaluate a test expression.
+
+SH is needed only by -v and -o, which ask about shell state rather than the
+filesystem; every other operator works without it.
+
+An unrecognised unary operator is an ERROR. Falling through to `is the operand
+a non-empty string', as this used to, made every unimplemented test silently
+TRUE -- `[ -b /etc/passwd ]' succeeded, and so did `-k', `-u', `-G' and the
+rest."
   (labels ((str-nonempty (s) (and s (plusp (length s))))
            (num (s)
              ;; POSIX: a non-integer operand to -eq and friends is a usage
@@ -2920,10 +2956,11 @@ Zero if EXPRESSION is true, 1 if false, 2 if it is malformed or the closing
            (cond ((string= op "!") (not (str-nonempty a)))
                  ((string= op "-n") (str-nonempty a))
                  ((string= op "-z") (not (str-nonempty a)))
-                 ((string= op "-e") (and (probe-file a) t))
-                 ((string= op "-f") (and (probe-file a)
-                                         (not (directoryp a))))
-                 ((string= op "-d") (directoryp a))
+                 ;; stat, not PROBE-FILE: a dangling symlink made PROBE-FILE
+                 ;; report something for `-f', and TRUENAME signals on one.
+                 ((string= op "-e") (and (test-stat a :follow t) t))
+                 ((string= op "-f") (test-file-kind a #'sb-posix:s-isreg))
+                 ((string= op "-d") (test-file-kind a #'sb-posix:s-isdir))
                  ((string= op "-r") (test-access a sb-posix:r-ok))
                  ((string= op "-w") (test-access a sb-posix:w-ok))
                  ((string= op "-x") (test-access a sb-posix:x-ok))
@@ -2931,8 +2968,36 @@ Zero if EXPRESSION is true, 1 if false, 2 if it is malformed or the closing
                  ((string= op "-t")
                   (let ((fd (ignore-errors (parse-integer a))))
                     (and fd (plusp (sb-unix:unix-isatty fd)))))
-                 ((string= op "-s") (let ((f (probe-file a)))
-                                      (and f (plusp (with-open-file (s f) (file-length s))))))
+                 ((string= op "-s") (let ((st (test-stat a :follow t)))
+                                      (and st (plusp (sb-posix:stat-size st)))))
+                 ;; -a is an alias for -e in the unary position; it is only
+                 ;; the AND operator between two expressions.
+                 ((string= op "-a") (and (test-stat a :follow t) t))
+                 ((string= op "-b") (test-file-kind a #'sb-posix:s-isblk))
+                 ((string= op "-c") (test-file-kind a #'sb-posix:s-ischr))
+                 ((string= op "-p") (test-file-kind a #'sb-posix:s-isfifo))
+                 ((string= op "-S") (test-file-kind a #'sb-posix:s-issock))
+                 ((string= op "-k") (test-mode-bit a #o1000))   ; sticky
+                 ((string= op "-u") (test-mode-bit a #o4000))   ; setuid
+                 ((string= op "-g") (test-mode-bit a #o2000))   ; setgid
+                 ((string= op "-O") (let ((st (test-stat a :follow t)))
+                                      (and st (= (sb-posix:stat-uid st)
+                                                 (sb-posix:geteuid)))))
+                 ((string= op "-G") (let ((st (test-stat a :follow t)))
+                                      (and st (= (sb-posix:stat-gid st)
+                                                 (sb-posix:getegid)))))
+                 ;; -N: modified since it was last read.
+                 ((string= op "-N") (let ((st (test-stat a :follow t)))
+                                      (and st (> (sb-posix:stat-mtime st)
+                                                 (sb-posix:stat-atime st)))))
+                 ((string= op "-v")
+                  (and sh (nth-value 1 (get-var sh a))))
+                 ((string= op "-o")
+                  (and sh (let ((e (option-by-name a)))
+                            (and e (opt sh (third e))))))
+                 ((and (> (length op) 1) (char= (char op 0) #\-))
+                  (error 'test-usage-error
+                         :detail (format nil "~A: unary operator expected" op)))
                  (t (str-nonempty (second args))))))
       (3 (let ((a (first args)) (op (second args)) (b (third args)))
            (cond
@@ -2945,19 +3010,25 @@ Zero if EXPRESSION is true, 1 if false, 2 if it is malformed or the closing
              ((string= op "-le") (<= (num a) (num b)))
              ((string= op "-gt") (> (num a) (num b)))
              ((string= op "-ge") (>= (num a) (num b)))
-             ((string= a "!") (not (eval-test (rest args))))
+             ;; File comparisons.
+             ((string= op "-nt") (test-newer-p a b))
+             ((string= op "-ot") (test-newer-p b a))
+             ((string= op "-ef") (test-same-file-p a b))
+             ((string= a "!") (not (eval-test (rest args) sh)))
+             ;; `( expr )' -- a grouping of one expression.
+             ((and (string= a "(") (string= b ")")) (eval-test (list op) sh))
              (t nil))))
       (t (cond
-           ((string= (first args) "!") (not (eval-test (rest args))))
+           ((string= (first args) "!") (not (eval-test (rest args) sh)))
            ;; a -a b / a -o b (deprecated but common)
            ((member "-a" args :test #'string=)
             (let ((pos (position "-a" args :test #'string=)))
-              (and (eval-test (subseq args 0 pos))
-                   (eval-test (subseq args (1+ pos))))))
+              (and (eval-test (subseq args 0 pos) sh)
+                   (eval-test (subseq args (1+ pos)) sh))))
            ((member "-o" args :test #'string=)
             (let ((pos (position "-o" args :test #'string=)))
-              (or (eval-test (subseq args 0 pos))
-                  (eval-test (subseq args (1+ pos))))))
+              (or (eval-test (subseq args 0 pos) sh)
+                  (eval-test (subseq args (1+ pos)) sh))))
            (t nil))))))
 
 (defun directoryp (path)

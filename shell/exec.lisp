@@ -2108,7 +2108,7 @@ removal, but NO field splitting or globbing -- that is the whole point of the
     (t
      ;; Everything else is a file test; reuse the `test' evaluator so the
      ;; two can never drift apart.
-     (handler-case (eval-test (list op operand)) (error () nil)))))
+     (handler-case (eval-test (list op operand) sh) (error () nil)))))
 
 (defun option-keyword (name)
   (let ((entry (option-by-name name)))
