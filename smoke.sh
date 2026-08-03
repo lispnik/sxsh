@@ -1292,6 +1292,42 @@ check bx-printf-v       'hi'            0 'printf -v v %s hi; echo $v'
 check bx-printf-v-multi 'a-b'           0 'printf -v v "%s-%s" a b; echo $v'
 check bx-printf-v-joined 'hi'           0 'printf -vv %s hi; echo $v'
 check bx-printf-v-silent 'x'            0 'printf -v v %s noise; echo x'
+# -v takes an assignment target, not just a name
+check bx-printf-v-elem  'a foo c'        0 'a=(a b c); printf -v "a[1]" %s foo; echo "${a[@]}"'
+check bx-printf-v-assoc 'foo'            0 'declare -A m; printf -v "m[k]" %s foo; echo "${m[k]}"'
+check_err bx-printf-v-bad 'not a valid identifier' 2 'printf -v "a[" %s foo'
+check_err bx-printf-v-num 'not a valid identifier' 2 'printf -v 1x %s foo'
+# %(FORMAT)T -- strftime. TZ is exported in each case, since only an exported
+# TZ counts; expectations diffed against bash 5.3.
+check printf-T-date     '2019-05-16'     0 'export TZ=Asia/Tokyo; printf "%(%Y-%m-%d)T\n" 1557978599'
+check printf-T-tz       '2019-05-15'     0 'export TZ=US/Eastern; printf "%(%Y-%m-%d)T\n" 1557978599'
+check printf-T-width    '[     2019-]'   0 'export TZ=Asia/Tokyo; printf "[%10.5(%Y-%m-%d)T]\n" 1557978599'
+check printf-T-left     '[2019-05-15   ]' 0 'export TZ=US/Eastern; printf "[%-13(%Y-%m-%d)T]\n" 1557978599'
+check printf-T-recycle  '2019 05'        0 'export TZ=UTC; printf "%(%Y)T %(%m)T\n" 1557978599 1557978599'
+check printf-T-epoch    '1557978599'     0 'export TZ=UTC; printf "%(%s)T\n" 1557978599'
+check printf-T-percent  '%'              0 'printf "%(%%)T\n" 1'
+# an unexported TZ must not be consulted: it is what a child would NOT see
+check printf-T-unexported 'same'         0 'unset TZ; a=$(printf "%(%H)T" 1557978599); TZ=Asia/Tokyo; b=$(printf "%(%H)T" 1557978599); [ "$a" = "$b" ] && echo same'
+check printf-T-reexport 'differ'         0 'export TZ=UTC; a=$(printf "%(%H)T" 1557978599); export TZ=Asia/Tokyo; b=$(printf "%(%H)T" 1557978599); [ "$a" != "$b" ] && echo differ'
+# bash formats into a fixed 128-byte buffer and prints nothing when it overflows
+check printf-T-fits     '124'            0 'export TZ=UTC; printf "%(%Y%Y%Y%Y%Y%Y%Y%Y%Y%Y%Y%Y%Y%Y%Y%Y%Y%Y%Y%Y%Y%Y%Y%Y%Y%Y%Y%Y%Y%Y%Y)T" | wc -c | tr -d " "'
+check printf-T-overflow '0'              0 'export TZ=UTC; printf "%(%Y%Y%Y%Y%Y%Y%Y%Y%Y%Y%Y%Y%Y%Y%Y%Y%Y%Y%Y%Y%Y%Y%Y%Y%Y%Y%Y%Y%Y%Y%Y%Y)T" | wc -c | tr -d " "'
+check_err printf-T-noparen 'invalid format character' 1 'printf "%T\n" 1'
+
+# --- function names are words, not identifiers -----------------------------
+# POSIX reserves them to NAMEs; every shell in use accepts more, and scripts
+# rely on it. Requiring an identifier made `check-status() {...}' a syntax
+# error followed by command-not-found.
+check fn-hyphen         'hi'             0 'f-g() { echo hi; }; f-g'
+check fn-dot            'hi'             0 'f.g() { echo hi; }; f.g'
+check fn-colon          'hi'             0 'f:g() { echo hi; }; f:g'
+check fn-plus           'hi'             0 'f+g() { echo hi; }; f+g'
+check fn-slash          'hi'             0 'f/g() { echo hi; }; f/g'
+check fn-digit-first    'hi'             0 '1f() { echo hi; }; 1f'
+check fn-keyword-form   'hi'             0 'function f-g { echo hi; }; f-g'
+check fn-type           'f-g is a function' 0 'f-g() { echo hi; }; type f-g'
+check fn-unset          ''               127 'f-g() { echo hi; }; unset -f f-g; f-g 2>/dev/null'
+check fn-redefine       'two'            0 'f-g() { echo one; }; f-g() { echo two; }; f-g'
 # printf %q renders a value so it re-parses to itself. The escape set was
 # taken by probing bash, not guessed: it excludes # ~ = % and :.
 check bx-printf-q-space 'a\ b'          0 'printf "%q\n" "a b"'

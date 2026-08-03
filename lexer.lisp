@@ -447,6 +447,22 @@ Detects assignment-word shape as a side product via classify."
          (or (alpha-char-p c0) (char= c0 #\_)))
        (every (lambda (c) (or (alphanumericp c) (char= c #\_))) s)))
 
+(defun valid-function-name-p (s)
+  "POSIX reserves function names to NAMEs, but every shell in use accepts far
+more, and scripts rely on it: `check-status', `git.commit', `f/g' and `@f' are
+all definable in bash, ksh and zsh. Requiring VALID-NAME-P here made every
+hyphenated function -- a common convention -- parse as a syntax error and then
+fail as command-not-found, which is how spec/builtin-printf.test.sh's
+`strftime-format' was failing.
+
+What bash actually requires is a LITERAL word. The name is taken from the
+source text rather than from the expanded word, so anything quoted or
+expandable is rejected: `\"f-g\"()' and `f$x()' are errors while `f-g()' is
+not. `=' is excluded too -- bash reads `a=b() {...}' as an assignment followed
+by a stray `(', not as a definition."
+  (and (plusp (length s))
+       (notany (lambda (c) (find c "'\"$`\\=")) s)))
+
 (defun array-literal-assignment-p (text)
   "True if TEXT is `NAME=' or `NAME+=' or `NAME[sub]=', i.e. the head of an
 array literal assignment."

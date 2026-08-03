@@ -305,7 +305,7 @@ A name is not substituted again while its own replacement is being scanned, so
 lookahead plus a lexer probe). We only need to see WORD then '(' ; the grammar
 requires ')' next, which parse-function-def enforces."
   (and (eq (cur-type p) :word)
-       (valid-name-p (cur-text p))
+       (valid-function-name-p (cur-text p))
        (not (any-reserved-p p))
        ;; probe: is the very next token an lparen?
        (probe-lparen-p p)))
@@ -756,7 +756,7 @@ program called function. It is the keyword only when a NAME follows."
             (lexer-column lx) saved-col
             (lexer-pending-heredocs lx) saved-hd)
       (and (eq (token-type tok) :word)
-           (valid-name-p (token-text tok))))))
+           (valid-function-name-p (token-text tok))))))
 
 (defun parse-function-keyword-def (p)
   "bash: `function NAME { ... }' or `function NAME () { ... }'.

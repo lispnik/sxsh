@@ -173,8 +173,16 @@ treated as empty or zero. In addition to the C conversions (%d %i %o %u %x %X
 %c %s %f %e %g %%) with the usual flags, width and precision:
   %b  the argument with backslash escapes interpreted, as `echo -e' does
   %q  the argument quoted so it can be reused as shell input
+  %(FORMAT)T  the argument, seconds since the epoch, formatted by strftime
+              under FORMAT. -1 means now and -2 the time the shell started; a
+              missing argument means now, and an empty FORMAT means %X. The
+              result is produced in a 128-byte buffer and is empty if it does
+              not fit, as in bash. Only an EXPORTED $TZ selects the timezone.
 
 A `*' width or precision takes its value from the next argument.
+
+-v accepts an assignment target, not only a name: `printf -v a[1] %s x' sets
+the element.
 
 Exit Status:
 Zero unless an invalid format or number is given, or a write fails."
@@ -191,14 +199,105 @@ Zero unless an invalid format or number is given, or a write fails."
     (when (null args)
       (format *error-output* "printf: usage: printf [-v var] format [arguments]~%")
       (return-from builtin 2))
+    ;; -v takes an assignment target, not just a name: `printf -v a[1]' has to
+    ;; reach the element the way `a[1]=' does, so it goes through ASSIGN-ONE
+    ;; rather than SET-VAR, which would have made a variable literally called
+    ;; "a[1]". Checked before anything is formatted, as bash checks it.
+    (when target
+      (unless (printf-target-valid-p target)
+        (format *error-output* "printf: `~A': not a valid identifier~%" target)
+        (return-from builtin 2)))
     (when args
       (let ((fmt (first args)) (rest (rest args)))
-        (multiple-value-bind (text status) (posix-printf fmt rest)
+        (multiple-value-bind (text status) (posix-printf fmt rest sh)
           (if target
-              (set-var sh target text)
+              (assign-one sh target text nil)
               (write-string text out))
           (return-from builtin status)))))
   0)
+
+(defun printf-target-valid-p (target)
+  "Whether TARGET names something `printf -v' can assign to: a name, or a
+subscripted element of one."
+  (multiple-value-bind (base sub) (split-subscript target)
+    (and (sxsh::valid-name-p base)
+         (or (null sub) (plusp (length sub))))))
+
+;;; %(FORMAT)T --- strftime -------------------------------------------------
+;;;
+;;; The conversion has to go through libc: strftime's directives are many and
+;;; locale-dependent, and the seconds-to-broken-down-time step is where the
+;;; timezone is applied. Reimplementing either in Lisp would be reimplementing
+;;; the zoneinfo database.
+
+(sb-alien:define-alien-routine ("tzset" %tzset) sb-alien:void)
+(sb-alien:define-alien-routine ("localtime" %localtime)
+    sb-alien:system-area-pointer
+  (clock (* sb-alien:long)))
+(sb-alien:define-alien-routine ("strftime" %strftime) sb-alien:size-t
+  (buf (* sb-alien:char))
+  (maxsize sb-alien:size-t)
+  (format sb-alien:c-string)
+  (timeptr sb-alien:system-area-pointer))
+
+(defconstant +strftime-buffer+ 128
+  "bash formats into a fixed 128-byte buffer and prints nothing when the result
+does not fit. Matching the size matters: spec/builtin-printf.test.sh checks
+that 31 repetitions of %Y produce 124 bytes and 32 produce none.")
+
+(defun sync-timezone (sh)
+  "Point libc's timezone at the shell's TZ, then re-read it.
+
+Only an EXPORTED TZ counts, because that is what a child process would see and
+bash gives the same answer here as it would there. Our own environment does
+not track shell variables -- the child environment is built at spawn time --
+so the variable has to be pushed into it explicitly before every conversion."
+  (multiple-value-bind (value found exported) (get-var sh "TZ")
+    (if (and found exported value)
+        (sb-posix:setenv "TZ" value 1)
+        (ignore-errors (sb-posix:unsetenv "TZ"))))
+  (%tzset))
+
+(defun printf-strftime (format seconds)
+  "SECONDS formatted by strftime under FORMAT, or NIL if it does not fit.
+
+An empty FORMAT means %X, the locale's time representation, as in bash."
+  (sb-alien:with-alien ((clock sb-alien:long)
+                        (buf (array sb-alien:char #.(1+ +strftime-buffer+))))
+    (setf clock seconds)
+    (let* ((tm (%localtime (sb-alien:addr clock)))
+           (n (%strftime (sb-alien:cast buf (* sb-alien:char))
+                         +strftime-buffer+
+                         (if (string= format "") "%X" format)
+                         tm)))
+      ;; strftime returns 0 both for "did not fit" and for a format whose
+      ;; result really is empty. bash prints nothing either way.
+      (when (plusp n)
+        (let ((s (make-string n)))
+          (dotimes (k n s)
+            (setf (char s k) (code-char (ldb (byte 8 0) (sb-alien:deref buf k))))))))))
+
+(defun printf-strftime-arg (format arg sh fail)
+  "Render %(FORMAT)T for the argument ARG.
+
+ARG is seconds since the epoch. bash reads -1 as `now' and -2 as `when the
+shell started'; a missing argument is `now' too. A non-numeric argument is a
+diagnosed error that still formats, as every other numeric conversion does."
+  (let* ((seconds
+           (cond ((or (null arg) (string= arg ""))
+                  (- (get-universal-time) (encode-universal-time 0 0 0 1 1 1970 0)))
+                 (t (multiple-value-bind (v ok) (printf-integer arg)
+                      (unless ok (funcall fail))
+                      (case v
+                        (-1 (- (get-universal-time)
+                               (encode-universal-time 0 0 0 1 1 1970 0)))
+                        (-2 (if sh
+                                (- (shell-start-time sh)
+                                   (encode-universal-time 0 0 0 1 1 1970 0))
+                                0))
+                        (t v)))))))
+    (when sh (sync-timezone sh))
+    (or (printf-strftime format seconds) "")))
 
 (defparameter +printf-q-escape+ " !\"$&'()*,;<>?[\\]^`{|}"
   "Characters bash's %q escapes with a backslash. Determined by probing bash
@@ -453,10 +552,12 @@ Distinct from the `0' flag, which fills to the field WIDTH: `%6.4d' of 42 is
                  (cond ((minusp v) "-") (plus "+") (space " ") (t ""))
                  digits)))
 
-(defun posix-printf (fmt args)
-  "A printf supporting %s %b %c %d %i %o %u %x %X %% with flags, field width
-and precision (including the `*' forms), recycling the format over remaining
-arguments. Returns (values text status).
+(defun posix-printf (fmt args &optional sh)
+  "A printf supporting %s %b %c %d %i %o %u %x %X %(FMT)T %% with flags, field
+width and precision (including the `*' forms), recycling the format over
+remaining arguments. Returns (values text status).
+
+SH is needed only by %(FMT)T, which reads $TZ.
 
 Two conversions end the run early rather than returning normally: a `\c' in a
 %b argument stops the OUTPUT (everything already written is kept), and an
@@ -533,6 +634,35 @@ unrecognised conversion character discards the output entirely and fails."
                                                  (parse-integer fmt :start start
                                                                     :end i)
                                                  0))))))
+                              ;; %(FORMAT)T -- the conversion character is T
+                              ;; and the strftime format sits in parentheses
+                              ;; between the precision and it. Handled here
+                              ;; because everything below expects the
+                              ;; conversion to be a single character.
+                              (if (and (< i n) (char= (char fmt i) #\())
+                                  (let ((close (position #\) fmt :start i)))
+                                    (unless (and close
+                                                 (< (1+ close) n)
+                                                 (char= (char fmt (1+ close)) #\T))
+                                      (format *error-output*
+                                              "printf: `(': invalid format character~%")
+                                      (setf status 1)
+                                      (throw 'printf-invalid ""))
+                                    (let* ((tfmt (subseq fmt (1+ i) close))
+                                           (body (printf-strftime-arg
+                                                  tfmt (next-arg) sh
+                                                  (lambda () (setf status 1)))))
+                                      (setf i (+ close 2))
+                                      ;; A precision truncates the formatted
+                                      ;; time; it is not a digit count, so the
+                                      ;; `0' flag stays suppressed either way.
+                                      (write-string
+                                       (printf-pad (if precision
+                                                       (subseq body 0 (min precision
+                                                                           (length body)))
+                                                       body)
+                                                   width left nil nil)
+                                       o)))
                               (when (< i n)
                                 (let* ((conv (char fmt i))
                                        (arg (if (char= conv #\%) "" (next-arg))))
@@ -553,7 +683,7 @@ unrecognised conversion character discards the output entirely and fails."
                                                       (not (and precision
                                                                 (find conv "diouxX"))))
                                                  numericp)
-                                     o))))))))
+                                     o)))))))))
                         (t (write-char c o) (incf i)))))
                   (values args used)))))
          (multiple-value-bind (remaining used) (one-pass args)
@@ -654,7 +784,7 @@ ALT is the `#' flag: an alternate form -- a leading 0 on %o, a 0x/0X prefix on
       (t
        ;; An unrecognised conversion is a usage error: bash emits nothing at
        ;; all and exits 1, rather than printing the argument raw.
-       (format *error-output* "printf: `%~C': invalid format character~%" conv)
+       (format *error-output* "printf: `~C': invalid format character~%" conv)
        (funcall fail)
        (throw 'printf-invalid "")))))
 
