@@ -1347,6 +1347,35 @@ check ps-order          "$(id -un)-hi" 0 'X=hi; PS1="\u-\$X"; echo "${PS1@P}"'
 # a prompt is not a word: quotes stay literal and globs are not expanded
 check ps-not-a-word     "a'b"          0 "PS1=\"a'b\"; echo \"\${PS1@P}\""
 check ps-no-glob        'a*b'          0 'PS1="a*b"; echo "${PS1@P}"'
+# The backslash ladder. An escape's OUTPUT is data, not a prompt to be
+# expanded again, so \$ emits an ESCAPED dollar. That single detail makes the
+# whole ladder come out right: `\$X' is the two characters $X, while `\\\$X'
+# is a real backslash followed by the VALUE of X -- the backslash pair leaves a
+# live backslash, which consumes the escape and frees the dollar to expand.
+# PS1 is single-quoted in each case so the shell stores it verbatim; every
+# expectation below was read off bash 5.3 running the identical source.
+check ps-bs-1              '$' 0 'X=VAL; PS1='"'"'\$'"'"'; echo "${PS1@P}"'
+check ps-bs-2              '$' 0 'X=VAL; PS1='"'"'\\$'"'"'; echo "${PS1@P}"'
+check ps-bs-3              '\$' 0 'X=VAL; PS1='"'"'\\\$'"'"'; echo "${PS1@P}"'
+check ps-bs-4              '\$' 0 'X=VAL; PS1='"'"'\\\\$'"'"'; echo "${PS1@P}"'
+check ps-bs-var-1          '$X' 0 'X=VAL; PS1='"'"'\$X'"'"'; echo "${PS1@P}"'
+check ps-bs-var-2          '$X' 0 'X=VAL; PS1='"'"'\\$X'"'"'; echo "${PS1@P}"'
+check ps-bs-var-3          '\VAL' 0 'X=VAL; PS1='"'"'\\\$X'"'"'; echo "${PS1@P}"'
+check ps-bs-dquote         '"' 0 'X=VAL; PS1='"'"'\\"'"'"'; echo "${PS1@P}"'
+check ps-bs-pair           '\' 0 'X=VAL; PS1='"'"'\\\\'"'"'; echo "${PS1@P}"'
+check ps-stray-tick        '`' 0 'X=VAL; PS1='"'"'\`'"'"'; echo "${PS1@P}"'
+check ps-stray-tick2       '`x`' 0 'X=VAL; PS1='"'"'\`x`'"'"'; echo "${PS1@P}"'
+# An escape's output is protected from the second pass: a directory literally
+# named $foo survives \w as those five characters.
+check ps-w-literal-dollar '/tmp/sxq/$foo foo_value' 0 'foo=foo_value; mkdir -p /tmp/sxq/'"'"'$foo'"'"'; cd /tmp/sxq/'"'"'$foo'"'"'; PS1='"'"'\w $foo'"'"'; echo "${PS1@P}"'
+# \# counts commands and \! reports the history number: different counters.
+# The counter advances per COMMAND, so the two readings need separate lines --
+# on one line joined by `;' bash does not advance it either.
+check ps-cmd-number     'up-by-1'      0 'PS1='"'"'\#'"'"'
+a="${PS1@P}"
+b="${PS1@P}"
+[ "$b" -eq "$((a+1))" ] && echo up-by-1'
+
 # PS4 gets the same treatment: this used to trace as the literal [$LINENO]
 check_err ps4-expands   'x= true'      0 'X=x; PS4="\$X= "; set -x; true'
 # PS1 and PS2 are unset in a non-interactive shell, as in bash

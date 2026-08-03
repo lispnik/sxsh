@@ -92,7 +92,9 @@ commands before it, and an EXIT trap set earlier has to be in place when the
 error terminates the shell."
   (handler-case
       (handler-case
-          (progn (map-complete-commands src (lambda (node) (exec-node sh node)))
+          (progn (map-complete-commands src (lambda (node)
+                                              (incf (shell-command-number sh))
+                                              (exec-node sh node)))
                  (shell-last-status sh))
         (shell-exit (e)
           (setf (shell-last-status sh) (or (shell-exit-code e) 0))
@@ -2048,6 +2050,22 @@ DISPLAY-WIDTH can skip the run, and stripped at output.")
 (defun prompt-time (sh format)
   (or (printf-strftime-arg format nil sh (lambda ())) ""))
 
+(defun write-prompt-literal (text stream)
+  "Write TEXT so the expansion pass treats it as data.
+
+An escape's OUTPUT is not a prompt to be expanded again: a directory literally
+named `$foo' must survive `\\w' as those five characters, not become the value
+of foo. Escaping it for the second pass -- which follows double-quote rules --
+is how bash protects it, and it is what makes the backslash ladder work: `\\$'
+emits an escaped dollar, so `\\$X' is the two characters $X while `\\\\\\$X'
+is a real backslash followed by the VALUE of X.
+
+`\\\\' is deliberately NOT written through here. It produces a live backslash
+that the second pass must still see as one."
+  (loop for c across text
+        do (when (find c "$`\"\\") (write-char #\\ stream))
+           (write-char c stream)))
+
 (defun prompt-escapes (sh s)
   "Decode the backslash escapes of a prompt string.
 
@@ -2071,34 +2089,47 @@ user name first and the variable second."
                  (#\\ (write-char #\\ o))
                  (#\[ (write-char +prompt-hide-start+ o))
                  (#\] (write-char +prompt-hide-end+ o))
-                 (#\d (write-string (prompt-time sh "%a %b %d") o))
-                 (#\t (write-string (prompt-time sh "%H:%M:%S") o))
-                 (#\T (write-string (prompt-time sh "%I:%M:%S") o))
-                 (#\@ (write-string (prompt-time sh "%I:%M %p") o))
-                 (#\A (write-string (prompt-time sh "%H:%M") o))
+                 (#\d (write-prompt-literal (prompt-time sh "%a %b %d") o))
+                 (#\t (write-prompt-literal (prompt-time sh "%H:%M:%S") o))
+                 (#\T (write-prompt-literal (prompt-time sh "%I:%M:%S") o))
+                 (#\@ (write-prompt-literal (prompt-time sh "%I:%M %p") o))
+                 (#\A (write-prompt-literal (prompt-time sh "%H:%M") o))
                  ;; \D{FORMAT}: an strftime format in braces. An unterminated
                  ;; brace is not an escape at all.
                  (#\D (let ((close (and (< i n) (char= (char s i) #\{)
                                         (position #\} s :start i))))
                         (cond (close
-                               (write-string
+                               (write-prompt-literal
                                 (prompt-time sh (subseq s (1+ i) close)) o)
                                (setf i (1+ close)))
                               (t (write-string "\\D" o)))))
-                 (#\h (write-string (prompt-hostname nil) o))
-                 (#\H (write-string (prompt-hostname t) o))
-                 (#\u (write-string (prompt-username) o))
-                 (#\s (write-string (prompt-basename (shell-name sh)) o))
-                 (#\v (write-string +sxsh-version+ o))
-                 (#\V (write-string +sxsh-version+ o))
-                 (#\l (write-string (prompt-basename (prompt-tty-name)) o))
+                 (#\h (write-prompt-literal (prompt-hostname nil) o))
+                 (#\H (write-prompt-literal (prompt-hostname t) o))
+                 (#\u (write-prompt-literal (prompt-username) o))
+                 (#\s (write-prompt-literal (prompt-basename (shell-name sh)) o))
+                 (#\v (write-prompt-literal +sxsh-version+ o))
+                 (#\V (write-prompt-literal +sxsh-version+ o))
+                 (#\l (write-prompt-literal (prompt-basename (prompt-tty-name)) o))
                  (#\j (princ (length (shell-jobs sh)) o))
-                 (#\w (write-string (prompt-cwd sh nil) o))
-                 (#\W (write-string (prompt-cwd sh t) o))
-                 ((#\! #\#) (princ (+ (shell-history-base sh)
-                                      (length (shell-history sh)))
-                                   o))
-                 (#\$ (write-char (if (zerop (sb-posix:geteuid)) #\# #\$) o))
+                 (#\w (write-prompt-literal (prompt-cwd sh nil) o))
+                 (#\W (write-prompt-literal (prompt-cwd sh t) o))
+                 ;; \! is the history number and \# the command number:
+                 ;; different counters, and a script with no history still
+                 ;; counts commands.
+                 (#\! (princ (+ (shell-history-base sh)
+                                (length (shell-history sh)))
+                              o))
+                 (#\# (princ (shell-command-number sh) o))
+                 ;; `\$' emits an ESCAPED dollar, not a bare one, so the
+                 ;; expansion pass below reduces it to a literal `$' rather
+                 ;; than starting a parameter expansion there. That one
+                 ;; detail is what makes bash's whole backslash ladder come
+                 ;; out right: `\$X' is the two characters $X, while
+                 ;; `\\\$X' is a backslash followed by the VALUE of X --
+                 ;; the second backslash pair leaves a real backslash, which
+                 ;; consumes the escape and frees the dollar to expand.
+                 (#\$ (write-prompt-literal
+                       (string (if (zerop (sb-posix:geteuid)) #\# #\$)) o))
                  (t
                   (cond
                     ;; \nnn -- up to three octal digits
@@ -2107,9 +2138,10 @@ user name first and the variable second."
                        (loop while (and (< j n) (< (- j (- i 1)) 3)
                                         (digit-char-p (char s j) 8))
                              do (incf j))
-                       (write-char (code-char (parse-integer s :start (1- i)
-                                                               :end j :radix 8))
-                                   o)
+                       (write-prompt-literal
+                        (string (code-char (parse-integer s :start (1- i)
+                                                            :end j :radix 8)))
+                        o)
                        (setf i j)))
                     (t (write-char #\\ o) (write-char e o)))))))))))))
 
@@ -2153,22 +2185,31 @@ ttyname, so it comes from libc."
           (t (prompt-basename pwd)))))
 
 (defun prompt-expansions (sh s)
-  "The second pass: $ and ` constructs, everything else literal.
+  "The second pass: $ and ` constructs, with double-quoted backslash rules.
 
 Deliberately NOT EXPAND-PASS, which would also do quote removal. A prompt is
 not a word: bash leaves `a'b' alone rather than treating the quote as an
 opening one, and a prompt full of unbalanced quotes must not become a parse
-error at every keystroke."
+error at every keystroke. Backslash, though, behaves as it does inside double
+quotes -- it escapes $, `, \" and itself and is literal before anything else."
   (with-output-to-string (o)
     (let ((i 0) (n (length s)))
       (loop while (< i n) do
         (let ((c (char s i)))
           (cond
+            ((and (char= c #\\) (< (1+ i) n))
+             (let ((e (char s (1+ i))))
+               (cond ((find e "$`\"\\") (write-char e o) (incf i 2))
+                     (t (write-char c o) (incf i)))))
             ((char= c #\$)
              (multiple-value-bind (str next) (expand-dollar sh s i n)
                (write-string (expansion-value->string str) o)
                (setf i (if (> next i) next (1+ i)))))
-            ((char= c #\`)
+            ;; An UNMATCHED backquote is literal, not an error. Handing it to
+            ;; EXPAND-BACKQUOTE signalled, and the guard in EXPAND-PROMPT then
+            ;; fell back to the unexpanded prompt -- so one stray backtick
+            ;; anywhere silently disabled every other escape in the prompt.
+            ((and (char= c #\`) (position #\` s :start (1+ i)))
              (multiple-value-bind (str next) (expand-backquote sh s i n)
                (write-string str o)
                (setf i (if (> next i) next (1+ i)))))

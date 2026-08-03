@@ -105,6 +105,9 @@ so a default-on option has to be seeded there rather than inferred.")
   ;; bash namerefs (`declare -n r=v'): NAME -> the name it stands for. Reads
   ;; and writes through the alias reach the target variable.
   (namerefs (make-hash-table :test 'equal))
+  ;; bash's `\#' -- how many commands the shell has begun, counted at the top
+  ;; level only, so a command substitution's contents do not inflate it.
+  (command-number 0)
   ;; The directory stack, holding only the entries BELOW the current directory,
   ;; nearest first. `dirs' splices the current directory on at the front, so
   ;; the top of the stack is $PWD by construction and `cd' replaces it without

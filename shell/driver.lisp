@@ -162,16 +162,28 @@ Linux and macOS; anything else (notably Windows) is unsupported."
 POSIX: sh [-abCefhimnuvx] [-o option] [+abCefhimnuvx] [+o option]
        [command_file [argument...]] | -c command_string [command_name ...]
 
-Returns (values mode operand rest), where MODE is :command, :stdin or :file.
+Returns (values mode operand rest rcfile), where MODE is :command, :stdin or
+:file and RCFILE is a startup file to source, :NONE, or NIL.
 Without this, `sxsh -x script' took -x for the script's name -- the shell
 accepted none of the set options on its command line."
-  (let ((mode nil) (operand nil))
+  (let ((mode nil) (operand nil) (rcfile nil))
     (loop
       (let ((a (first argv)))
         (cond
           ((null a) (return))
           ((string= a "--") (pop argv) (return))
           ((string= a "-") (pop argv) (return))
+          ;; Long options. bash has many; these are the two that decide
+          ;; whether a startup file is read, which is the only startup-file
+          ;; behaviour we have.
+          ((string= a "--rcfile")
+           (pop argv)
+           (let ((file (pop argv)))
+             (unless file
+               (format *error-output* "sxsh: --rcfile: option requires an argument~%")
+               (return-from parse-shell-options (values :error nil nil)))
+             (setf rcfile file)))
+          ((string= a "--norc") (pop argv) (setf rcfile :none))
           ((and (> (length a) 1) (member (char a 0) '(#\- #\+)))
            (let ((enable (char= (char a 0) #\-))
                  (letters (subseq a 1)))
@@ -206,7 +218,7 @@ accepted none of the set options on its command line."
       (:command (setf operand (pop argv)))
       (:stdin)
       (t (when argv (setf mode :file operand (pop argv)))))
-    (values (or mode :stdin) operand argv)))
+    (values (or mode :stdin) operand argv rcfile)))
 
 (defun main (&optional (argv (rest sb-ext:*posix-argv*)))
   "Entry point. Supports the POSIX sh synopsis: options, -c, a script, or an
@@ -217,11 +229,18 @@ interactive/stdin session."
     (return-from main 1))
   (let ((sh (make-shell :interactive (and (null argv)
                                           (stdin-is-interactive-p)))))
-    (multiple-value-bind (mode operand rest) (parse-shell-options sh argv)
+    (multiple-value-bind (mode operand rest rcfile) (parse-shell-options sh argv)
       (when (eq mode :error) (return-from main 2))
       ;; After option parsing, because `-i' can turn interactivity on. A
       ;; missing or unreadable $HISTFILE is not an error.
       (when (shell-interactive sh) (ignore-errors (history-load sh)))
+      ;; --rcfile FILE is sourced before the session starts, as bash sources
+      ;; it. It is the only startup file we read: there is no implicit
+      ;; ~/.sxshrc, so --norc is already the default and only says so.
+      (when (and (stringp rcfile) (shell-interactive sh))
+        (let ((path (probe-file rcfile)))
+          (when path
+            (ignore-errors (run-string sh (slurp-file (namestring path)))))))
       (unwind-protect
            (handler-case
                (ecase mode
