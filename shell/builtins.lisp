@@ -1650,6 +1650,8 @@ the word after it is checked for an alias too, which is what makes
 
 Exit Status:
 Zero unless a NAME has no alias defined."
+  ;; `--' ends the options, as for any POSIX utility.
+  (when (and args (string= (first args) "--")) (pop args))
   (if (null args)
       (progn (maphash (lambda (k v) (format out "alias ~A='~A'~%" k v))
                       (shell-aliases sh))
@@ -1675,13 +1677,20 @@ Options:
 
 Exit Status:
 Zero unless a NAME is not a defined alias."
-  (let ((status 0))
-    (if (and args (string= (first args) "-a"))
-        (clrhash (shell-aliases sh))
-        (dolist (a args)
-          (unless (remhash a (shell-aliases sh))
-            (format *error-output* "unalias: ~A: not found~%" a)
-            (setf status 1))))
+  (let ((status 0) (all (and args (string= (first args) "-a"))))
+    (when all (pop args))
+    (when (and args (string= (first args) "--")) (pop args))
+    (cond
+      (all (clrhash (shell-aliases sh)))
+      ;; With neither -a nor a name there is nothing to remove: a usage error,
+      ;; not a silent success.
+      ((null args)
+       (format *error-output* "unalias: usage: unalias [-a] name [name ...]~%")
+       (setf status 2))
+      (t (dolist (a args)
+           (unless (remhash a (shell-aliases sh))
+             (format *error-output* "unalias: ~A: not found~%" a)
+             (setf status 1)))))
     status))
 
 ;;; readonly --------------------------------------------------------------

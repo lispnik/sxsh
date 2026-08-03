@@ -4,7 +4,7 @@
   (:use #:cl)
   (:export
    ;; entry points
-   #:parse-string #:map-complete-commands
+   #:parse-string #:*alias-lookup* #:map-complete-commands
    #:parse-stream
    ;; conditions
    #:shell-parse-error

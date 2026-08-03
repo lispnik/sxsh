@@ -245,6 +245,43 @@ check set-allexport     '1'          0 'set -a; V=x; env | grep -c "^V=x"'
 check set-noexec        ''           0 'set -n; echo NOTRUN'
 check set-invalid-opt   ''           2 'set -Z 2>/dev/null'
 
+# --- alias substitution happens in the PARSER (POSIX 2.3.1) ----------------
+# bash cannot be the reference for WHETHER aliases expand -- it disables them
+# in non-interactive shells and sxsh deliberately does not -- but it is the
+# reference for HOW they expand, and these were diffed against it with
+# `shopt -s expand_aliases' on the bash side.
+# The replacement is re-scanned, so it may contain operators. Substituting
+# into the finished argv could only ever handle a plain word list.
+check alias-pipeline    '3'    0 'alias e="echo hi | wc -c"
+e | tr -d " "'
+check alias-andand      'one
+two'                           0 'alias g="echo one && echo two"
+g'
+check alias-semicolon   'A
+B'                             0 'alias ll="echo A;"
+ll echo B'
+# An alias applies to commands parsed AFTER it is defined, so on one line the
+# whole list is already parsed and the name is an ordinary word.
+check alias-same-line   'st=127' 0 'alias g="echo x"; g 2>/dev/null; echo st=$?'
+# It is still found behind an assignment or redirection prefix.
+check alias-after-assign 'ok'  0 'alias e_=echo
+FOO=1 e_ ok'
+check alias-after-redir  'ok'  0 'alias e_=echo
+>/tmp/sxsh-alias-redir.txt e_ ok; cat /tmp/sxsh-alias-redir.txt'
+# `--' ends the options for both builtins; `unalias' with neither -a nor a
+# name is a usage error.
+check alias-dashdash    'st=0' 0 'alias -- foo=echo; echo st=$?'
+check unalias-dashdash  'st=0' 0 'alias a=echo; unalias -- a; echo st=$?'
+check_err unalias-usage 'usage' 2 'unalias'
+
+# --- $( ) is a subshell ENVIRONMENT, not just a control-flow scope ----------
+# It ran in-process sharing all state, so everything it touched escaped.
+check cmdsub-var-isolated  'x=1' 0 'x=1; echo $(x=2) >/dev/null; echo "x=$x"'
+check cmdsub-func-isolated 'o'   0 'f(){ echo o; }; echo $(f(){ echo n; }) >/dev/null; f'
+check cmdsub-alias-isolated 'st=1' 0 'echo $(alias s=echo) >/dev/null; alias s >/dev/null 2>&1; echo st=$?'
+check cmdsub-cd-isolated   'same' 0 'a=$PWD; echo $(cd /) >/dev/null; [ "$PWD" = "$a" ] && echo same'
+check cmdsub-still-captures 'hi' 0 'x=$(echo hi); echo "$x"'
+
 # --- printf: numeric conversions, flags, escape dialects -------------------
 # Expectations diffed against bash before being written down.
 # Precision on an integer is a MINIMUM DIGIT COUNT, zero-filled -- distinct

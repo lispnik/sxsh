@@ -4,7 +4,7 @@
   (:use #:cl)
   (:nicknames #:sxs)
   (:import-from #:sxsh
-                #:parse-string #:map-complete-commands
+                #:parse-string #:*alias-lookup* #:map-complete-commands
                 ;; ast accessors
                 #:complete-command #:complete-command-entries
                 #:and-or #:and-or-op #:and-or-left #:and-or-right

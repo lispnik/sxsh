@@ -225,7 +225,48 @@ It is NOT the keyword when followed by a pipe/operator/terminator (e.g.
 ;;; command dispatch
 ;;; ---------------------------------------------------------------------------
 
+(defun expand-aliases-at-point (p)
+  "Substitute an alias when its name is the next COMMAND word (POSIX 2.3.1).
+
+The replacement is spliced into the input and re-scanned, so it may contain
+operators, reserved words or whole commands. Substituting into the finished
+argv instead -- as the executor used to -- could only work for aliases whose
+value was a plain word list: `alias ll=\"ls -l | less\"' handed `-l | less' to
+ls as ordinary arguments.
+
+Two rules from the standard:
+
+  * A name is not substituted while its own replacement is being scanned, so
+    `alias ls=\"ls -x\"' terminates instead of recurring.
+  * If a value ends in a blank, the NEXT word is a candidate too -- the rule
+    that makes `alias sudo=\"sudo \"' expand an aliased command after sudo.
+    That word has to be recognised textually, before the tokens after it are
+    scanned, which is what LX-NEXT-PLAIN-WORD is for."
+  (let ((seen '()))
+    (loop
+      (unless (and *alias-lookup* (eq (cur-type p) :word)) (return))
+      (let ((name (cur-text p)))
+        (when (member name seen :test #'string=) (return))
+        (let ((body (funcall *alias-lookup* name)))
+          (unless body (return))
+          (push name seen)
+          (let ((text body))
+            ;; Trailing blank: pull the following word in and expand it too.
+            (when (and (plusp (length body))
+                       (member (char body (1- (length body))) '(#\Space #\Tab)))
+              (multiple-value-bind (next end) (lx-next-plain-word (parser-lexer p))
+                (when next
+                  (let ((nbody (and (not (member next seen :test #'string=))
+                                    (funcall *alias-lookup* next))))
+                    (when nbody
+                      (push next seen)
+                      (setf (lexer-pos (parser-lexer p)) end)
+                      (setf text (concatenate 'string body nbody)))))))
+            (lx-splice (parser-lexer p) text)
+            (setf (parser-cur p) (next-token (parser-lexer p)))))))))
+
 (defun parse-command (p)
+  (expand-aliases-at-point p)
   (cond
     ;; compound commands by leading reserved word / paren / brace
     ((reservedp p "{")     (parse-brace-group p))
@@ -290,12 +331,13 @@ We snapshot the lexer, read a token, then restore."
 
 (defun parse-simple-command (p)
   "cmd_prefix (assignments/redirs) then words and more redirs."
-  (let ((assignments '()) (words '()) (redirects '())
+  (let ((assignments '()) (words '()) (redirects '()) (prefixed nil)
         (start-line (let ((tk (parser-cur p))) (if tk (token-line tk) 0))))
     ;; prefix: assignment_words and redirects, in any order, before first word
     (loop
       (cond
         ((eq (cur-type p) :assignment-word)
+         (setf prefixed t)
          (multiple-value-bind (name value appendp)
              (assignment-word-split (cur-text p))
            (push (make-assignment name
@@ -305,8 +347,14 @@ We snapshot the lexer, read a token, then restore."
          (advance p))
         ((or (redirect-op-token-p (cur-type p))
              (member (cur-type p) '(:io-number :io-varname)))
+         (setf prefixed t)
          (push (parse-redirect p) redirects))
         (t (return))))
+    ;; The command NAME may sit behind a prefix -- `FOO=1 e' and `>f e' are
+    ;; both alias candidates -- and PARSE-COMMAND's lookahead was the prefix,
+    ;; not the name. Only when a prefix was actually consumed, or an alias
+    ;; whose value begins with its own name would expand a second time here.
+    (when prefixed (expand-aliases-at-point p))
     ;; command word + suffix (words and redirects)
     (loop
       (cond

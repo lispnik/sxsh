@@ -18,12 +18,15 @@ ran on past their `exit' into a usage error. The `.' builtin adds back a
 FUNC-RETURN handler of its own, since `return' ends the sourced script rather
 than the caller."
   (declare (ignore out))
-  (let ((nodes (handler-case (parse-string src)
-                 (sxsh:shell-parse-error (e)
-                   (format *error-output* "sxsh: ~A~%" e)
-                   (return-from run-string-capturing 2)))))
-    (dolist (node nodes (shell-last-status sh))
-      (exec-node sh node))))
+  ;; One complete command at a time, as RUN-STRING does: a syntax error late in
+  ;; the text must not undo what came before it, and an alias defined on the
+  ;; first line of an `eval' has to be in force for the second.
+  (handler-case
+      (progn (map-complete-commands src (lambda (node) (exec-node sh node)))
+             (shell-last-status sh))
+    (sxsh:shell-parse-error (e)
+      (format *error-output* "sxsh: ~A~%" e)
+      2)))
 
 (defun slurp-file (path)
   "Read an entire file into a string. Works for non-seekable files such as

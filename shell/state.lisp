@@ -130,6 +130,11 @@ configure run reported success.")
 (defun make-shell (&key (interactive nil))
   (let ((sh (%make-shell :interactive interactive
                          :pid (sb-posix:getpid))))
+    ;; Alias substitution happens in the PARSER (POSIX 2.3.1), which must not
+    ;; depend on the shell, so the table is reached through a closure. One
+    ;; shell per process, so a global is the right scope.
+    (setf sxsh:*alias-lookup*
+          (lambda (name) (gethash name (shell-aliases sh))))
     ;; Without this the saved image starts from the same random state every
     ;; run, so $RANDOM would produce an identical sequence in every shell.
     (setf *random-state* (make-random-state t))

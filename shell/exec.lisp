@@ -733,8 +733,7 @@ Applies alias substitution to the command name (first word)."
                                  t)
                 first nil))
         (dolist (f fields) (push f argv))))))
-    (setf argv (nreverse argv))
-    (apply-alias sh argv)))
+    (nreverse argv)))
 
 (defun apply-alias (sh argv)
   "Substitute aliases at the front of ARGV.
@@ -1495,14 +1494,17 @@ and run it in-process. State changes (cd, var sets) are rolled back."
         (ignore-errors (current-directory))
         ;; traps are shell state too: without this, `(trap "..." EXIT)' leaked
         ;; out and fired when the whole shell exited
-        (alexandria-copy-hash (shell-traps sh))))
+        (alexandria-copy-hash (shell-traps sh))
+        ;; ...and so are aliases, now that substitution happens in the parser
+        (alexandria-copy-hash (shell-aliases sh))))
 
 (defun restore-shell (sh snap)
-  (destructuring-bind (vars funcs pos cwd traps) snap
+  (destructuring-bind (vars funcs pos cwd traps aliases) snap
     (setf (shell-vars sh) vars
           (shell-functions sh) funcs
           (shell-positional sh) pos
-          (shell-traps sh) traps)
+          (shell-traps sh) traps
+          (shell-aliases sh) aliases)
     (when cwd (ignore-errors (change-directory cwd)))))
 
 (defun alexandria-copy-hash (ht)
@@ -1990,16 +1992,21 @@ temp file so large output can't deadlock on a bounded pipe buffer."
              (sb-posix:close fd)
              (let ((*standard-output*
                      (sb-sys:make-fd-stream 1 :output t :buffering :full)))
-               (unwind-protect
-                    ;; Like a subshell, `$(...)' is its own execution
-                    ;; environment: control flow ends the substitution, it
-                    ;; does not reach the enclosing loop or function.
-                    (handler-case (run sh ast)
-                      (shell-exit () nil)
-                      (func-return () nil)
-                      (loop-break () nil)
-                      (loop-continue () nil))
-                 (finish-output *standard-output*))
+               (let ((snap (snapshot-shell sh)))
+                 (unwind-protect
+                      ;; `$(...)' is its own execution ENVIRONMENT, not merely
+                      ;; its own control-flow scope. Catching the control-flow
+                      ;; conditions but sharing the state meant everything it
+                      ;; touched escaped: `x=1; echo $(x=2)' left x at 2, a
+                      ;; function redefined inside one replaced the outer one,
+                      ;; and a `cd' moved the whole shell.
+                      (handler-case (run sh ast)
+                        (shell-exit () nil)
+                        (func-return () nil)
+                        (loop-break () nil)
+                        (loop-continue () nil))
+                   (finish-output *standard-output*)
+                   (restore-shell sh snap)))
                ;; POSIX: remember this substitution's exit status so a command
                ;; made only of assignments can adopt it as its own $?.
                (setf (shell-last-cmdsub-status sh) (shell-last-status sh))))

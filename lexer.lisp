@@ -51,6 +51,39 @@
         (char (lexer-string lx) i)
         nil)))
 
+(defvar *alias-lookup* nil
+  "NIL, or a function (NAME) -> alias body string or NIL.
+
+The parser needs the shell's alias table but must not depend on the shell, so
+the executor installs a closure here. See EXPAND-ALIASES-AT-POINT.")
+
+(defun lx-splice (lx text)
+  "Insert TEXT at the current input position, to be scanned next.
+
+Alias substitution happens during tokenisation (POSIX 2.3.1), so the
+replacement has to go back through the lexer -- it may contain operators,
+reserved words, or several commands."
+  (setf (lexer-string lx)
+        (concatenate 'string text (subseq (lexer-string lx) (lexer-pos lx)))
+        (lexer-pos lx) 0
+        (lexer-len lx) (length (lexer-string lx))))
+
+(defun lx-next-plain-word (lx)
+  "Textually read the next blank-delimited word without consuming it.
+Returns (values word end-index), or NIL if the next thing is not a plain word.
+
+Used only for the trailing-blank rule, where a candidate for alias expansion
+has to be identified before the tokens ahead of it are scanned."
+  (let* ((s (lexer-string lx)) (n (lexer-len lx)) (i (lexer-pos lx)))
+    (loop while (and (< i n) (member (char s i) '(#\Space #\Tab))) do (incf i))
+    (let ((start i))
+      (loop while (and (< i n)
+                       (not (member (char s i)
+                                    '(#\Space #\Tab #\Newline #\; #\& #\| #\<
+                                      #\> #\( #\) #\' #\" #\`))))
+            do (incf i))
+      (when (> i start) (values (subseq s start i) i)))))
+
 (defun lx-eof-p (lx)
   (>= (lexer-pos lx) (lexer-len lx)))
 

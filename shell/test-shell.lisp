@@ -201,7 +201,16 @@ directly."
   (check "readonly-fatal" "readonly x=1; x=2 2>/dev/null; echo REACHED" "")
   (check-status "readonly-status" "readonly x=1; x=2 2>/dev/null; true" 1)
   (check "readonly-ok" "readonly x=1; echo $x" (format nil "1~%"))
-  (check "alias-basic" "alias g='echo aliased'; g" (format nil "aliased~%"))
+  ;; An alias takes effect for commands parsed AFTER its definition. On one
+  ;; line the whole list is parsed first, so `g' is still an ordinary word --
+  ;; bash agrees, and substituting at execution time got this wrong.
+  (check "alias-basic"
+         (format nil "alias g='echo aliased'~%g") (format nil "aliased~%"))
+  (check-status "alias-same-line" "alias g='echo aliased'; g 2>/dev/null" 127)
+  ;; The replacement is re-scanned, so it may contain operators.
+  (check "alias-pipeline"
+         (format nil "alias e='echo hi | wc -c'~%e | tr -d ' '")
+         (format nil "3~%"))
   (check "alias-selfref" "alias ls='ls -x'; alias ls" (format nil "alias ls='ls -x'~%"))
   (check "unalias" "alias q=x; unalias q; alias q 2>/dev/null; echo ok" (format nil "ok~%"))
   (check "read-reply" "printf 'hello there\\n' | { read; echo $REPLY; }"
